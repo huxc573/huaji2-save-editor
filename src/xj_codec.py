@@ -31,6 +31,38 @@ import xj_env  # noqa: E402
 
 HOST = os.path.join(HERE, "XJCodec32.exe")
 
+# 打包成 exe 后（PyInstaller onefile）：宿主 exe 不在 src/ 里，
+# 而是**平铺在 exe 旁边**或放在 dll/ 子目录（DLL 多的时候就丢里面）。
+HOST_SUBDIRS = ("", "dll", "DLL", "bin", "依赖DLL")
+
+
+def app_dir():
+    """程序所在目录（打包后 = exe 所在目录）。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return HERE
+
+
+def host_candidates():
+    out = []
+    env = os.environ.get("XJ_HOST")
+    if env:
+        out.append(env)
+    for sub in HOST_SUBDIRS:
+        out.append(os.path.join(app_dir(), sub, "XJCodec32.exe")
+                   if sub else os.path.join(app_dir(), "XJCodec32.exe"))
+    out.append(HOST)                      # 源码运行时的 src/XJCodec32.exe
+    out.append(os.path.abspath("XJCodec32.exe"))
+    return out
+
+
+def find_host():
+    for p in host_candidates():
+        if os.path.exists(p):
+            return p
+    return None
+
+
 # 明文 Ruby Marshal 4.8 的头
 MARSHAL_MAGIC = b"\x04\x08"
 
@@ -75,10 +107,14 @@ class CodecError(Exception):
 
 
 def host_path():
-    if not os.path.exists(HOST):
+    p = find_host()
+    if not p:
         raise CodecError(
-            "缺少 32 位宿主 %s\n请先运行： python tools/build_host.py" % HOST)
-    return HOST
+            "缺少 32 位宿主 XJCodec32.exe\n"
+            "源码运行请先跑： python tools/build_host.py\n"
+            "打包运行请确认它和 exe 放在一起（或放 dll/ 子目录）\n"
+            "找过这些地方：\n  " + "\n  ".join(host_candidates()[:4]))
+    return p
 
 
 def _run(args, timeout=300, cwd=None):

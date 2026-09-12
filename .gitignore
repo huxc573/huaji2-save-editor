@@ -38,6 +38,13 @@ _commit_msg.txt
 
 # 本地检查输出
 _*.txt
+
+# 一次性工具的输出（解密副本、脚本反编译、探针日志……都能重跑生成）
+tools/_*
+csv/
+error.log
+selftest_result.txt
+last.txt
 _check*.txt
 
 # 逆向/调试产物：体积大、可重跑生成（含解出来的游戏明文与脚本，不入库）

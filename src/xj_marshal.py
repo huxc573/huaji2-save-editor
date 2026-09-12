@@ -25,7 +25,8 @@ __all__ = [
     'ExtNode', 'ClassNode', 'ModuleNode',
     'encode_long', 'encode_fixnum', 'encode_string', 'encode_bignum', 'reencode',
     'encode_integer', 'fits_fixnum', 'FIXNUM_MIN', 'FIXNUM_MAX',
-    'serialize', 'serialize_with_header', 'w_symbol_bytes',
+    'serialize', 'serialize_with_header', 'serialize_doc', 'w_symbol_bytes',
+    'emit_sym', 'sym_body',
 ]
 
 
@@ -783,6 +784,46 @@ def w_symbol_bytes(name):
     return b':' + encode_long(len(b)) + b
 
 
+def sym_body(name, symtab=None):
+    """符号本体：第一次写全量（':' + 名字），之后再遇到写符号链接（';' + 编号）。"""
+    b = name if isinstance(name, bytes) else name.encode('utf-8')
+    if symtab is None:
+        return b':' + encode_long(len(b)) + b
+    idx = symtab.get(b)
+    if idx is not None:
+        return b';' + encode_long(idx)
+    symtab[b] = len(symtab)
+    return b':' + encode_long(len(b)) + b
+
+
+def emit_sym(name, symtab=None):
+    """按 Ruby 的规则写一个符号（ivar 名 / 类名这类"符号位置"）。
+
+    * 第一次出现 → 写全量 ``:`` + 名字；
+    * 之后出现   → 写符号链接 ``;`` + 编号；
+    * **只有定义那次**要带 `I` 包装（非 ASCII 名字）：
+
+          I  <符号>  <ivar 个数=1>  :E  T
+
+    ``:E => true`` 是 Marshal 用来标记"这个符号是 UTF-8"的；链接（``;N``）不带，
+    因为符号表里已经有它的编码了（实测：存档里 225 个 ``I:``，0 个真正的 ``I;``）。
+    **漏掉这个包装**会把中文 ivar 变成 ASCII-8BIT 符号 —— Ruby 里跟 UTF-8 的
+    ``:@体质`` 是**两个不同的符号**，游戏读档后会静默地看不见这些属性。
+
+    ⚠ 别和 IVarNode 分支撞车：如果本来就解析成 ``IVarNode(inner=SymbolNode)``
+    （`I :x {…}` 作为**值**出现），那层包装由 IVarNode 分支负责，这里写本体。
+    """
+    b = name if isinstance(name, bytes) else name.encode('utf-8')
+    if symtab is not None:
+        idx = symtab.get(b)
+        if idx is not None:
+            return b';' + encode_long(idx)
+    body = sym_body(b, symtab)
+    if any(x >= 0x80 for x in b):
+        return b'I' + body + encode_long(1) + emit_sym(b'E', symtab) + b'T'
+    return body
+
+
 # 会占用「对象编号」的节点类型。Ruby 的规则：除 nil / true / false / Fixnum /
 # Symbol 之外，一切都占一个编号（含 String / Array / Hash / Object / Struct /
 # Float / Bignum / UserDef / UserMarshal / 带 ivar 包装的对象）。
@@ -791,7 +832,7 @@ NUMBERED_NODES = (StrNode, ArrayNode, HashNode, ObjNode, StructNode,
                   ClassNode, ModuleNode)
 
 
-def serialize(node, depth=0, table=None, base=None):
+def serialize(node, depth=0, table=None, base=None, symtab=None):
     """把一个节点序列化成 Marshal 字节（不含 04 08 版本头）。
 
     两种模式：
@@ -831,7 +872,7 @@ def serialize(node, depth=0, table=None, base=None):
                 raise MarshalError('对象链接 %d 没有目标，无法展开' % node.index)
             if 0 <= t.gidx < base:
                 return b'@' + encode_long(t.gidx)
-            return serialize(t, depth + 1, table, base)
+            return serialize(t, depth + 1, table, base, symtab)
 
     if isinstance(node, NilNode):
         if isinstance(node.value, bool):
@@ -848,60 +889,84 @@ def serialize(node, depth=0, table=None, base=None):
     if isinstance(node, FloatNode):
         return b'f' + encode_long(len(node.raw)) + node.raw
     if isinstance(node, SymbolNode):
-        return w_symbol_bytes(node.raw)
+        return emit_sym(node.raw, symtab)
     if isinstance(node, StrNode):
         body = b'"' + encode_long(len(node.data)) + node.data
         if node.cls is not None:
-            return b'C' + w_symbol_bytes(node.cls) + body
+            return b'C' + emit_sym(node.cls, symtab) + body
         return body
     if isinstance(node, ArrayNode):
         out = [b'[', encode_long(len(node.items))]
         for it in node.items:
-            out.append(serialize(it, depth + 1, table, base))
+            out.append(serialize(it, depth + 1, table, base, symtab))
         body = b''.join(out)
         if node.cls is not None:
-            return b'C' + w_symbol_bytes(node.cls) + body
+            return b'C' + emit_sym(node.cls, symtab) + body
         return body
     if isinstance(node, HashNode):
         out = [b'}' if node.default is not None else b'{',
                encode_long(len(node.pairs))]
         for k, v in node.pairs:
-            out.append(serialize(k, depth + 1, table, base))
-            out.append(serialize(v, depth + 1, table, base))
+            out.append(serialize(k, depth + 1, table, base, symtab))
+            out.append(serialize(v, depth + 1, table, base, symtab))
         if node.default is not None:
-            out.append(serialize(node.default, depth + 1, table, base))
+            out.append(serialize(node.default, depth + 1, table, base, symtab))
         body = b''.join(out)
         if node.cls is not None:
-            return b'C' + w_symbol_bytes(node.cls) + body
+            return b'C' + emit_sym(node.cls, symtab) + body
         return body
     if isinstance(node, (ObjNode, StructNode)):
         tag = b'o' if isinstance(node, ObjNode) else b'S'
-        out = [tag, w_symbol_bytes(node.cls), encode_long(len(node.ivars))]
+        out = [tag, emit_sym(node.cls, symtab), encode_long(len(node.ivars))]
         for k, v in node.ivars:
-            out.append(w_symbol_bytes(k))
-            out.append(serialize(v, depth + 1, table, base))
+            out.append(emit_sym(k, symtab))
+            out.append(serialize(v, depth + 1, table, base, symtab))
         return b''.join(out)
     if isinstance(node, (ClassNode, ModuleNode)):
         tag = b'm' if isinstance(node, ModuleNode) else b'c'
         return tag + encode_long(len(node.name)) + node.name
     if isinstance(node, UserDefNode):
-        return (b'u' + w_symbol_bytes(node.cls) + encode_long(len(node.data))
+        return (b'u' + emit_sym(node.cls, symtab) + encode_long(len(node.data))
                 + node.data)
     if isinstance(node, UserMarshalNode):
-        return b'U' + w_symbol_bytes(node.cls) + serialize(node.inner, depth + 1,
-                                                           table, base)
+        return b'U' + emit_sym(node.cls, symtab) + serialize(
+            node.inner, depth + 1, table, base, symtab)
     if isinstance(node, IVarNode):
-        out = [b'I', serialize(node.inner, depth + 1, table, base),
-               encode_long(len(node.ivars))]
+        inner = node.inner
+        if isinstance(inner, SymbolNode):
+            # 'I :中文符号 { :E => true }' —— 包装由这里负责，符号本体不重复包
+            body = sym_body(inner.raw, symtab)
+        else:
+            body = serialize(inner, depth + 1, table, base, symtab)
+        out = [b'I', body, encode_long(len(node.ivars))]
         for k, v in node.ivars:
-            out.append(w_symbol_bytes(k))
-            out.append(serialize(v, depth + 1, table, base))
+            out.append(emit_sym(k, symtab))
+            out.append(serialize(v, depth + 1, table, base, symtab))
         return b''.join(out)
     if isinstance(node, LinkNode):
         if node.target is None:
             raise MarshalError('对象链接 %d 没有目标，无法展开' % node.index)
-        return serialize(node.target, depth + 1, table, base)
+        return serialize(node.target, depth + 1, table, base, symtab)
     raise TypeError('不支持的节点类型 %r' % type(node).__name__)
+
+
+def serialize_doc(objects, symlink=True):
+    """把**整份文档**（多个顶层对象）重新序列化成明文。
+
+    * ``objects``：``parse_stream()`` 返回的列表（每个元素有 ``node``）。
+    * 每个顶层对象各带 ``04 08`` 头、各有**独立**的对象表 / 符号表。
+    * ``table={}, base=0``：整条对象按 Ruby 的规则重新编号，重复出现的对象发
+      ``@N`` 引用 —— 这样即使中间**新增/删除了对象**（例如往背包里塞一件装备），
+      后面所有引用也不会错位。这是"能加减东西"的关键。
+    * ``symlink=True``：符号也复用（第一次全量、之后 ``;N``），
+      不改变语义，但能让输出和原文件逐字节一致（``tools/test_roundtrip.py``）。
+    """
+    out = []
+    for o in objects:
+        node = o["node"] if isinstance(o, dict) else o
+        out.append(b'\x04\x08' + serialize(node, table={}, base=0,
+                                          symtab={} if symlink else None))
+    return b''.join(out)
 
 
 def serialize_with_header(node):

@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""《画迹2：缘起凡尘》存档工具 v0.3 —— tkinter 界面（界面参照画迹1 的编辑器）。
+"""《画迹2：缘起凡尘》存档工具 v0.4 —— tkinter 界面（界面参照画迹1 的编辑器）。
 
 页签（顺序与画迹1 对齐）：
-  1. 概览 / 快捷修改      存档概况 + 金钱/步数/次数 + 防作弊校验一键修复
-  2. 全部解析数据         全局搜索 + 树形浏览（懒加载）+ 右侧详情 + 右键菜单
-  3. 角色 / 属性          等级/HP/MP/名字 + 中文五维（Game_Actor_Attr）+ 技能装备
-  4. 队伍 / 物品          金钱/步数/成员 + 物品（名字取自 Data\\Items.rvdata2）
-  5. 开关 / 变量          双击切换 / 修改
-  6. 数据表 (CSV)         Data\\*.rvdata2 → CSV（物品/武器/防具/技能/状态/角色/职业/敌人）
-  7. 说明 / 机制          密钥、存档结构、防作弊、数据表说明
-  8. 更新日志             CHANGELOG.md
+  1. 概览 / 快捷修改      存银/步数/次数 + 防作弊体检（一键按游戏规则修复 + 清作弊标记）
+  2. 全部解析数据         全局搜索 + 树形浏览（懒加载）+ 右侧详情 + 右键菜单（中文注释）
+  3. 角色 / 属性          等级/HP/MP/名字/经验 + 中文五维（Game_Actor_Attr）+ 技能装备
+  4. 背包 / 物品          4 页 × 20 格：改数量 / 清空 / 添加（自动同步物品计数校验）
+  5. 召唤兽               等级·气血·五维·六项资质·忠诚·寿命 + 常用预设
+  6. 开关 / 变量          双击切换 / 修改（带游戏自己的名字注释）
+  7. 数据表 (CSV)         Data\\*.rvdata2 → CSV（物品/武器/防具/技能/状态/角色/职业/敌人）
+  8. 说明 / 机制          密钥、存档结构、防作弊、数据表说明
+  9. 更新日志             CHANGELOG.md
 
 启动：python src/xj_viewer.py [存档路径] [--selftest]
 """
@@ -27,18 +28,40 @@ try:
 except Exception:
     pass
 
+
+def _setup_tcl_env():
+    """打包成 exe 后 Tcl/Tk 的脚本库要显式指路。
+
+    PyInstaller 不会自动收集它，得在打包时 `--add-data` 带上，
+    运行时用 `TCL_LIBRARY` / `TK_LIBRARY` 指到解包目录（sys._MEIPASS）。
+    必须在 `import tkinter` **之前**调用。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    for sub, env in (("tcl8.6", "TCL_LIBRARY"), ("tk8.6", "TK_LIBRARY")):
+        p = os.path.join(base, "tcl", sub)
+        if os.path.isdir(p):
+            os.environ[env] = p
+
+
+_setup_tcl_env()
+
 import tkinter as tk                              # noqa: E402
 from tkinter import filedialog, messagebox, ttk  # noqa: E402
 
 import xj_codec   # noqa: E402
 import xj_db      # noqa: E402
 import xj_env     # noqa: E402
+import xj_game    # noqa: E402
 import xj_marshal as M  # noqa: E402
 import xj_model   # noqa: E402
+import xj_nodes   # noqa: E402
+import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.3"
+VERSION = "v0.4"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -71,7 +94,13 @@ HELP_HEAD = """%s %s
 
 HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
   界面、快捷键、右键菜单、"导出报告/导出明文"都沿用**画迹1 编辑器**的习惯，
-  用过的直接上手；新增了「数据表 (CSV)」页（把 Data\\*.rvdata2 转成 CSV 查表）。
+  用过的直接上手。v0.4 新增了 4 个能改玩法数据的页：
+      「背包 / 物品」（4 页×20 格，改数量/清空/加物品）
+      「召唤兽」（等级·气血·魔法·六项资质·忠诚·寿命·成长·五维）
+      「角色 / 属性」里的"获得经验"
+      「概览 / 快捷修改」里的"防作弊体检"（一键修复 + 清除作弊标记）
+  另外「数据表 (CSV)」页把 Data\\*.rvdata2 转成 CSV 查表。
+  独立发行版：dist\\画迹2存档工具v0.4.exe（XJCodec32.exe 要挨着它放）。
 
 一、这个游戏的存档
   <游戏根>\\save.rvdata2（手动存档）
@@ -93,11 +122,19 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
   角色的五维/潜能是中文实例变量，放在 Game_Actor.@attr（类 Game_Actor_Attr）：
       @体质 @法力 @力量 @耐力 @敏捷 @潜能 @人气 @贡献 @体力 @活力
 
-四、防作弊（重要）
-  金钱等关键数值被 Lock 包着：
-      @master = @value * 91 + 45 + seed / 800    （seed = $game_system.seeds[:shield]）
-  游戏读的时候会验算，不一致就 msgbox '游戏异常！' 然后 exit。
-  本工具改金钱时自动重算 @master；「检查并修复防作弊校验」可扫描全档一次修好。
+四、防作弊（重要，游戏查三重）
+  1) Lock 校验和：存银（游戏里就叫这个名，就是金钱）等关键数值被 Lock 包着：
+        @master = @value * 91 + 45 + seed / 800   （seed = $game_system.seeds[:shield]）
+     游戏读的时候会验算，不一致就 msgbox '游戏异常！' 然后 exit。
+     本工具改存银时自动重算 @master。
+  2) 周期检查（$jiance）：游戏每 300 帧（约 5 秒）查一次
+        角色等级 > 60 / 出战召唤兽等级 > 65 / 存银 > 30,000,000 /
+        仓库页号 > 3 / 五维总点数 > 等级*10+500
+     超了就置 @cheated = 当前帧号；之后游戏会弹「存档异常！」并退出。
+     ⇒ 用「概览 / 快捷修改」页的「体检 → 一键按规则修复 → 清除作弊标记」。
+  3) 物品计数校验（Change）：$game_system.security[:items] 记着
+     "这件物品累计获得过几个"（逐位数字 AES-ECB 加密，密钥 admin_1941344749）。
+     本工具改背包数量/加物品时会自动一起改对；也能手动「同步物品计数校验」。
 
 五、Data 目录下的 .rvdata2
   **全都被加密**（与存档同一套 main.dll 加密，密钥 761205）。本工具直接解密＋解析，
@@ -110,9 +147,17 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
   Map / System / Scripts / Tilesets / Animations 不转（用处不大）。
 
 六、常用位置（第 2 页可以搜字段名直接跳过去）
-  :party    @gold 金钱（Lock） @actors 出战成员 @items 物品 @steps 步数
-  :actors   @data[角色id] → @name @level @hp @mp @attr(中文五维) @skills
+  :party    @gold 存银（Lock） @actors 出战成员 @items 背包 @steps 步数
+            @warehouse_page 仓库页号
+  :system   @security[:items] 物品计数校验 @cheated 作弊标记 @seeds 防作弊种子
+  :actors   @data[角色id] → @name @level @hp @mp @exp 经验 @attr(中文五维)
+            @babies 召唤兽（等级/气血/魔法/六项资质/忠诚/寿命/成长/五维）
   :switches @data[编号]      :variables @data[编号]
+
+七、背包怎么表示（想手改的人看）
+  格子号 = 页号*20 + 格内序号（游戏的道具菜单是 4 页×20 格）
+  @items[格子号] = [ 物品对象, 数量 ]     ← 物品对象里的 @id 才是物品 id
+  清空格子 = 把值置 nil（不要删 key，免得后面 @N 链接错位）。
 """
 
 HELP_TEXT = HELP_HEAD + HELP_BODY
@@ -137,6 +182,7 @@ class App(object):
 
         self.doc = None            # xj_model.Doc
         self.sv = None             # xj_save.SaveDoc（不是本作存档时为 None）
+        self.g = None              # xj_game.GameEditor（背包/召唤兽/防作弊）
         self.nodes = {}            # tree iid -> 节点
         self.loaded = set()        # 已展开过的 iid
         self.actor_rows = {}       # tree iid -> 角色节点
@@ -201,6 +247,7 @@ class App(object):
         self._tab_tree()
         self._tab_actor()
         self._tab_party()
+        self._tab_baby()
         self._tab_switch()
         self._tab_db()
         self._tab_help()
@@ -223,7 +270,9 @@ class App(object):
         self.var_steps = tk.StringVar()
         self.var_savecnt = tk.StringVar()
         self.var_battlecnt = tk.StringVar()
-        rows = [("金钱", self.var_gold, "Lock 包装：改值会同步重算 @master 校验和"),
+        rows = [("存银", self.var_gold,
+                 "游戏里就叫「存银」；Lock 包装，改值会同步重算 @master；"
+                 "上限 30,000,000"),
                 ("步数", self.var_steps, ""),
                 ("存档次数", self.var_savecnt, ""),
                 ("战斗次数", self.var_battlecnt, "")]
@@ -241,6 +290,32 @@ class App(object):
         self.var_lock = tk.StringVar(value="防作弊校验：—")
         ttk.Label(g, textvariable=self.var_lock).grid(
             row=len(rows) + 1, column=0, columnspan=3, sticky="w")
+
+        # ---- 防作弊体检（v0.4：游戏每 300 帧会自己查一遍）
+        h = ttk.LabelFrame(f, text="防作弊体检（游戏自己的检查规则）", padding=10)
+        h.pack(fill="both", expand=True, pady=8)
+        ttk.Label(h, text="游戏每 300 帧检查一次：角色等级 ≤ 60、出战召唤兽等级 ≤ 65、"
+                          "存银 ≤ 30,000,000、仓库页号 ≤ 3、五维总点数 ≤ 等级*10+500。\n"
+                          "越界就把存档标记成「作弊」（@cheated），之后 20 分钟弹警告、"
+                          "25 分钟强制退出。",
+                  foreground="#555", justify="left").pack(anchor="w")
+        self.tv_guard = ttk.Treeview(h, columns=("a", "b", "c", "d"),
+                                     show="headings", height=9)
+        for c, w, t in (("a", 240, "项目"), ("b", 130, "当前值"),
+                        ("c", 130, "上限/记录值"), ("d", 420, "说明")):
+            self.tv_guard.heading(c, text=t)
+            self.tv_guard.column(c, width=w, anchor="w")
+        self.tv_guard.pack(fill="both", expand=True, pady=6)
+        gbar = ttk.Frame(h)
+        gbar.pack(fill="x")
+        ttk.Button(gbar, text="体检",
+                   command=self.guard_check).pack(side="left")
+        ttk.Button(gbar, text="一键按规则修复",
+                   command=self.guard_fix).pack(side="left", padx=6)
+        ttk.Button(gbar, text="清除作弊标记",
+                   command=self.guard_clear).pack(side="left", padx=6)
+        ttk.Button(gbar, text="同步物品计数校验",
+                   command=self.guard_resync).pack(side="left", padx=6)
 
     # -------------------------------------------------- 2 全部解析数据
     def _tab_tree(self):
@@ -339,8 +414,9 @@ class App(object):
         g = ttk.LabelFrame(mid, text="基础字段", padding=8)
         g.pack(side="left", fill="y")
         self.actor_vars = {}
-        base = [("@name", "名字"), ("@level", "等级"), ("@hp", "HP"), ("@mp", "MP"),
-                ("@tp", "TP"), ("@limit_exp", "升级所需经验")]
+        base = [("@name", "名字"), ("@level", "等级（上限 60）"),
+                ("@hp", "HP"), ("@mp", "MP"), ("@tp", "TP"),
+                ("@exp", "获得经验"), ("@limit_exp", "升级所需经验")]
         for i, (k, label) in enumerate(base):
             ttk.Label(g, text=label, width=12).grid(row=i, column=0, sticky="w", pady=2)
             var = tk.StringVar()
@@ -362,8 +438,11 @@ class App(object):
         bar = ttk.Frame(f)
         bar.pack(fill="x")
         ttk.Button(bar, text="应用修改", command=self.apply_actor).pack(side="left")
-        ttk.Button(bar, text="满级(99)",
+        ttk.Button(bar, text="满级(60)",
                    command=lambda: self.actor_preset("maxlv")).pack(side="left", padx=6)
+        ttk.Button(bar, text="经验 +10000",
+                   command=lambda: self.actor_preset("exp")
+                   ).pack(side="left", padx=6)
         ttk.Button(bar, text="回满 HP/MP",
                    command=lambda: self.actor_preset("heal")).pack(side="left", padx=6)
         ttk.Button(bar, text="属性全 +10",
@@ -380,27 +459,234 @@ class App(object):
         tk, ttk = self.tk, self.ttk
         f = ttk.Frame(self.nb, padding=8)
         self.tab_party = f
-        self.nb.add(f, text="队伍 / 物品")
+        self.nb.add(f, text="背包 / 物品")
 
         self.var_party = tk.StringVar()
         ttk.Label(f, textvariable=self.var_party, font=("Microsoft YaHei UI", 10)
                   ).pack(anchor="w", pady=(0, 6))
 
-        ttk.Label(f, text="队伍物品（名字取自 Data\\Items.rvdata2）").pack(anchor="w")
-        cols = ("id", "name", "count")
-        self.tv_pack = ttk.Treeview(f, columns=cols, show="headings", height=14)
-        for c, w, t in (("id", 70, "物品ID"), ("name", 320, "名称"),
-                        ("count", 90, "数量")):
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="背包页：").pack(side="left")
+        self.var_bag_page = tk.IntVar(value=0)
+        for p in range(xj_game.MAX_PACK_PAGE):
+            ttk.Radiobutton(bar, text="背包%d" % (p + 1), value=p,
+                            variable=self.var_bag_page,
+                            command=self.fill_party).pack(side="left", padx=2)
+        ttk.Label(bar, text="　种类：").pack(side="left")
+        self.var_bag_kind = tk.StringVar(value="Items")
+        for key, _iv, cn, _db in xj_game.KINDS:
+            ttk.Radiobutton(bar, text=cn, value=key,
+                            variable=self.var_bag_kind,
+                            command=self.fill_party).pack(side="left", padx=2)
+        ttk.Button(bar, text="刷新", command=self.fill_party).pack(side="right")
+
+        ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；空格子双击也可以直接填物品 id"
+                  ).pack(anchor="w", pady=(6, 0))
+        cols = ("slot", "idx", "id", "name", "count")
+        self.tv_pack = ttk.Treeview(f, columns=cols, show="headings", height=15)
+        for c, w, t in (("slot", 70, "槽号"), ("idx", 60, "格"),
+                        ("id", 70, "物品ID"), ("name", 300, "名称"),
+                        ("count", 80, "数量")):
             self.tv_pack.heading(c, text=t)
             self.tv_pack.column(c, width=w, anchor="w")
         vs = ttk.Scrollbar(f, orient="vertical", command=self.tv_pack.yview)
         self.tv_pack.configure(yscrollcommand=vs.set)
         vs.pack(side="right", fill="y")
         self.tv_pack.pack(fill="both", expand=True)
-        ttk.Button(f, text="刷新", command=self.fill_party).pack(anchor="w", pady=4)
-        ttk.Label(f, text="提示：改数量请到「全部解析数据」页搜 @items —— "
-                          "数值在 [数量, …] 数组的第 1 项",
-                  foreground="#777").pack(anchor="w")
+        self.tv_pack.bind("<Double-1>", lambda e: self.bag_edit())
+
+        act = ttk.Frame(f)
+        act.pack(fill="x", pady=4)
+        ttk.Label(act, text="物品 id：").pack(side="left")
+        self.var_bag_id = tk.StringVar()
+        ttk.Entry(act, textvariable=self.var_bag_id, width=8).pack(side="left")
+        ttk.Label(act, text="数量：").pack(side="left", padx=(8, 0))
+        self.var_bag_cnt = tk.StringVar(value="1")
+        ttk.Entry(act, textvariable=self.var_bag_cnt, width=6).pack(side="left")
+        ttk.Button(act, text="改数量",
+                   command=self.bag_set_count).pack(side="left", padx=6)
+        ttk.Button(act, text="添加物品",
+                   command=self.bag_add).pack(side="left", padx=6)
+        ttk.Button(act, text="清空格子",
+                   command=self.bag_clear).pack(side="left", padx=6)
+
+        self.var_bag_note = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.var_bag_note, foreground="#555",
+                  justify="left", wraplength=1100).pack(anchor="w")
+
+    # -------------------------------------------------- 4.5 召唤兽
+    def _tab_baby(self):
+        tk, ttk = self.tk, self.ttk
+        f = ttk.Frame(self.nb, padding=8)
+        self.tab_baby = f
+        self.nb.add(f, text="召唤兽")
+
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Label(top, text="角色：").pack(side="left")
+        self.var_baby_actor = tk.StringVar()
+        self.cb_baby_actor = ttk.Combobox(top, textvariable=self.var_baby_actor,
+                                          state="readonly", width=24)
+        self.cb_baby_actor.pack(side="left")
+        self.cb_baby_actor.bind("<<ComboboxSelected>>",
+                                lambda e: self.fill_baby_list())
+        ttk.Label(top, text="　召唤兽：").pack(side="left")
+        self.var_baby_sel = tk.StringVar()
+        self.cb_baby = ttk.Combobox(top, textvariable=self.var_baby_sel,
+                                    state="readonly", width=24)
+        self.cb_baby.pack(side="left")
+        self.cb_baby.bind("<<ComboboxSelected>>", lambda e: self.load_baby())
+        ttk.Label(top, text="　（游戏里\"携带\"的那几只，上限 65 级）",
+                  foreground="#777").pack(side="left")
+
+        cols = ("k", "v", "note")
+        self.tv_baby = ttk.Treeview(f, columns=cols, show="headings", height=13)
+        for c, w, t in (("k", 200, "字段"), ("v", 120, "当前值"),
+                        ("note", 460, "说明")):
+            self.tv_baby.heading(c, text=t)
+            self.tv_baby.column(c, width=w, anchor="w")
+        self.tv_baby.pack(fill="both", expand=True, pady=6)
+        self.tv_baby.bind("<<TreeviewSelect>>", lambda e: self.baby_pick())
+
+        edit = ttk.Frame(f)
+        edit.pack(fill="x")
+        ttk.Label(edit, text="改：").pack(side="left")
+        self.var_baby_key = tk.StringVar()
+        ttk.Entry(edit, textvariable=self.var_baby_key, width=12,
+                  state="readonly").pack(side="left")
+        self.var_baby_val = tk.StringVar()
+        ttk.Entry(edit, textvariable=self.var_baby_val, width=14).pack(side="left")
+        ttk.Button(edit, text="应用", command=self.apply_baby).pack(side="left",
+                                                                   padx=6)
+        for txt, what in (("满级(65)", "maxlv"), ("回满气血/魔法", "heal"),
+                          ("忠诚满", "loyalty"), ("寿命满", "life"),
+                          ("六项资质+100", "qual"), ("五维+10", "five")):
+            ttk.Button(edit, text=txt,
+                       command=lambda w=what: self.baby_preset(w)
+                       ).pack(side="left", padx=3)
+
+        self.txt_baby = tk.Text(f, height=6, wrap="word",
+                                font=("Microsoft YaHei UI", 10))
+        self.txt_baby.pack(fill="both", expand=True, pady=(6, 0))
+
+    def fill_babies(self):
+        """刷角色下拉框（召唤兽列表依赖它）。"""
+        if not self.sv or self.g is None:
+            self.cb_baby_actor["values"] = []
+            return
+        names = []
+        for aid, a in self.sv.actors():
+            names.append("%s (#%d)" % (self.sv.actor_name(a) or "?", aid))
+        self.cb_baby_actor["values"] = names
+        if names and self.var_baby_actor.get() not in names:
+            self.var_baby_actor.set(names[0])
+        self.fill_baby_list()
+
+    def _baby_actor(self):
+        sel = self.var_baby_actor.get()
+        if not sel or not self.sv:
+            return None
+        try:
+            aid = int(sel.split("#")[-1].rstrip(")"))
+        except ValueError:
+            return None
+        for a_id, a in self.sv.actors():
+            if a_id == aid:
+                return a
+        return None
+
+    def fill_baby_list(self):
+        self.baby_rows = []
+        a = self._baby_actor()
+        if a is None or self.g is None:
+            self.cb_baby["values"] = []
+            return
+        self.baby_rows = self.g.babies(a)
+        names = []
+        for i, b in self.baby_rows:
+            tag = "（出战）" if self.g.active_baby(a) is b else ""
+            names.append("#%d %s%s" % (i, self.g.baby_name(b), tag))
+        self.cb_baby["values"] = names
+        if names:
+            self.var_baby_sel.set(names[0])
+            self.load_baby()
+        else:
+            self.var_baby_sel.set("")
+            self.tv_baby.delete(*self.tv_baby.get_children())
+
+    def _baby(self):
+        sel = self.var_baby_sel.get()
+        for i, b in self.baby_rows:
+            if sel.startswith("#%d " % i):
+                return b
+        return None
+
+    def load_baby(self):
+        b = self._baby()
+        self.tv_baby.delete(*self.tv_baby.get_children())
+        self.txt_baby.delete("1.0", "end")
+        if b is None or self.g is None:
+            return
+        for key, label, _path, _t in xj_game.GameEditor.BABY_FIELDS:
+            v = self.g.baby_value(b, key)
+            self.tv_baby.insert("", "end", iid="b_%s" % key,
+                                values=(label, "" if v is None else v, key))
+        sk = "、".join("#%d %s" % (i, nm) for i, nm in self.g.baby_skills(b))
+        self.txt_baby.insert("1.0", "\n".join([
+            "召唤兽：%s（@attr.@name = %s）"
+            % (self.g.baby_name(b), self.g.baby_name(b)),
+            "已学技能：%s" % (sk or "（无）"),
+            "等级/忠诚/寿命/成长：%s / %s / %s / %s"
+            % (self.g.baby_value(b, "level"), self.g.baby_value(b, "loyalty"),
+               self.g.baby_value(b, "life"), self.g.baby_value(b, "grow")),
+            "提示：游戏的周期检查只看\"当前出战那只\"的等级（>65 算作弊），"
+            "所以这里所有召唤兽都别超过 65 级。",
+        ]))
+        kids = self.tv_baby.get_children()
+        if kids:
+            self.tv_baby.selection_set(kids[0])
+            self.baby_pick()
+
+    def baby_pick(self):
+        sel = self.tv_baby.selection()
+        if not sel:
+            return
+        vals = self.tv_baby.item(sel[0], "values")
+        self.var_baby_key.set(vals[2])
+        self.var_baby_val.set(vals[1])
+
+    def apply_baby(self):
+        b = self._baby()
+        if b is None or self.g is None:
+            return
+        key = self.var_baby_key.get().strip()
+        raw = self.var_baby_val.get().strip()
+        if not key or raw == "":
+            messagebox.showinfo("提示", "先在上面选一个字段并填值。", parent=self.root)
+            return
+        try:
+            self.g.set_baby(b, key, float(raw) if "." in raw else int(raw, 0))
+        except Exception as e:
+            messagebox.showerror("修改失败", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.load_baby()
+        self.set_status("召唤兽「%s」的 %s 已改" % (self.g.baby_name(b), key))
+
+    def baby_preset(self, what):
+        b = self._baby()
+        if b is None or self.g is None:
+            return
+        try:
+            did = self.g.baby_preset(b, what)
+        except Exception as e:
+            messagebox.showerror("修改失败", human(str(e)), parent=self.root)
+            return
+        if did:
+            self.mark_dirty()
+            self.load_baby()
+            self.set_status("召唤兽预设：%s" % "、".join(did))
 
     # -------------------------------------------------- 5 开关 / 变量
     def _tab_switch(self):
@@ -411,23 +697,30 @@ class App(object):
 
         lf = ttk.Frame(f)
         lf.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        ttk.Label(lf, text="开关（双击切换）").pack(anchor="w")
-        self.tv_sw = ttk.Treeview(lf, columns=("i", "v"), show="headings", height=20)
+        ttk.Label(lf, text="开关（双击切换）—— 本作只有 3 个，名字来自游戏脚本"
+                  ).pack(anchor="w")
+        self.tv_sw = ttk.Treeview(lf, columns=("i", "v", "n"),
+                                  show="headings", height=20)
         self.tv_sw.heading("i", text="编号")
         self.tv_sw.heading("v", text="值")
-        self.tv_sw.column("i", width=80, anchor="w")
-        self.tv_sw.column("v", width=90, anchor="w")
+        self.tv_sw.heading("n", text="名字 / 说明")
+        self.tv_sw.column("i", width=60, anchor="w")
+        self.tv_sw.column("v", width=60, anchor="w")
+        self.tv_sw.column("n", width=280, anchor="w")
         self.tv_sw.pack(fill="both", expand=True)
         self.tv_sw.bind("<Double-1>", lambda e: self.sw_toggle())
 
         rf = ttk.Frame(f)
         rf.pack(side="left", fill="both", expand=True)
         ttk.Label(rf, text="变量（双击修改）").pack(anchor="w")
-        self.tv_va = ttk.Treeview(rf, columns=("i", "v"), show="headings", height=20)
+        self.tv_va = ttk.Treeview(rf, columns=("i", "v", "n"),
+                                  show="headings", height=20)
         self.tv_va.heading("i", text="编号")
         self.tv_va.heading("v", text="值")
-        self.tv_va.column("i", width=80, anchor="w")
-        self.tv_va.column("v", width=140, anchor="w")
+        self.tv_va.heading("n", text="名字 / 说明")
+        self.tv_va.column("i", width=60, anchor="w")
+        self.tv_va.column("v", width=90, anchor="w")
+        self.tv_va.column("n", width=280, anchor="w")
         self.tv_va.pack(fill="both", expand=True)
         self.tv_va.bind("<Double-1>", lambda e: self.va_edit())
 
@@ -623,6 +916,7 @@ class App(object):
                 self.sv = None
         except Exception:
             self.sv = None            # 不是本作存档：只保留"数据树"功能
+        self.sync_editor()
         try:
             open(LAST_TXT, "w", encoding="utf-8").write(path)
         except OSError:
@@ -654,6 +948,7 @@ class App(object):
             self.sv = xj_save.SaveDoc(doc=self.doc)
         except Exception:
             self.sv = None
+        self.sync_editor()
         self.clear_dirty()
         self.refresh_panels()
         messagebox.showinfo("保存", "已写回：\n%s\n\n原文件已备份为 %s.bak.<时间>"
@@ -667,7 +962,8 @@ class App(object):
         """
         bad = []
         for step, fn in (("概览", self.fill_info), ("数据树", self.fill_tree),
-                         ("角色", self.fill_actors), ("队伍/物品", self.fill_party),
+                         ("角色", self.fill_actors), ("背包", self.fill_party),
+                         ("召唤兽", self.fill_babies),
                          ("开关/变量", self.fill_switches),
                          ("环境信息", self.refresh_env)):
             try:
@@ -676,6 +972,10 @@ class App(object):
                 bad.append(step)
                 self.err("刷新「%s」失败：%s" % (step, human(str(e))))
         return bad
+
+    def sync_editor(self):
+        """sv 变了（载入/保存）就重建 GameEditor。"""
+        self.g = xj_game.GameEditor(self.sv) if self.sv else None
 
     def export_report(self):
         if not self.doc:
@@ -730,7 +1030,8 @@ class App(object):
                                             "只有「全部解析数据」页可用）")
             return
         L = self.sv.summary_lines()
-        L += ["", "金钱 = %s　步数 = %s" % (self.sv.gold(), self.sv.steps()),
+        L += ["", "存银 = %s（上限 %d）　步数 = %s"
+              % (self.sv.gold(), xj_game.MAX_GOLD, self.sv.steps()),
               "存档次数 = %s　战斗次数 = %s"
               % (self.sv.sys_get("@save_count"), self.sv.sys_get("@battle_count")),
               "开关/变量 = %d / %d" % self.sv.counts()]
@@ -748,6 +1049,18 @@ class App(object):
         self.var_lock.set("防作弊校验：%s"
                           % ("正常" if not bad
                              else "不一致 %d 处，点右边按钮修复" % len(bad)))
+        if self.g:
+            ch = M.value_of(xj_save._deref(
+                xj_save.ivar(self.sv.section("system"), "@cheated")))
+            L2 = ("作弊标记 @cheated = %r" % (ch,))
+            if ch:
+                L2 += "　← 游戏已判定作弊：20 分钟后警告、25 分钟后强制退出，" \
+                      "点「清除作弊标记」"
+            L.append(L2)
+        try:
+            self.guard_check()
+        except Exception:
+            pass
 
     def apply_quick(self):
         if not self.sv:
@@ -784,25 +1097,84 @@ class App(object):
                             "检查到不一致 %d 处，已修复 %d 处。\n（记得点「保存修改」）"
                             % (len(bad), n), parent=self.root)
 
+    # ================================================== 防作弊体检
+    def guard_check(self):
+        """把游戏自己的检查规则跑一遍，结果显示在表里。"""
+        self.tv_guard.delete(*self.tv_guard.get_children())
+        if not self.g:
+            return
+        try:
+            rows = self.g.anti_cheat_report()
+        except Exception as e:
+            self.err(e)
+            return
+        for name, cur, limit, bad, why in rows:
+            self.tv_guard.insert("", "end", values=(
+                name, cur, limit, ("❌ " + why) if bad else why))
+        n_bad = len([r for r in rows if r[3]])
+        self.set_status("防作弊体检：%d 项，其中 %d 项有问题%s"
+                        % (len(rows), n_bad,
+                           "（点「一键按规则修复」）" if n_bad else " ✔"))
+        return n_bad
+
+    def guard_fix(self):
+        if not self.g:
+            return
+        try:
+            done = self.g.fix_anti_cheat()
+        except Exception as e:
+            messagebox.showerror("修复失败", human(str(e)), parent=self.root)
+            return
+        if done:
+            self.mark_dirty()
+            self.refresh_panels()
+        self.guard_check()
+        messagebox.showinfo("防作弊体检",
+                            ("已处理：\n  " + "\n  ".join(done)) if done
+                            else "没有需要处理的。", parent=self.root)
+
+    def guard_clear(self):
+        if not self.g:
+            return
+        try:
+            done = self.g.clear_cheat_flag()
+        except Exception as e:
+            messagebox.showerror("操作失败", human(str(e)), parent=self.root)
+            return
+        if done:
+            self.mark_dirty()
+            self.fill_info()
+        self.guard_check()
+        messagebox.showinfo("清除作弊标记",
+                            ("已处理：\n  " + "\n  ".join(done)) if done
+                            else "存档里没有作弊标记（@cheated 已经是 false）。",
+                            parent=self.root)
+
+    def guard_resync(self):
+        if not self.g:
+            return
+        try:
+            n = self.g.resync_security()
+        except Exception as e:
+            messagebox.showerror("同步失败", human(str(e)), parent=self.root)
+            return
+        if n:
+            self.mark_dirty()
+        self.guard_check()
+        self.fill_party()
+        messagebox.showinfo("物品计数校验",
+                            "已把 %d 件物品的计数对齐到背包实际数量。" % n if n
+                            else "已经全部对得上。", parent=self.root)
+
     # ================================================== 2 数据树（懒加载）
     def _kids(self, node):
-        node = xj_save._deref(node)
-        kids = []
-        if isinstance(node, M.HashNode):
-            for k, v in node.pairs:
-                kids.append(("[%s]" % short(value_of(k), 40), v))
-        elif isinstance(node, M.ArrayNode):
-            for i, v in enumerate(node.items):
-                kids.append(("[%d]" % i, v))
-        elif isinstance(node, M.IVarNode):
-            if node.inner is not None:
-                kids.append(("（内容）", node.inner))
-            for name, v in node.ivars:
-                kids.append((name, v))
-        elif isinstance(node, (M.ObjNode, M.StructNode)):
-            for name, v in node.ivars:
-                kids.append((name, v))
-        return kids
+        """返回 [(显示名, 子节点, 中文说明), ...]。
+
+        以前 Hash 的键直接用 `value_of()`，而符号（SymbolNode）没有 `.value`，
+        于是满屏都是 `[None]`；现在走 `xj_nodes.children_of()`：
+        符号写成 `:system`，并且把 `xj_notes` 里的中文说明带出来。
+        """
+        return xj_nodes.children_of(node)
 
     def _add_stub(self, iid):
         node = self.nodes.get(iid)
@@ -843,12 +1215,15 @@ class App(object):
         if node is None:
             return
         kids = self._kids(node)
-        for n, (label, kid) in enumerate(kids[:limit]):
+        for n, row in enumerate(kids[:limit]):
+            label, kid, note = row[0], row[1], row[2]
             iid2 = "%s|%d" % (iid, n)
-            note = note_for_ivar(label) if label.startswith("@") else note_of(kid)
+            # 说明列：优先中文注释，没有就给节点类型（至少不是空白）
+            if not note:
+                note = xj_nodes.type_label(kid)
             self.tree.insert(iid, "end", iid=iid2, text=label,
-                             values=(kid.type if hasattr(kid, "type") else "?",
-                                     short(describe_value(kid)), note))
+                             values=(xj_nodes.type_label(kid),
+                                     short(xj_nodes.brief(kid, 60)), note))
             self.nodes[iid2] = kid
             self._add_stub(iid2)
         if len(kids) > limit:
@@ -949,12 +1324,12 @@ class App(object):
         node2 = node.target if isinstance(node, M.LinkNode) and node.target is not None else node
         if node2 is None:
             return
-        txt = str(describe_value(node2))
+        txt = str(xj_nodes.brief(node2, 200))
         if kw in txt.lower() or kw in path.lower():
-            out.append((path, getattr(node2, "type", "?"), short(txt, 60), top,
+            out.append((path, xj_nodes.type_label(node2), short(txt, 60), top,
                         path.split("|")[1:]))
-        for label, kid in self._kids(node2):
-            self._walk_search(kid, top, path + "|" + label, kw, out, budget,
+        for row in self._kids(node2):
+            self._walk_search(row[1], top, path + "|" + row[0], kw, out, budget,
                               depth + 1)
 
     def clear_search(self):
@@ -1024,7 +1399,10 @@ class App(object):
         if a is None or not self.sv:
             return
         for k, var in self.actor_vars.items():
-            v = self.sv.actor_field(a, k)
+            if k == "@exp":
+                v = self.g.exp(a)
+            else:
+                v = self.sv.actor_field(a, k)
             var.set("" if v is None else str(v))
         attrs = dict(self.sv.attr_items(a))
         for k, var in self.attr_vars.items():
@@ -1033,10 +1411,18 @@ class App(object):
         eq = "、".join("槽%d:%s#%s" % (i, "武器" if c == 0 else "防具", i2)
                        for i, c, i2 in self.sv.equips(a))
         L = ["名字：%s（存档 @name）" % self.sv.actor_name(a),
+             "等级 / 经验 / 升级所需：%s / %s / %s"
+             % (self.sv.actor_field(a, "@level"), self.g.exp(a),
+                self.g.limit_exp(a)),
+             "防作弊：五维总点数 %d（上限 = 等级*10+500 = %d）"
+             % (self.g.point_num(a),
+                (self.sv.actor_field(a, "@level") or 0) * 10 + 500),
              "已学技能：%s" % (sk or "（无）"),
              "装备：%s" % (eq or "（无）"),
              "五维/潜能：%s" % "、".join("%s=%s" % (k, v)
                                         for k, v in self.sv.attr_items(a))]
+        n = len(self.g.babies(a))
+        L.append("携带召唤兽：%d 只（见「召唤兽」页）" % n)
         self.txt_actor.delete("1.0", "end")
         self.txt_actor.insert("1.0", "\n".join(L))
 
@@ -1050,7 +1436,10 @@ class App(object):
                 raw = var.get().strip()
                 if raw == "":
                     continue
-                self.sv.set_actor_field(a, k, raw)
+                if k == "@exp":
+                    self.g.set_exp(a, int(raw, 0))
+                else:
+                    self.sv.set_actor_field(a, k, raw)
             for k, var in self.attr_vars.items():
                 raw = var.get().strip()
                 if raw == "":
@@ -1071,7 +1460,9 @@ class App(object):
             return
         try:
             if what == "maxlv":
-                self.sv.set_actor_field(a, "@level", 99)
+                self.sv.set_actor_field(a, "@level", xj_game.MAX_LEVEL_ACTOR)
+            elif what == "exp":
+                self.g.add_exp(a, 10000)
             elif what == "heal":
                 for k, v in (("@hp", 9999), ("@mp", 9999), ("@tp", 100)):
                     if self.sv.actor_field(a, k) is not None:
@@ -1090,14 +1481,116 @@ class App(object):
 
     # ================================================== 4 队伍 / 物品
     def fill_party(self):
+        """刷背包页（当前页 20 格 + 物品计数校验状态）。"""
         self.tv_pack.delete(*self.tv_pack.get_children())
-        if not self.sv:
+        if not self.sv or self.g is None:
             return
-        self.var_party.set("金钱 = %s　步数 = %s　出战成员 = %s"
+        page = self.var_bag_page.get()
+        kind = self.var_bag_kind.get()
+        self.var_party.set("存银 = %s　步数 = %s　出战成员 = %s　"
+                           "仓库页号 = %s"
                            % (self.sv.gold(), self.sv.steps(),
-                              self.sv.party_member_ids()))
-        for kid, nm, cnt in self.sv.item_rows():
-            self.tv_pack.insert("", "end", values=(kid, nm, cnt))
+                              self.sv.party_member_ids(),
+                              self.g.warehouse_page()))
+        rows = dict((r[0], r) for r in self.g.bag(kind, page))
+        for i in range(xj_game.PACK_PAGE_SIZE):
+            slot = self.g.slot_key(page, i)
+            r = rows.get(slot)
+            if r:
+                self.tv_pack.insert("", "end", iid="s%d" % slot,
+                                    values=(slot, i, r[3], r[4], r[5]))
+            else:
+                self.tv_pack.insert("", "end", iid="s%d" % slot,
+                                    values=(slot, i, "（空）", "", ""))
+        bad = [r for r in self.g.security_rows() if r[2] != r[3]]
+        note = ("物品计数校验（游戏自己的 `$game_system.security`）：%d 条记录%s"
+                % (len(self.g.security_rows()),
+                   "，有 %d 条和背包对不上（点「保存修改」前建议先跑一次「防作弊体检」）"
+                   % len(bad) if bad else "，全部对得上 ✓"))
+        self.var_bag_note.set(note)
+
+    # ------------------------------------------------ 背包操作
+    def _bag_sel(self):
+        sel = self.tv_pack.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在列表里点一格。", parent=self.root)
+            return None
+        return int(sel[0][1:])
+
+    def _bag_kind(self):
+        return self.var_bag_kind.get()
+
+    def bag_edit(self):
+        """双击：有东西就改数量，空的就按 id 框里的 id 加。"""
+        slot = self._bag_sel()
+        if slot is None:
+            return
+        kind = self._bag_kind()
+        exist = dict((r[0], r) for r in self.g.bag(kind, slot // xj_game.PACK_PAGE_SIZE))
+        if slot in exist:
+            self.bag_set_count()
+        else:
+            self.bag_add()
+
+    def bag_set_count(self):
+        slot = self._bag_sel()
+        if slot is None:
+            return
+        try:
+            n = int(self.var_bag_cnt.get() or "0", 0)
+        except ValueError:
+            messagebox.showinfo("提示", "数量要填整数。", parent=self.root)
+            return
+        try:
+            got = self.g.set_count(self._bag_kind(), slot, n)
+        except Exception as e:
+            messagebox.showerror("改数量失败", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_party()
+        self.set_status("槽 %d 数量 = %d（物品计数校验已同步）" % (slot, got))
+
+    def bag_clear(self):
+        slot = self._bag_sel()
+        if slot is None:
+            return
+        try:
+            if self.g.clear_slot(self._bag_kind(), slot):
+                self.mark_dirty()
+                self.fill_party()
+                self.set_status("已清空槽 %d（计数校验已同步）" % slot)
+        except Exception as e:
+            messagebox.showerror("清空失败", human(str(e)), parent=self.root)
+
+    def bag_add(self):
+        slot = self._bag_sel()
+        if slot is None:
+            return
+        kind = self._bag_kind()
+        try:
+            iid = int(self.var_bag_id.get() or "0", 0)
+            n = int(self.var_bag_cnt.get() or "1", 0)
+        except ValueError:
+            messagebox.showinfo("提示", "物品 id / 数量要填整数。", parent=self.root)
+            return
+        db_key = dict((k[0], k[3]) for k in xj_game.KINDS)[kind]
+        try:
+            name = self.g.item_name(db_key, iid)
+        except Exception:
+            name = "?"
+        if name == "?" and not messagebox.askyesno(
+                "确认", "Data\\%s.rvdata2 里没有 id=%d 这件东西。\n"
+                        "还是往里写吗？" % (db_key, iid), parent=self.root):
+            return
+        try:
+            self.g.add_item(kind, slot, iid, n)
+        except Exception as e:
+            messagebox.showerror("添加失败", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_party()
+        self.set_status("已往槽 %d 放入 %s ×%d（结构性改动：保存时会整档重写）"
+                        % (slot, name, n))
 
     # ================================================== 5 开关 / 变量
     def fill_switches(self):
@@ -1108,10 +1601,12 @@ class App(object):
         nsw, nva = self.sv.counts()
         for i in range(nsw):
             self.tv_sw.insert("", "end", iid="s%d" % i,
-                              values=(i, "开" if self.sv.get_switch(i) else "关"))
+                              values=(i, "开" if self.sv.get_switch(i) else "关",
+                                      xj_notes.note_of_switch(i)))
         for i in range(nva):
             self.tv_va.insert("", "end", iid="v%d" % i,
-                              values=(i, self.sv.get_variable(i)))
+                              values=(i, self.sv.get_variable(i),
+                                      xj_notes.note_of_variable(i)))
 
     def sw_toggle(self):
         sel = self.tv_sw.selection()
@@ -1202,69 +1697,24 @@ class App(object):
 # 小工具
 # ==========================================================================
 def value_of(node):
-    node = node.target if isinstance(node, M.LinkNode) and node.target is not None else node
-    return getattr(node, "value", None)
+    return xj_nodes.value_of(node)
 
 
 def describe_value(node):
-    node = node.target if isinstance(node, M.LinkNode) and node.target is not None else node
-    if node is None:
-        return "nil"
-    v = getattr(node, "value", None)
-    if v is not None:
-        return "是" if v is True else ("否" if v is False else v)
-    if isinstance(node, M.StrNode):
-        return node.data
-    if isinstance(node, M.SymbolNode):
-        return ":" + node.name
-    if isinstance(node, M.ArrayNode):
-        return "<数组 %d 项>" % len(node.items)
-    if isinstance(node, M.HashNode):
-        return "<哈希 %d 项>" % len(node.pairs)
-    if isinstance(node, (M.ObjNode, M.StructNode)):
-        return "<%s>（%d 个 @变量）" % (node.cls, len(node.ivars))
-    if isinstance(node, M.LinkNode):
-        return "-> 对象 #%d" % getattr(node, "index", getattr(node, "idx", -1))
-    if isinstance(node, M.IVarNode):
-        return "<带 @变量包装>"
-    if isinstance(node, (M.ClassNode, M.ModuleNode)):
-        return "类/模块 %s" % node.name.decode("utf-8", "replace")
-    if isinstance(node, M.UserDefNode):
-        return "<自定义 %s %d 字节>" % (node.cls, len(node.data))
-    t = getattr(node, "text", None)
-    return t() if callable(t) else ""
+    """节点 → 一句人话（旧名保留，内部改用 xj_nodes）。"""
+    return xj_nodes.brief(node, 200)
 
 
-NOTES = {
-    "@gold": "金钱（Lock 包装）", "@level": "等级", "@hp": "HP", "@mp": "MP",
-    "@tp": "TP", "@exp": "经验", "@skills": "已学技能 id 数组",
-    "@items": "物品 {id => [数量,…]}", "@steps": "步数",
-    "@seeds": "防作弊种子表", "@attr": "中文五维/潜能",
-    "@switch_id": "开关ID", "@switch": "开关", "@variable": "变量",
-    "@name": "名字", "@description": "说明", "@note": "备注",
-    "@price": "价格", "@effects": "效果", "@damage": "伤害",
-    "@features": "特性", "@equips": "装备", "@class_id": "职业ID",
-    "@members": "成员", "@save_count": "存档次数", "@battle_count": "战斗次数",
-    "@master": "校验和（防作弊）", "@value": "值", "@data": "数据数组",
-    "@actors": "出战成员 id", "@baby": "召唤兽", "@babys": "召唤兽列表",
-    "@limit_exp": "升级所需经验", "@sect_data": "门派数据",
-}
+NOTES = xj_notes.IVAR_NOTES          # 保留旧名字（测试/外部可能引用）
 
 
 def note_of(node):
-    """给数据树加一列"说明"：把常见字段翻成人话。"""
-    n = node.target if isinstance(node, M.LinkNode) and node.target is not None else node
-    if isinstance(n, M.ObjNode):
-        return n.cls
-    if isinstance(n, M.HashNode):
-        return "哈希"
-    if isinstance(n, M.ArrayNode):
-        return "数组"
-    return ""
+    """给数据树加一列"说明"：抽节点类型 / 类名。"""
+    return xj_nodes.note_for(None, None, node)
 
 
 def note_for_ivar(name):
-    return NOTES.get(name, "")
+    return xj_notes.note_of_ivar(name)
 
 
 def short(v, n=80):
@@ -1274,26 +1724,32 @@ def short(v, n=80):
 
 
 def node_detail(node):
-    node = node.target if isinstance(node, M.LinkNode) and node.target is not None else node
-    L = ["类型：%s" % type(node).__name__,
-         "值：%s" % short(describe_value(node), 400),
+    """右侧"节点详情"：类型 + 值 + 字节区间 + 子项速览（带中文注释）。"""
+    node = xj_nodes.deref(node)
+    L = ["类型：%s" % xj_nodes.type_label(node),
+         "值：%s" % short(xj_nodes.brief(node, 400), 400),
          "字节区间：[%s, %s)" % (getattr(node, "start", "?"),
                                  getattr(node, "end", "?"))]
     if isinstance(node, (M.ObjNode, M.StructNode)):
-        L.append("类：%s" % node.cls)
+        n = xj_notes.note_of_class(node.cls)
+        if n:
+            L.append("这是什么：%s" % n)
         L.append("实例变量：")
         for k, v in node.ivars:
-            L.append("  %-24s %-28s %s" % (k, short(describe_value(v), 36),
-                                           note_for_ivar(k)))
+            L.append("  %-24s %-30s %s" % (k, short(xj_nodes.brief(v, 40), 36),
+                                           xj_notes.note_of_ivar(k)))
     elif isinstance(node, M.HashNode):
         L.append("前 20 对：")
         for k, v in node.pairs[:20]:
-            L.append("  %-24s %s" % (short(value_of(k), 22),
-                                     short(describe_value(v), 60)))
+            L.append("  %-24s %-30s %s"
+                     % (short(xj_nodes.key_label(k), 22),
+                        short(xj_nodes.brief(v, 60), 60),
+                        xj_nodes.note_for(node, k, v)))
     elif isinstance(node, M.ArrayNode):
         L.append("前 20 项：")
         for i, v in enumerate(node.items[:20]):
-            L.append("  [%-3d] %s" % (i, short(describe_value(v), 60)))
+            L.append("  [%-3d] %-30s %s" % (i, short(xj_nodes.brief(v, 60), 60),
+                                             xj_nodes.note_for(node, i, v)))
     elif isinstance(node, M.UserDefNode):
         L.append("自定义序列化：%s，%d 字节" % (node.cls, len(node.data)))
     return "\n".join(L)
@@ -1338,15 +1794,121 @@ class EditDialog(tk.Toplevel):
 def main():
     argv = [a for a in sys.argv[1:] if not a.startswith("--")]
     save = argv[0] if argv else None
-    root = tk.Tk()
-    app = App(root, save)
-    if "--selftest" in sys.argv:
+    selftest = ("--selftest" in sys.argv) or bool(os.environ.get("XJ_SELFTEST"))
+    try:
+        root = tk.Tk()
+    except Exception:
+        return _fatal(traceback.format_exc())
+    try:
+        app = App(root, save)
+    except xj_codec.CodecError as e:
+        messagebox.showerror("缺少依赖", str(e))
+        return 2
+    except Exception:
+        return _fatal(traceback.format_exc())
+
+    if selftest:
         root.update()
-        print("selftest ok: doc=%s sv=%s" % (app.doc is not None, app.sv is not None))
+        lines = selftest_lines(app)
+        out = os.path.join(xj_codec.app_dir(), "selftest_result.txt")
+        try:
+            open(out, "w", encoding="utf-8").write("\n".join(lines))
+        except OSError:
+            pass
+        try:
+            print("\n".join(lines))
+        except Exception:
+            pass
         root.destroy()
-        return 0
-    root.mainloop()
+        return 0 if lines[-1].startswith("结果: OK") else 1
+    try:
+        root.mainloop()
+    except Exception:
+        return _fatal(traceback.format_exc())
     return 0
+
+
+def selftest_lines(app):
+    """打包后的自检：依赖、版本、存档、各功能模块能不能跑。"""
+    import hashlib
+    # 自检要拿"真正的存档"来跑：可能上次打开的是 Battle.bt2 之类，别被带偏。
+    # 顺序：XJ_SAVE 环境变量 → 游戏目录下的 save.rvdata2 → 刚才打开的那个。
+    cands = []
+    env = os.environ.get("XJ_SAVE")
+    if env:
+        cands.append(env)
+    p = xj_env.save_path()
+    if p:
+        cands.append(p)
+    if app.doc is not None and app.doc.path:
+        cands.append(app.doc.path)
+    for c in cands:
+        if not c or not os.path.exists(c):
+            continue
+        try:
+            app.load(c, quiet=True)
+            app.root.update()
+        except Exception:
+            continue
+        if app.sv is not None:      # 找到本作存档了
+            break
+    L = ["%s %s 自检" % (APP_NAME, VERSION),
+         "程序目录: %s" % xj_codec.app_dir(),
+         "打包运行(frozen): %s" % bool(getattr(sys, "frozen", False)),
+         "Python: %s" % sys.version.split()[0]]
+    host = xj_codec.find_host()
+    L.append("32 位宿主: %s" % (host or "未找到（改不了存档！）"))
+    game = xj_env.find_game_dir()
+    L.append("游戏目录: %s" % (game or "未找到（可设 XJ_GAME 指定）"))
+    doc, sv = app.doc, app.sv
+    if doc is None:
+        L.append("未加载存档")
+    else:
+        L.append("存档: %s" % doc.path)
+        L.append("明文 %d 字节 / 顶层对象 %d 个" % (len(doc.raw),
+                                                   len(doc.objects)))
+        L.append("明文 MD5: %s" % hashlib.md5(doc.raw).hexdigest())
+    if sv is None:
+        L.append("SaveDoc: 未建立（不是本作存档？）")
+    else:
+        g = app.g
+        L.append("存银 = %s" % sv.gold())
+        L.append("角色数 = %d" % len(sv.actors()))
+        L.append("背包 = %d 件 / 空槽 %d 个"
+                 % (len(g.bag("Items")), len(g.empty_slots("Items"))))
+        L.append("召唤兽 = %s"
+                 % ("、".join(g.baby_name(b) for _i, b in g.babies(
+                     sv.actors()[0][1])) if sv.actors() else "无"))
+        rep = g.anti_cheat_report()
+        L.append("防作弊体检 = %d 项，超限 %d 项"
+                 % (len(rep), len([r for r in rep if r[3]])))
+        L.append("物品计数校验 = %d 条" % len(g.security_rows()))
+        # 在内存里试一次结构性重写（不写盘）
+        try:
+            import xj_marshal as _M
+            n = len(sv.doc.plain_bytes(structural=True))
+            _M.parse_stream(sv.doc.plain_bytes(structural=True))
+            L.append("整档重写自检 = %d 字节，可解析" % n)
+        except Exception as e:
+            L.append("整档重写自检 = 失败：%r" % (e,))
+            L.append("结果: NG")
+            return L
+    ok = (host is not None) and (not (sv is None and doc is not None))
+    L.append("结果: %s" % ("OK" if ok else "NG"))
+    return L
+
+
+def _fatal(text):
+    try:
+        open(os.path.join(xj_codec.app_dir(), "error.log"), "w",
+             encoding="utf-8").write(text)
+    except OSError:
+        pass
+    try:
+        messagebox.showerror("程序异常", text[-1200:])
+    except Exception:
+        pass
+    return 3
 
 
 if __name__ == "__main__":

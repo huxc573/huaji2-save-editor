@@ -120,7 +120,7 @@ def main():
         kill_timers(root)
         root.update()
         say("窗口创建完成（%d 个页签）" % app.nb.index("end"))
-        check("8 个页签都建好", app.nb.index("end") == 8)
+        check("9 个页签都建好", app.nb.index("end") == 9)
 
         say("加载存档副本…")
         app.load(copy, quiet=True)
@@ -142,7 +142,7 @@ def main():
               "步数=%s" % app.var_steps.get())
         check("防作弊校验提示正常", "正常" in app.var_lock.get(),
               app.var_lock.get())
-        check("概览文本已填充", "金钱" in app.txt_info.get("1.0", "end"))
+        check("概览文本已填充", "存银" in app.txt_info.get("1.0", "end"))
 
         say("改金钱…")
         app.var_gold.set("7654321")
@@ -193,17 +193,102 @@ def main():
                   dict(app.sv.attr_items(a)).get(k0) == av0 + 20,
                   "%s = %s" % (k0, dict(app.sv.attr_items(a)).get(k0)))
 
-        # ---------------- 队伍 / 物品
-        check("物品栏已填充", len(app.tv_pack.get_children()) >= 1,
-              "物品条数=%d" % len(app.tv_pack.get_children()))
-        check("队伍信息已填充", "金钱" in app.var_party.get(),
+        # ---------------- 背包 / 物品
+        check("背包页 20 格都建好了", len(app.tv_pack.get_children()) == 20,
+              "%d 行" % len(app.tv_pack.get_children()))
+        filled = [r for r in app.tv_pack.get_children()
+                  if app.tv_pack.item(r, "values")[2] != "（空）"]
+        check("背包里看到东西了", len(filled) >= 1, "%d 格有货" % len(filled))
+        check("队伍信息已填充", "存银" in app.var_party.get(),
               app.var_party.get())
+        if filled:
+            say("改背包数量…")
+            slot = int(app.tv_pack.item(filled[0], "values")[0])
+            iid = "s%d" % slot
+            app.tv_pack.selection_set(iid)
+            old = int(app.tv_pack.item(filled[0], "values")[4])
+            app.var_bag_cnt.set(str(old + 2))
+            app.bag_set_count()
+            root.update()
+            now = dict((r[0], r[5]) for r in app.g.bag("Items"))
+            check("界面改物品数量生效", now.get(slot) == old + 2,
+                  "%d -> %s" % (old, now.get(slot)))
+            check("改数量后计数校验同步",
+                  all(r[2] == r[3] for r in app.g.security_rows()),
+                  "%r" % [r for r in app.g.security_rows() if r[2] != r[3]][:2])
+        say("往空格加一件物品…")
+        free = app.g.empty_slots("Items")[0]
+        app.var_bag_id.set("1")
+        app.var_bag_cnt.set("3")
+        app.tv_pack.selection_set("s%d" % free)
+        app.bag_add()
+        root.update()
+        got = [r for r in app.g.bag("Items") if r[0] == free]
+        check("界面加物品生效", len(got) == 1 and got[0][3] == 1 and got[0][5] == 3,
+              "%r" % (got[0] if got else None,))
+        app.tv_pack.selection_set("s%d" % free)
+        app.bag_clear()
+        root.update()
+        check("界面清空格子生效",
+              not [r for r in app.g.bag("Items") if r[0] == free])
+
+        # ---------------- 召唤兽
+        check("召唤兽页列出角色", len(app.cb_baby_actor["values"]) >= 1,
+              "%r" % (app.cb_baby_actor["values"],))
+        check("召唤兽列表已填充", len(app.tv_baby.get_children()) >= 5,
+              "%d 个字段" % len(app.tv_baby.get_children()))
+        if app.tv_baby.get_children():
+            say("改召唤兽等级…")
+            app.tv_baby.selection_set(app.tv_baby.get_children()[0])
+            app.baby_pick()
+            b = app._baby()
+            old_lv = app.g.baby_value(b, "level")
+            app.g.set_baby(b, "level", old_lv + 1)
+            app.load_baby()
+            root.update()
+            check("界面改召唤兽生效",
+                  app.g.baby_value(app._baby(), "level") == old_lv + 1,
+                  "%s -> %s" % (old_lv, app.g.baby_value(app._baby(), "level")))
+            app.baby_preset("loyalty")
+            root.update()
+            check("召唤兽预设生效",
+                  app.g.baby_value(app._baby(), "loyalty") == 100.0,
+                  app.g.baby_value(app._baby(), "loyalty"))
+
+        # ---------------- 防作弊体检
+        say("防作弊体检…")
+        n_bad = app.guard_check()
+        root.update()
+        check("体检能跑并列出条目",
+              len(app.tv_guard.get_children()) >= 4,
+              "%d 项，超限 %s" % (len(app.tv_guard.get_children()), n_bad))
+        check("体检结果与报告一致",
+              n_bad == len([r for r in app.g.anti_cheat_report() if r[3]]),
+              "%s" % n_bad)
+        app.guard_clear()
+        root.update()
+        check("清除作弊标记生效",
+              xj_save.M.value_of(
+                  xj_save._deref(xj_save.ivar(app.sv.section("system"),
+                                              "@cheated"))) is False)
+        app.guard_resync()
+        root.update()
+        check("同步计数校验后全部对得上",
+              all(r[2] == r[3] for r in app.g.security_rows()))
 
         # ---------------- 开关 / 变量
         check("开关表已填充", len(app.tv_sw.get_children()) == nsw,
               "%d / %d" % (len(app.tv_sw.get_children()), nsw))
         check("变量表已填充", len(app.tv_va.get_children()) == nva,
               "%d / %d" % (len(app.tv_va.get_children()), nva))
+        check("开关带中文注释",
+              any(app.tv_sw.item(c, "values")[2] for c in app.tv_sw.get_children()),
+              "%r" % [app.tv_sw.item(c, "values")[2]
+                      for c in app.tv_sw.get_children()])
+        check("变量带中文注释",
+              any(app.tv_va.item(c, "values")[2] for c in app.tv_va.get_children()),
+              "%r" % [app.tv_va.item(c, "values")[2]
+                      for c in app.tv_va.get_children()])
         say("点开关（双击切换）…")
         sw0 = app.sv.get_switch(0)
         app.tv_sw.selection_set("s0")

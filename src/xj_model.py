@@ -39,6 +39,10 @@ class Doc(object):
         self.plain = False             # 打开时是不是明文
         self.plain_key = None          # 打开密文时用的密钥
         self.dirty = False
+        self.structural = False        # 有没有"加减对象"的改动（见 save）：
+        #                                标量改动走区间补丁；一旦新增/删除了对象，
+        #                                就整档重新序列化（serialize_doc），
+        #                                让 Ruby 的对象编号表重新排一遍。
         if path:
             self.load(path)
 
@@ -83,7 +87,13 @@ class Doc(object):
         path = path or self.path
         if not path:
             raise ValueError("没有保存路径")
-        new = self.engine.apply()
+        if self.structural:
+            # 结构性改动（往背包塞物品、增删召唤兽…）：整条顶层对象按 Ruby 的规则
+            # 重新编号。tools/test_roundtrip.py 证明"什么都不改"时能逐字节还原，
+            # 所以除了我们动过的地方，其余字节完全不变。
+            new = M.serialize_doc(self.objects)
+        else:
+            new = self.engine.apply()
         M.parse_stream(new)                    # 编不出来就别写，避免写坏档
         if backup and os.path.exists(path):
             bak = path + ".bak.%s" % time.strftime("%Y%m%d-%H%M%S")
@@ -100,12 +110,24 @@ class Doc(object):
         self.engine = xj_edit.PatchEngine(new)
         self.objects = M.parse_stream(new)
         self.dirty = False
+        self.structural = False
         return path
 
     # ------------------------------------------------------------------ 改值
     def set_value(self, node, value):
         xj_edit.PatchEngine.set_scalar(self.engine, node, value)
         self.dirty = True
+
+    def mark_structural(self):
+        """标记"动了对象个数"——保存时整档重写（节点值已经是最新的，不用补丁）。"""
+        self.structural = True
+        self.dirty = True
+
+    def plain_bytes(self, structural=None):
+        """按当前树生成明文（不写盘），方便自检 / 预览。"""
+        if self.structural if structural is None else structural:
+            return M.serialize_doc(self.objects)
+        return self.engine.apply()
 
 
 def describe(node):

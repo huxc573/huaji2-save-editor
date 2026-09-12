@@ -47,9 +47,10 @@ def kill_timers(root):
 
 
 TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_tree", "全部解析数据"),
-        ("tab_actor", "角色 / 属性"), ("tab_party", "队伍 / 物品"),
-        ("tab_switch", "开关 / 变量"), ("tab_db", "数据表 (CSV)"),
-        ("tab_help", "说明 / 机制"), ("tab_log", "更新日志"))
+        ("tab_actor", "角色 / 属性"), ("tab_party", "背包 / 物品"),
+        ("tab_baby", "召唤兽"), ("tab_switch", "开关 / 变量"),
+        ("tab_db", "数据表 (CSV)"), ("tab_help", "说明 / 机制"),
+        ("tab_log", "更新日志"))
 
 
 def main():

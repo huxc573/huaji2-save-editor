@@ -23,12 +23,16 @@ TESTS = [
     ("marshal", ["tests/test_marshal.py"]),
     ("codec", ["tests/test_codec.py"]),
     ("model", ["tests/test_model.py"]),
+    ("roundtrip", ["tools/test_roundtrip.py"]),
+    ("semantic", ["tools/test_semantic_equal.py"]),
+    ("game_layer", ["tools/test_game_layer.py"]),
     ("gui", ["tests/test_gui.py"]),
     ("gui_quick", ["tests/test_gui_quick.py"]),
     ("db_csv", ["tools/test_db_csv.py"]),
     ("smoke", ["tools/smoke.py"]),
     ("save_layer", ["tools/test_save_layer.py"]),
     ("verify_all", ["tools/verify_all.py"]),
+    ("dist", ["tools/test_dist.py"]),
 ]
 
 want = [a.lower() for a in sys.argv[1:]]

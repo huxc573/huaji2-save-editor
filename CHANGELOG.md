@@ -1,5 +1,104 @@
 # 更新日志
 
+## v0.4 — 2026-09-12
+
+**主题：把"玩法数据"也做出来（背包 / 召唤兽 / 经验）＋ 把游戏的反作弊整明白了 ＋ 能打包成 exe。**
+
+### 🎒 新的可改内容（都是实测数据结构）
+
+| 页签 | 能改什么 |
+| --- | --- |
+| 概览 / 快捷修改 | **存银**（游戏里就叫这个名，就是金钱）＋ 步数 / 存档次数 / 战斗次数 |
+| 背包 / 物品 | **4 页 × 20 格**：看、改数量、清空、**添加物品**（道具 / 武器 / 防具分开） |
+| 角色 / 属性 | 加了**获得经验**（`@exp`）与**升级所需经验**（`@limit_exp`） |
+| 召唤兽 | 等级·气血·魔法·TP·经验·**六项资质**·**忠诚**·寿命·成长·五维/潜能 + 常用预设 |
+| 开关 / 变量 | 补上游戏自己的名字（`MAP_SCROLL` / `PLOTING` / `CHOICS_COLUMN` / `DIALOGUE`） |
+
+背包为什么能"加"东西：游戏的容器是 `{槽号 => [RPG::Item 对象, 数量]}`，
+**物件本体就存在存档里**（不是只存 id），所以加物品要从 `Data\Items.rvdata2`
+复制一份模板，再补上游戏自己加的 5 个字段
+（`@result_note` / `@attr` / `@update` / `@new` / `@transaction_code`）。
+
+### 🛡 反作弊：这次是真的搞清楚了（三重）
+
+1. **`Lock` 校验和**（v0.2 已解决）：金钱 `@master = @value*91+45+种子/800`。
+2. **周期检查**（v0.4 新发现）：脚本 29455 行起，**每 300 帧**查一次
+   ```
+   $jiance = [MAX_LEVEL_ACTOR*761205, MAX_LEVEL_BABY*761205,
+              MAX_GOLD*654321,     MAX_WAREHOUSE[1]*159753]
+   角色等级 > 60 / 出战召唤兽等级 > 65 / 存银 > 30,000,000 /
+   仓库页号 > 3 / 五维总点数 > 等级*10+500      → $game_system.cheated = 帧号
+   ```
+   一旦被标记：游戏内 20 分钟后弹警告、**25 分钟后 `msgbox "存档异常！<硬盘码>"` 并 exit**。
+   ⇒ 新增「防作弊体检」页签：列出每一项的当前值/上限、**一键按规则修复**
+   （把超限的压回上限）、**清除作弊标记**（`@cheated = false` + 去掉 keyword 里的 `VNE`）。
+   ⇒ 界面里的预设也相应改成合法上限（"满级(60)"、"召唤兽满级(65)"）。
+   ⚠ 顺便发现**当前这份存档 `@cheated` 已经是 134700**（说明之前就被判过作弊）——
+   工具里点一下「清除作弊标记」就干净了。
+3. **物品计数校验**（v0.4 新发现）：`$game_system.security[:items][id]` 是 `Change` 对象，
+   把"这件物品累计获得过几个"**逐位数字 AES-ECB 加密**存着（脚本 322 行 +
+   `AES_ECB.set_key('admin_1941344749')`，1142 行）。
+   改背包数量后如果不同步，游戏下次**合法获得**同一件物品时会发现对不上 → 记作弊。
+   ⇒ `src/xj_aes.py` 用纯 Python 复刻了它的 AES-128-ECB（PKCS#7 填充、按位加密），
+   **改数量/加物品时自动把计数一起改对**；缺条目的按游戏模板补一个 `Change`；
+   另外提供「同步物品计数校验」按钮全量对齐。
+   验证方式很硬：拿存档里 7 个真实 `Change` 的密文反解，位数字全对得上。
+
+### 🧩 能"加减对象"了：整档重写（v0.4 的地基）
+
+以前只能做**等宽标量补丁**，因为 Ruby Marshal 的 `@N` 对象链接一旦成员数变了就会整体错位。
+这次把序列化器补齐，可以**整条顶层对象按 Ruby 的规则重新编号**：
+
+* `xj_marshal.serialize_doc(objects)`：每个顶层对象各带 `04 08` 头、各自独立的
+  **对象表 + 符号表**；
+* 符号要复刻 Ruby 的写法，否则**静默坏档**：定义时非 ASCII 才带
+  `I :@体质 <1 ivar> :E T` 包装，**链接（`;N`）不带包装**；
+* `tools/test_roundtrip.py`：17 个游戏明文（含 `save.rvdata2`、`AutoSave\save00`，
+  300 KB+）**逐字节还原** ✅ —— 什么都不改时输出与原文完全一致，
+  所以整档重写不会引入任何意外差异。
+
+### 📦 打包成 exe
+
+`tools/build.py`（照 huaji1 的路子）：
+
+* `csc /platform:x86` 编自带的 32 位宿主 `XJCodec32.exe`；
+* `dist/` 里：`画迹2存档工具v0.4.exe` + **`XJCodec32.exe`**（必须挨着 exe；
+  `--dll-dir` 可以改成放 `dll/` 子目录，`xj_codec` 会按 目录 → dll/ → bin/ 找）
+  + `使用说明.txt` / `README.md`；
+* **不放**游戏的 `System\main.dll`（版权 + 运行期就从用户自己的游戏目录加载）；
+* tcl/tk 脚本库要 `--add-data` 带上，并在 `import tkinter` 之前设 `TCL_LIBRARY`；
+* 打包后自带自检：`XJ_SELFTEST=1` 或 `--selftest` → 写 `selftest_result.txt`
+  （依赖查找、明文 MD5、背包/召唤兽/防作弊体检、整档重写自检）；
+* 崩溃会写 `error.log`（`--windowed` 没控制台）。
+
+### ✅ 测试（13 组 / 370+ 项，全绿）
+
+| 测试 | 项数 | 说明 |
+| --- | --- | --- |
+| `tests\test_marshal.py` | 27 | |
+| `tests\test_codec.py` | 15 | |
+| `tests\test_model.py` | 12 | |
+| `tests\test_gui.py` | 24 | 9 个页签都建得起来 |
+| `tests\test_gui_quick.py` | 57 | 含背包改数量/加物品/清空、召唤兽、防作弊体检 |
+| `tools\test_db_csv.py` | 56 | |
+| **`tools\test_game_layer.py`** | 35 | **新**：背包 / 经验 / 召唤兽 / 计数校验同步 |
+| **`tools\test_roundtrip.py`** | 18 | **新**：逐字节还原（`tools\_plain\*.bin` 全过） |
+| **`tools\test_semantic_equal.py`** | 39 | **新**：整档重写的语义等价（含对象共享关系） |
+| `tools\smoke.py` | 12 | |
+| `tools\test_save_layer.py` | 14 | |
+| `tools\verify_all.py` | 17 | |
+| **`tools\test_dist.py`** | — | **新**：把 `dist\` 拷到临时目录跑 exe 自检 |
+
+一键跑：`python tools\run_tests.py`
+
+### 🧰 逆向用的新工具
+
+`dump_scripts.py`（游戏脚本全解成一整份 Ruby）、`grep_scripts.py`（中文关键词走
+`tools/_keys.txt`、结果直接写 UTF-8 文件，绕开 GBK 终端）、`probe_v04_*.py`
+（背包/召唤兽/属性结构）、`probe_security.py`（`Change` 密文）、`probe_attrs.py`。
+
+---
+
 ## v0.3 — 2026-09-13
 
 **主题：界面照画迹1 重做，外加「Data → CSV」查表功能。**
