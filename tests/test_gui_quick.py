@@ -232,6 +232,87 @@ def main():
         check("界面清空格子生效",
               not [r for r in app.g.bag("Items") if r[0] == free])
 
+        # ---------------- v0.5：模板列表 / 写进格子 / 批量 / 体检
+        check("模板列表已填充（画迹1 那种右栏）",
+              len(app.tv_tpl.get_children()) >= 5,
+              "%d 个模板" % len(app.tv_tpl.get_children()))
+        app.var_tpl_kw.set("草")
+        app.fill_templates()
+        root.update()
+        n_kw = len(app.tv_tpl.get_children())
+        names = [app.tv_tpl.item(i, "values")[1] for i in app.tv_tpl.get_children()]
+        hit_kw = app.g.templates("Items", keyword="草")
+        check("模板搜索能过滤",
+              0 < n_kw < 300 and len(hit_kw) == n_kw
+              and all(("草" in nm or "草" in de) for _i, nm, de in hit_kw),
+              "%d 个：%s" % (n_kw, "、".join(names[:4])))
+        app.var_tpl_kw.set("")
+        app.fill_templates()
+        root.update()
+        say("把模板写进空格子…")
+        free2 = app.g.empty_slots("Items")[0]
+        tid = int(app.tv_tpl.item(app.tv_tpl.get_children()[0], "values")[0])
+        app.tv_tpl.selection_set("t%d" % tid)
+        app.var_bag_cnt.set("5")
+        app.tv_pack.selection_set("s%d" % free2)
+        app.bag_use_template()
+        root.update()
+        got2 = app.g.slot_info("Items", free2)
+        check("双击模板写进格子生效", got2 == (tid, 5), "%r（模板 id=%d）"
+              % (got2, tid))
+        app.tv_pack.selection_set("s%d" % free2)
+        app.bag_pick()
+        root.update()
+        check("选中格子会把 id/数量填到输入框",
+              app.var_bag_id.get() == str(tid) and app.var_bag_cnt.get() == "5",
+              "%s / %s" % (app.var_bag_id.get(), app.var_bag_cnt.get()))
+        n_all = app.g.set_all_counts("Items", 9, 0)
+        app.fill_party()
+        root.update()
+        check("批量改本页数量生效",
+              all(int(app.tv_pack.item(r, "values")[4] or 9) == 9
+                  for r in app.tv_pack.get_children()
+                  if app.tv_pack.item(r, "values")[2] != "（空）"),
+              "改了 %d 格" % n_all)
+        bad_before = app.g.pack_report()
+        done_fix = app.g.pack_fix(bad_before)
+        root.update()
+        check("背包体检 + 一键修复能跑通",
+              not app.g.pack_report(),
+              "修了 %d 项，原来 %d 项" % (len(done_fix), len(bad_before)))
+        check("修完计数校验仍对齐",
+              all(r[2] == r[3] for r in app.g.security_rows()),
+              "%r" % [r for r in app.g.security_rows() if r[2] != r[3]][:2])
+
+        # ---------------- v0.5：机器码
+        say("读机器码…")
+        app.machine_show()
+        root.update()
+        now_m, err_m, ids_m, ok_m = app.g.machine_status()
+        check("界面显示机器码", "机器码" in app.var_machine.get(),
+              app.var_machine.get().replace("\n", " | ")[:90])
+        check("本机机器码已在存档记录里", ok_m, "本机 %s / 存档 %s"
+              % (now_m, ids_m))
+        app.machine_fill_local()
+        root.update()
+        check("「用本机机器码填上」写进输入框",
+              app.var_machine_id.get() == str(now_m), app.var_machine_id.get())
+        app.var_machine_id.set("123456789")
+        app.machine_add()
+        root.update()
+        check("「加入存档」生效", "123456789" in app.g.machine_ids(),
+              "、".join(app.g.machine_ids()))
+        app.var_machine_id.set("123456789")
+        app.machine_set()
+        root.update()
+        check("「直接替换」只留一个", app.g.machine_ids() == ["123456789"],
+              "%r" % (app.g.machine_ids(),))
+        app.var_machine_id.set(str(now_m))
+        app.machine_set()
+        root.update()
+        check("机器码能改回本机", app.g.machine_ids() == [str(now_m)],
+              "%r" % (app.g.machine_ids(),))
+
         # ---------------- 召唤兽
         check("召唤兽页列出角色", len(app.cb_baby_actor["values"]) >= 1,
               "%r" % (app.cb_baby_actor["values"],))

@@ -190,6 +190,224 @@ class GameEditor(object):
         out.sort()
         return out
 
+    def templates(self, kind="Items", keyword=None, limit=500):
+        """物品模板表：[(id, 名称, 说明), ...]（从 Data\\<kind>.rvdata2 读）。
+
+        仿画迹1：右边一个可搜索的模板列表，选中后写进背包格子。
+        """
+        import xj_db
+        _root, items = xj_db.load(kind)
+        kw = (keyword or "").strip().lower()
+        out = []
+        for i, node in items:
+            nm = xj_db.s(node, "@name") or ("#%d" % i)
+            desc = (xj_db.s(node, "@description") or "")[:40].replace("\n", " ")
+            if kw and kw not in nm.lower() and kw not in str(i) \
+                    and kw not in desc.lower():
+                continue
+            out.append((i, nm, desc))
+            if len(out) >= limit:
+                break
+        return out
+
+    def set_all_counts(self, kind="Items", count=99, page=None):
+        """把（某一页/整本）已有的格子数量批量改成 count（仿画迹1 的批量改）。"""
+        count = max(0, min(int(count), MAX_ITEM))
+        n = 0
+        for slot, _p, _i, iid, _nm, cur in self.bag(kind, page):
+            if cur == count:
+                continue
+            self.set_count(kind, slot, count)
+            n += 1
+        return n
+
+    def pack_report(self, kinds=None):
+        """背包体检（仿画迹1 的 pack_scan_bad）。
+
+        返回 [(kind, 槽号, 名称, 问题, 能否修, extra), ...]，extra 里带上修复要用到的
+        附加信息（比如重复格子指向哪个槽）。检查项：
+
+          * 格子号不是整数（数据坏了）
+          * 值不是 `[物品, 数量]`（结构不对）
+          * 只有数量没有物品对象
+          * 物品 id 在 `Data\\<kind>.rvdata2` 里查不到
+          * 数量是 0 / 超过单格上限 99
+          * 同一件东西占了多个格子（游戏按 id 取数量，重复会算不清）
+        """
+        out = []
+        for key, _iv, cn, db in KINDS:
+            if kinds and key not in kinds:
+                continue
+            try:
+                h = self.container(key)
+            except KeyError:
+                continue
+            names = self._name_map(key)
+            seen = {}
+            for k, v in h.pairs:
+                slot = M.value_of(_deref(k))
+                if not isinstance(slot, int):
+                    out.append((key, slot, cn, "格子号不是整数（%r）"
+                                % (slot,), True, {}))
+                    continue
+                arr = _deref(v)
+                if arr is None or isinstance(arr, M.NilNode):
+                    continue
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    out.append((key, slot, cn, "结构不对（不是 [物品, 数量]）",
+                                True, {}))
+                    continue
+                item = _deref(arr.items[0])
+                if item is None or isinstance(item, M.NilNode):
+                    out.append((key, slot, "（空）", "只有数量、没有物品对象",
+                                True, {}))
+                    continue
+                iid = get_int(ivar(item, "@id"), -1)
+                cnt = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+                nm = names.get(iid) or ("id=%d" % iid)
+                if iid < 0 or names.get(iid) is None:
+                    out.append((key, slot, nm,
+                                "物品 id=%s 在 %s.rvdata2 里不存在" % (iid, db),
+                                True, {"id": iid}))
+                if cnt <= 0:
+                    out.append((key, slot, nm, "数量是 %d" % cnt, True,
+                                {"id": iid, "count": cnt}))
+                elif cnt > MAX_ITEM:
+                    out.append((key, slot, nm, "数量 %d 超过单格上限 %d"
+                                % (cnt, MAX_ITEM), True,
+                                {"id": iid, "count": cnt}))
+                if iid in seen:
+                    out.append((key, slot, nm, "和 %d 号格子重复（同一物品占两格）"
+                                % seen[iid], True,
+                                {"id": iid, "count": cnt, "dup_of": seen[iid]}))
+                else:
+                    seen[iid] = slot
+        return out
+
+    def pack_fix(self, rows=None):
+        """按体检结果修（仿画迹1 的 pack_fix_all）：
+
+          * 重复格子 → 把数量并到前一个格子，再清掉这一格
+          * 数量 0 / 结构坏 / id 无效 → 清空那一格
+          * 数量超上限 → 截断到 99
+        返回 [(kind, slot, 修了什么), ...]。
+        """
+        rows = rows if rows is not None else self.pack_report()
+        done = []
+        for row in rows:
+            kind, slot, name, why, _fix, extra = row
+            if not isinstance(slot, int):
+                continue
+            cnt = extra.get("count")
+            if extra.get("dup_of") is not None:
+                keep = extra["dup_of"]
+                cur = dict((s, c) for s, _p, _i, _id, _n, c in self.bag(kind))
+                total = cur.get(keep, 0) + (cnt or 0)
+                if total > MAX_ITEM:            # 上限就留一格 99、多余丢掉
+                    total = MAX_ITEM
+                self.set_count(kind, keep, total)
+                self.clear_slot(kind, slot)
+                done.append((kind, slot, "%s 并到 %d 号格子（现在 %d 个）"
+                             % (name, keep, total)))
+                continue
+            if "超过" in why:
+                self.set_count(kind, slot, MAX_ITEM)
+                done.append((kind, slot, "%s 数量 %s → %d"
+                             % (name, cnt, MAX_ITEM)))
+                continue
+            if self.clear_slot(kind, slot):
+                done.append((kind, slot, "%s 已清空（%s）" % (name, why)))
+        if done:
+            self.resync_security()
+        return done
+
+    # ==================================================== 机器码（存档绑定）
+    def config_hash(self):
+        """`$game_system.config`（Hash）。"""
+        return _deref(ivar(self.sv.section("system"), "@config"))
+
+    def machine_ids(self):
+        """存档里记录的机器码列表（`config[:hard_disk_code]`，是个数组）。
+
+        游戏启动时会 `include?(current)` 比对，不在里面就 msgbox “存档异常”。
+        所以换机器玩的话，把新机器码加进去就行。
+        """
+        arr = _deref(hash_get(self.config_hash(), "hard_disk_code"))
+        out = []
+        if isinstance(arr, M.ArrayNode):
+            for x in arr.items:
+                s = _as_str(x)
+                if s is not None:
+                    out.append(str(s))
+        return out
+
+    def _machine_array(self, create=True):
+        h = self.config_hash()
+        if not isinstance(h, M.HashNode):
+            raise KeyError("存档里没有 $game_system.config")
+        arr = _deref(hash_get(h, "hard_disk_code"))
+        if isinstance(arr, M.ArrayNode):
+            return arr
+        if not create:
+            return None
+        arr = M.ArrayNode([])
+        for i, (k, v) in enumerate(h.pairs):
+            if M.value_of(k) == "hard_disk_code":
+                h.pairs[i] = (k, arr)
+                return arr
+        h.pairs.append((M.SymbolNode("hard_disk_code"), arr))
+        return arr
+
+    def set_machine_ids(self, ids):
+        """整组替换（结构性改动）。"""
+        arr = self._machine_array()
+        arr.items = [str_node(str(x)) for x in ids if str(x).strip()]
+        self.doc.mark_structural()
+        return self.machine_ids()
+
+    def add_machine_id(self, mid):
+        """追加一个机器码（已存在就不动）——换机器时最安全的做法。"""
+        mid = str(mid).strip()
+        if not mid:
+            raise ValueError("机器码是空的")
+        have = self.machine_ids()
+        if mid in have:
+            return have
+        arr = self._machine_array()
+        arr.items.append(str_node(mid))
+        self.doc.mark_structural()
+        return self.machine_ids()
+
+    def machine_id_now(self):
+        """本机机器码（调 main.dll!get_hard_disk_character）。"""
+        import xj_codec
+        return xj_codec.try_machine_id()
+
+    def machine_status(self):
+        """返回 (本机机器码 或 None, 出错原因, 存档记录列表, 本机是否在档)。"""
+        now, err = self.machine_id_now()
+        ids = self.machine_ids()
+        return now, err, ids, bool(now and now in ids)
+        h = self.container(kind)
+        nm = self._name_map(kind)
+        out = []
+        for k, v in h.pairs:
+            slot = M.value_of(_deref(k))
+            if not isinstance(slot, int):
+                continue
+            p, idx = divmod(slot, PACK_PAGE_SIZE)
+            if page is not None and p != page:
+                continue
+            arr = _deref(v)
+            if not isinstance(arr, M.ArrayNode) or not arr.items:
+                continue
+            item = _deref(arr.items[0])
+            iid = get_int(ivar(item, "@id"), -1) if item is not None else -1
+            count = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+            out.append((slot, p, idx, iid, nm.get(iid, "?"), count))
+        out.sort()
+        return out
+
     def empty_slots(self, kind="Items", page=None):
         h = self.container(kind)
         used = set()
@@ -281,6 +499,32 @@ class GameEditor(object):
             self.sync_security_item(item_id)
         self.doc.mark_structural()
         return node
+
+    def slot_info(self, kind, slot):
+        """某一格的内容：`(物品id, 数量)`；空格/坏格返回 None。"""
+        for s, _p, _i, iid, _nm, cnt in self.bag(kind):
+            if s == slot:
+                return (iid, cnt)
+        return None
+
+    def set_item(self, kind, slot, item_id, count=None):
+        """把某一格**换成**另一件物品（从 Data 模板新建对象，仿画迹1 的"写入槽位"）。
+
+        count=None 表示沿用原来那一格的数量（原来是空的就是 1）。
+        这是结构性改动（保存时会整档重写），并且会自动同步物品计数校验。
+        """
+        old = self.slot_info(kind, slot)
+        if count is None:
+            count = old[1] if old else 1
+        count = max(0, min(int(count), MAX_ITEM))
+        try:
+            self.make_item(kind, item_id)       # 先确认模板存在，别改到一半失败
+        except KeyError:
+            raise
+        if old is not None:
+            self.clear_slot(kind, slot)         # 先腾空（置 nil，不删 key）
+        self.add_item(kind, slot, item_id, count)
+        return count
 
     def make_item(self, kind, item_id):
         """按 `Data\\<kind>.rvdata2` 里的模板造一个物品对象。
@@ -662,6 +906,18 @@ class GameEditor(object):
         rows.append(("作弊标记 @cheated", ch, 0, bool(ch),
                      "非 false 表示游戏已经判定作弊："
                      "20 分钟后警告、25 分钟后强制退出"))
+        now, err, ids, ok = self.machine_status()
+        if err:
+            rows.append(("机器码（本机）", "—", "—", False,
+                         "读不到：%s" % err.splitlines()[0][:70]))
+        elif not ok:
+            rows.append(("机器码 %s 不在存档记录里" % now, "不在", "在", True,
+                         "存档记录的机器码：%s —— 游戏启动时会 include? 比对，"
+                         "对不上就弹「存档异常」（换机器玩就会碰到）"
+                         % ("、".join(ids) or "（空）")))
+        else:
+            rows.append(("机器码 %s 已在存档记录里" % now, "在", "在", False,
+                         "存档记录的机器码：%s" % "、".join(ids)))
         for iid, nm, rec, act in self.security_rows():
             if rec is not None and rec != act:
                 rows.append(("物品计数校验：%s (id=%d)" % (nm, iid), act, rec,
@@ -718,6 +974,12 @@ class GameEditor(object):
             n = self.resync_security()
             if n:
                 done.append("同步了 %d 件物品的计数校验" % n)
+            # 机器码：换机器玩时，把本机机器码追加进存档
+            now, err, ids, ok = self.machine_status()
+            if now and not ok:
+                self.add_machine_id(now)
+                done.append("机器码 %s 已加进存档（原来只有 %s）"
+                            % (now, "、".join(ids) or "空"))
         if clear_flag:
             n = self.clear_cheat_flag()
             if n:

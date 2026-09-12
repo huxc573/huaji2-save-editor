@@ -12,6 +12,7 @@
 //   XJCodec32.exe info    <main.dll>
 //   XJCodec32.exe decrypt <main.dll> <输入文件> <输出文件> [第三参数]
 //   XJCodec32.exe encrypt <main.dll> <输入文件> <输出文件> [第三参数]
+//   XJCodec32.exe machine <main.dll>            # 取本机机器码
 //   XJCodec32.exe selftest<main.dll>          # 自检：随机数据往返
 //
 // 约定：字符串参数一律以 **UTF-8** 传入（main.dll 内部自己做 UTF8→GBK 转换，
@@ -45,6 +46,9 @@ internal static class XJCodec32
     private const uint LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008;
 
     private delegate int D3(IntPtr a, IntPtr b, IntPtr c);
+
+    /// <summary>无参、返回字符串指针的导出（get_hard_disk_character）。</summary>
+    private delegate IntPtr D0();
 
     private static IntPtr LoadDll(string dll)
     {
@@ -340,6 +344,30 @@ internal static class XJCodec32
                 }
                 Console.WriteLine("[ERR] 输出为空（密文不匹配当前密钥状态）");
                 return 4;
+            }
+
+            if (mode == "machine" || mode == "machineid")
+            {
+                // 取本机机器码：main.dll!get_hard_disk_character()
+                // 游戏脚本里就这么取（`GET_HARD_DISK_CHARACTER.call`），
+                // 存档里 $game_system.config[:hard_disk_code] 存的就是它。
+                IntPtr fn = GetProcAddress(h, "get_hard_disk_character");
+                if (fn == IntPtr.Zero)
+                {
+                    Console.WriteLine("[ERR] main.dll 没有导出 get_hard_disk_character");
+                    return 3;
+                }
+                D0 f = (D0)Marshal.GetDelegateForFunctionPointer(fn, typeof(D0));
+                IntPtr sp = f();
+                if (sp == IntPtr.Zero)
+                {
+                    Console.WriteLine("[ERR] get_hard_disk_character 返回空指针");
+                    return 4;
+                }
+                string mid = Marshal.PtrToStringAnsi(sp);
+                Console.WriteLine("[INFO] id=" + mid);
+                Console.WriteLine("[OK] machine id");
+                return 0;
             }
 
             if (mode == "selftest")

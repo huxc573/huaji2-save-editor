@@ -136,8 +136,9 @@ def note_for(parent, key, child=None):
     if isinstance(p, M.HashNode):
         kv = unwrap(key)
         if isinstance(kv, M.SymbolNode):
-            n = xj_notes.note_of_section(kv.name) or xj_notes.note_of_ivar(
-                ":@" + kv.name)
+            n = (xj_notes.note_of_section(kv.name)
+                 or xj_notes.note_of_ivar(":@" + kv.name)
+                 or xj_notes.note_of_config(kv.name))
             if n:
                 return n
         c = unwrap(child)

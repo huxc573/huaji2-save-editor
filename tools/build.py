@@ -35,7 +35,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.4"
+APP_VERSION = "0.4.1"
 EXE_NAME = "画迹2存档工具v" + APP_VERSION
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")
@@ -96,7 +96,29 @@ def prepare(host_exe, use_dll_dir=False):
         log("已放入发行目录：%s%s" % ("" if not use_dll_dir else "dll/", name))
     if use_dll_dir:
         log("（宿主放在 dll/ 子目录：xj_codec 会依次找 exe 目录、dll/、bin/…）")
+    sweep_old_exes(EXE_NAME + ".exe")
     return target_dir
+
+
+def sweep_old_exes(keep):
+    """把 dist 里**其它版本**的主程序删掉（留着容易点错版本）。
+
+    只删 `画迹2存档工具v*.exe`，不碰宿主 XJCodec32.exe。
+    """
+    try:
+        names = sorted(os.listdir(DIST))
+    except OSError:
+        return
+    for n in names:
+        if not n.endswith(".exe") or n == keep:
+            continue
+        if not n.startswith("画迹2存档工具"):
+            continue
+        try:
+            os.remove(os.path.join(DIST, n))
+            log("  清掉旧版本主程序：%s" % n)
+        except OSError:
+            log("  ! 旧版本主程序删不掉（可能正开着）：%s" % n)
 
 
 # --------------------------------------------------------------------------

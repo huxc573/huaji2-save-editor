@@ -118,8 +118,20 @@ def host_path():
 
 
 def _run(args, timeout=300, cwd=None):
+    """跑 32 位宿主。**不弹黑框**：打包成 --windowed 的 exe 后，
+    直接 subprocess 一个控制台程序会让窗口闪一下（画迹1 就注意到了这件事，
+    用 CREATE_NO_WINDOW 解决）。
+    """
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000            # CREATE_NO_WINDOW
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0                          # SW_HIDE
+        kw["startupinfo"] = si
     p = subprocess.run([host_path()] + args, capture_output=True,
-                       timeout=timeout, cwd=cwd or xj_env.find_game_dir() or HERE)
+                       timeout=timeout, cwd=cwd or xj_env.find_game_dir() or HERE,
+                       **kw)
     txt = (p.stdout or b"").decode("utf-8", "replace") + \
           (p.stderr or b"").decode("utf-8", "replace")
     return p.returncode, txt
@@ -154,6 +166,32 @@ def codec_info(main_dll=None):
     info["_rc"] = rc
     info["_lines"] = lines
     return info
+
+
+def machine_id(main_dll=None):
+    """本机机器码：调用 `main.dll!get_hard_disk_character()`（游戏自己也这么取）。
+
+    存档里 `$game_system.config[:hard_disk_code]` 就是这个值的数组；
+    游戏启动时会 `include?(code)` 比对，不在里面就 "存档异常"。
+    """
+    main_dll = main_dll or xj_env.main_dll()
+    if not main_dll:
+        raise CodecError("找不到 System/main.dll，请用环境变量 XJ_GAME 指定游戏目录")
+    rc, txt = _run(["machine", main_dll])
+    info, lines = parse_info(txt)
+    mid = info.get("id")
+    if rc != 0 or not mid:
+        raise CodecError("取机器码失败（退出码 %d）：\n%s"
+                         % (rc, "\n".join(lines[-6:])))
+    return mid
+
+
+def try_machine_id(main_dll=None):
+    """取机器码，取不到就返回 (None, 原因) —— 界面里不要因为这一步就崩。"""
+    try:
+        return machine_id(main_dll), ""
+    except Exception as e:
+        return None, str(e)
 
 
 def selftest(main_dll=None):

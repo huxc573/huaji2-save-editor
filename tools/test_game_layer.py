@@ -160,7 +160,62 @@ def main():
           M.value_of(xj_save._deref(
               xj_save.ivar(sv.section("system"), "@cheated"))) is False)
 
+    # ---------------- v0.5：机器码
+    now, err, ids, ok = g.machine_status()
+    check("能读到本机机器码", bool(now) and not err, "%s（%s）" % (now, err))
+    check("存档里有机器码记录", len(ids) >= 1, "、".join(ids) or "（空）")
+    check("本机机器码在存档记录里", ok, "本机 %s / 存档 %s" % (now, ids))
+    added = g.add_machine_id("999999999")
+    check("能追加机器码", "999999999" in added and now in added,
+          "、".join(added))
+    added2 = g.add_machine_id("999999999")
+    check("重复追加不会变多", len(added2) == len(added), "、".join(added2))
+    rows_m = [r for r in g.anti_cheat_report() if "机器码" in r[0]]
+    check("体检里有机器码一项", len(rows_m) == 1,
+          rows_m[0][0][:40] if rows_m else "")
+    only = g.set_machine_ids(["888888888"])
+    check("能整组替换机器码", only == ["888888888"] 
+          or only == ["888888888"][:len(only)], "%r" % (only,))
+    g.set_machine_ids(ids)                     # 恢复成原来的
+    check("机器码能恢复原样", g.machine_ids() == ids, "%r" % g.machine_ids())
+
+    # ---------------- v0.5：模板表 / 换物品 / 批量 / 体检
+    tpl = g.templates("Items", limit=10)
+    check("能列出物品模板", len(tpl) >= 5, "%r" % (tpl[:2],))
+    check("模板搜索能用", all("草" in t[1] or "草" in t[2]
+                            for t in g.templates("Items", keyword="草")),
+          "、".join(t[1] for t in g.templates("Items", keyword="草", limit=4)))
+    tpl_id = tpl[1][0] if tpl[1][0] not in [r[3] for r in g.bag("Items")] \
+        else [t[0] for t in tpl if t[0] not in [r[3] for r in g.bag("Items")]][0]
+    free1 = g.empty_slots("Items")[0]
+    g.set_item("Items", free1, tpl_id, 3)
+    check("set_item 能往空格放东西", g.slot_info("Items", free1) == (tpl_id, 3),
+          "%r" % (g.slot_info("Items", free1),))
+    other = [t[0] for t in tpl if t[0] != tpl_id][0]
+    g.set_item("Items", free1, other, 2)
+    check("set_item 能把格子换掉", g.slot_info("Items", free1) == (other, 2),
+          "%r" % (g.slot_info("Items", free1),))
+    check("换物品后计数校验同步了",
+          g.security_total(other) == g.item_counts().get(other, 0),
+          "记录 %s / 实际 %s"
+          % (g.security_total(other), g.item_counts().get(other, 0)))
+    n = g.set_all_counts("Items", 7, 0)
+    check("批量改本页数量能跑",
+          all(c == 7 for _s, p, _i, _id, _nm, c in g.bag("Items", 0)),
+          "改了 %d 格" % n)
+    bad = g.pack_report()
+    check("背包体检能跑", isinstance(bad, list), "%d 项" % len(bad))
+    if bad:
+        done_bad = g.pack_fix(bad)
+        after = g.pack_report()
+        check("一键修复后没有异常格子", not after,
+              "修了 %d 项，还剩 %d 项" % (len(done_bad), len(after)))
+        check("修完计数校验仍对齐",
+              not [r for r in g.security_rows() if r[2] != r[3]],
+              "%r" % [r for r in g.security_rows() if r[2] != r[3]][:2])
+
     # ---------------- 保存 / 重开
+    before = dict((r[0], r[5]) for r in g.bag("Items"))
     plain = sv.doc.plain_bytes()
     M.parse_stream(plain)
     check("结构性改动后仍能序列化并解析", True, "%d 字节" % len(plain))
@@ -168,7 +223,7 @@ def main():
     sv2 = xj_save.SaveDoc(copy)
     g2 = xj_game.GameEditor(sv2)
     check("重开后背包改动还在",
-          dict((r[0], r[5]) for r in g2.bag("Items")).get(slot0) == newcnt,
+          dict((r[0], r[5]) for r in g2.bag("Items")) == before,
           "%r" % dict((r[0], r[5]) for r in g2.bag("Items")))
     aid2, actor2 = sv2.actors()[0]
     check("重开后经验还在", g2.exp(actor2) == e0 + 1000, g2.exp(actor2))

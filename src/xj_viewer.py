@@ -61,7 +61,7 @@ import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4"
+VERSION = "v0.4.1"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -317,6 +317,30 @@ class App(object):
         ttk.Button(gbar, text="同步物品计数校验",
                    command=self.guard_resync).pack(side="left", padx=6)
 
+        # ---- 机器码（存档绑定；换机器玩时要用）
+        m = ttk.LabelFrame(f, text="机器码 / 存档绑定", padding=10)
+        m.pack(fill="x", pady=6)
+        self.var_machine = tk.StringVar(value="机器码：—")
+        ttk.Label(m, textvariable=self.var_machine, justify="left",
+                  foreground="#333", wraplength=1100).pack(anchor="w")
+        self.var_machine_id = tk.StringVar()
+        mbar = ttk.Frame(m)
+        mbar.pack(fill="x", pady=4)
+        ttk.Label(mbar, text="要写入/去掉的机器码：").pack(side="left")
+        ttk.Entry(mbar, textvariable=self.var_machine_id, width=18
+                  ).pack(side="left")
+        ttk.Button(mbar, text="读取本机机器码",
+                   command=self.machine_show).pack(side="left", padx=6)
+        ttk.Button(mbar, text="用本机机器码填上",
+                   command=self.machine_fill_local).pack(side="left", padx=6)
+        ttk.Button(mbar, text="加入存档（追加，推荐）",
+                   command=self.machine_add).pack(side="left", padx=6)
+        ttk.Button(mbar, text="直接替换成这个（只留一个）",
+                   command=self.machine_set).pack(side="left", padx=6)
+        ttk.Label(m, text="游戏启动时会比对存档里的机器码，不匹配就弹「存档异常」。"
+                          "把新机器的机器码「加入」进去就能带着存档换机器玩。",
+                  foreground="#777", justify="left").pack(anchor="w")
+
     # -------------------------------------------------- 2 全部解析数据
     def _tab_tree(self):
         tk, ttk = self.tk, self.ttk
@@ -481,20 +505,61 @@ class App(object):
                             command=self.fill_party).pack(side="left", padx=2)
         ttk.Button(bar, text="刷新", command=self.fill_party).pack(side="right")
 
-        ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；空格子双击也可以直接填物品 id"
-                  ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；左键选格子，右边模板里双击物品＝写进去"
+                  ).pack(anchor="w", pady=(6, 2))
+
+        body = ttk.Panedwindow(f, orient="horizontal")
+        body.pack(fill="both", expand=True)
+
+        # ---- 左：格子列表
+        left = ttk.Frame(body)
+        ttk.Label(left, text="背包格子").pack(anchor="w")
         cols = ("slot", "idx", "id", "name", "count")
-        self.tv_pack = ttk.Treeview(f, columns=cols, show="headings", height=15)
-        for c, w, t in (("slot", 70, "槽号"), ("idx", 60, "格"),
-                        ("id", 70, "物品ID"), ("name", 300, "名称"),
-                        ("count", 80, "数量")):
+        self.tv_pack = ttk.Treeview(left, columns=cols, show="headings", height=14)
+        for c, w, t in (("slot", 60, "槽号"), ("idx", 50, "格"),
+                        ("id", 70, "物品ID"), ("name", 240, "名称"),
+                        ("count", 60, "数量")):
             self.tv_pack.heading(c, text=t)
             self.tv_pack.column(c, width=w, anchor="w")
-        vs = ttk.Scrollbar(f, orient="vertical", command=self.tv_pack.yview)
+        vs = ttk.Scrollbar(left, orient="vertical", command=self.tv_pack.yview)
         self.tv_pack.configure(yscrollcommand=vs.set)
         vs.pack(side="right", fill="y")
         self.tv_pack.pack(fill="both", expand=True)
+        self.tv_pack.bind("<<TreeviewSelect>>", lambda e: self.bag_pick())
         self.tv_pack.bind("<Double-1>", lambda e: self.bag_edit())
+        body.add(left, weight=3)
+
+        # ---- 右：物品模板（从 Data 表读，画迹1 也有这一栏）
+        right = ttk.Frame(body)
+        tr = ttk.Frame(right)
+        tr.pack(fill="x")
+        ttk.Label(tr, text="找物品：").pack(side="left")
+        self.var_tpl_kw = tk.StringVar()
+        ent = ttk.Entry(tr, textvariable=self.var_tpl_kw, width=16)
+        ent.pack(side="left")
+        ent.bind("<Return>", lambda e: self.fill_templates())
+        ttk.Button(tr, text="找", width=4,
+                   command=self.fill_templates).pack(side="left", padx=3)
+        ttk.Label(right, text="物品模板（Data\\%s.rvdata2）"
+                  % "Items").pack(anchor="w")
+        self.tv_tpl = ttk.Treeview(right, columns=("id", "name"),
+                                   show="headings", height=11)
+        for c, w, t in (("id", 60, "ID"), ("name", 190, "名称")):
+            self.tv_tpl.heading(c, text=t)
+            self.tv_tpl.column(c, width=w, anchor="w")
+        vs2 = ttk.Scrollbar(right, orient="vertical", command=self.tv_tpl.yview)
+        self.tv_tpl.configure(yscrollcommand=vs2.set)
+        vs2.pack(side="right", fill="y")
+        self.tv_tpl.pack(fill="both", expand=True)
+        self.tv_tpl.bind("<Double-1>", lambda e: self.bag_use_template())
+        self.var_tpl_note = tk.StringVar(value="")
+        ttk.Label(right, textvariable=self.var_tpl_note, foreground="#555",
+                  wraplength=300, justify="left").pack(anchor="w", pady=2)
+        ttk.Button(right, text="写入选中的格子（双击模板也行）",
+                   command=self.bag_use_template).pack(fill="x", pady=2)
+        ttk.Button(right, text="放进第一个空格子",
+                   command=lambda: self.bag_use_template(False)).pack(fill="x")
+        body.add(right, weight=2)
 
         act = ttk.Frame(f)
         act.pack(fill="x", pady=4)
@@ -506,14 +571,22 @@ class App(object):
         ttk.Entry(act, textvariable=self.var_bag_cnt, width=6).pack(side="left")
         ttk.Button(act, text="改数量",
                    command=self.bag_set_count).pack(side="left", padx=6)
-        ttk.Button(act, text="添加物品",
+        ttk.Button(act, text="按 id 写入",
                    command=self.bag_add).pack(side="left", padx=6)
         ttk.Button(act, text="清空格子",
                    command=self.bag_clear).pack(side="left", padx=6)
+        ttk.Button(act, text="本页全部 99",
+                   command=lambda: self.bag_all(99)).pack(side="left", padx=6)
+        ttk.Button(act, text="背包体检",
+                   command=self.bag_check).pack(side="left", padx=6)
+        ttk.Button(act, text="一键修复",
+                   command=self.bag_fix).pack(side="left", padx=6)
+        ttk.Button(act, text="同步计数校验",
+                   command=self.guard_resync).pack(side="left", padx=6)
 
         self.var_bag_note = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.var_bag_note, foreground="#555",
-                  justify="left", wraplength=1100).pack(anchor="w")
+                  justify="left", wraplength=1150).pack(anchor="w")
 
     # -------------------------------------------------- 4.5 召唤兽
     def _tab_baby(self):
@@ -965,6 +1038,7 @@ class App(object):
                          ("角色", self.fill_actors), ("背包", self.fill_party),
                          ("召唤兽", self.fill_babies),
                          ("开关/变量", self.fill_switches),
+                         ("机器码", lambda: self.machine_show(quiet=True)),
                          ("环境信息", self.refresh_env)):
             try:
                 fn()
@@ -1503,11 +1577,228 @@ class App(object):
                 self.tv_pack.insert("", "end", iid="s%d" % slot,
                                     values=(slot, i, "（空）", "", ""))
         bad = [r for r in self.g.security_rows() if r[2] != r[3]]
+        try:
+            self.bag_bad = self.g.pack_report(kinds=(kind,))
+        except Exception:
+            self.bag_bad = []
         note = ("物品计数校验（游戏自己的 `$game_system.security`）：%d 条记录%s"
                 % (len(self.g.security_rows()),
-                   "，有 %d 条和背包对不上（点「保存修改」前建议先跑一次「防作弊体检」）"
-                   % len(bad) if bad else "，全部对得上 ✓"))
+                   "，有 %d 条和背包对不上（点「同步计数校验」）" % len(bad)
+                   if bad else "，全部对得上 ✓"))
+        if self.bag_bad:
+            note += ("\n这一页背包体检：%d 项异常（点「背包体检」看详情、"
+                     "「一键修复」处理）" % len(self.bag_bad))
         self.var_bag_note.set(note)
+        self.fill_templates()
+
+    # ------------------------------------------------ 物品模板（从 Data 表读）
+    def fill_templates(self):
+        """右侧模板列表：可搜索、双击写进当前选中的格子（仿画迹1）。"""
+        if not hasattr(self, "tv_tpl"):
+            return
+        self.tv_tpl.delete(*self.tv_tpl.get_children())
+        if not self.sv or self.g is None:
+            return
+        kind = self.var_bag_kind.get()
+        kw = self.var_tpl_kw.get()
+        try:
+            rows = self.g.templates(kind, keyword=kw, limit=400)
+        except Exception as e:
+            self.var_tpl_note.set("读不到 Data 表：%s" % human(str(e))[:80])
+            return
+        self.tpl_rows = rows
+        for iid, nm, _desc in rows:
+            self.tv_tpl.insert("", "end", iid="t%d" % iid, values=(iid, nm))
+        self.var_tpl_note.set("共 %d 个%s" % (len(rows), "（已过滤）" if kw else ""))
+
+    def _bag_slot(self, quiet=False):
+        sel = self.tv_pack.selection()
+        if not sel:
+            if not quiet:
+                messagebox.showinfo("提示", "先在左边点一个格子。", parent=self.root)
+            return None
+        return int(sel[0][1:])
+
+    def bag_pick(self):
+        """选中格子 → 把 id / 数量填到输入框（仿画迹1 的 load_pack_edit）。"""
+        slot = self._bag_slot(quiet=True)
+        if slot is None or not self.g:
+            return
+        kind = self._bag_kind()
+        info = None
+        for r in self.g.bag(kind):
+            if r[0] == slot:
+                info = r
+                break
+        if info:
+            self.var_bag_id.set(str(info[3]))
+            self.var_bag_cnt.set(str(info[5]))
+            self.set_status("槽 %d：%s ×%d（id=%d）" % (slot, info[4], info[5], info[3]))
+        else:
+            self.var_bag_id.set("")
+            self.var_bag_cnt.set("1")
+            self.set_status("槽 %d：空格" % slot)
+
+    def bag_use_template(self, into_selected=True):
+        """把右边选中的模板写进背包：into_selected=选中格子，False=第一个空格。
+
+        画迹1 的做法也是这样：模板列表 + 写进指定槽位（会换掉原来那件东西）。
+        """
+        if not self.g:
+            return
+        sel = self.tv_tpl.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在右边选一个物品模板。",
+                                parent=self.root)
+            return
+        iid = int(sel[0][1:])
+        kind = self._bag_kind()
+        try:
+            n = int(self.var_bag_cnt.get() or "1", 0)
+        except ValueError:
+            n = 1
+        if into_selected:
+            slot = self._bag_slot()
+            if slot is None:
+                return
+        else:
+            page = self.var_bag_page.get()
+            used = set(r[0] for r in self.g.bag(kind, page))
+            free = [self.g.slot_key(page, i)
+                    for i in range(xj_game.PACK_PAGE_SIZE)
+                    if self.g.slot_key(page, i) not in used]
+            if not free:
+                messagebox.showinfo("提示", "这一页没空格了，先清一个。",
+                                    parent=self.root)
+                return
+            slot = free[0]
+        try:
+            self.g.set_item(kind, slot, iid, n)
+        except Exception as e:
+            messagebox.showerror("写入失败", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_party()
+        self.tv_pack.selection_set("s%d" % slot)
+        self.set_status("槽 %d 已换成 id=%d ×%d（计数校验已同步；保存时会整档重写）"
+                        % (slot, iid, n))
+
+    def bag_all(self, count=99):
+        """把本页已有格子的数量批量设成 count。"""
+        slot = self._bag_slot(quiet=True)
+        page = (slot // xj_game.PACK_PAGE_SIZE if slot is not None
+                else self.var_bag_page.get())
+        try:
+            n = self.g.set_all_counts(self._bag_kind(), count, page)
+        except Exception as e:
+            messagebox.showerror("批量修改失败", human(str(e)), parent=self.root)
+            return
+        if n:
+            self.mark_dirty()
+            self.fill_party()
+        self.set_status("背包第 %d 页：已把 %d 个格子的数量改成 %d"
+                        % (page + 1, n, count))
+
+    def bag_check(self):
+        """背包体检：把不正常的格子（结构坏/id 无效/数量 0/超上限/重复）列出来。"""
+        if not self.g:
+            return []
+        try:
+            rows = self.g.pack_report()
+        except Exception as e:
+            self.err(e)
+            return []
+        self.bag_bad = rows
+        cn = dict((k[0], k[2]) for k in xj_game.KINDS)
+        lines = "\n".join("  [%s] 槽 %s %s：%s"
+                          % (cn.get(k, k), s, nm, why)
+                          for k, s, nm, why, _f, _e in rows[:20])
+        messagebox.showinfo("背包体检",
+                            ("发现问题 %d 项：\n%s%s"
+                             % (len(rows), lines,
+                                "\n…（只显示前 20 项）" if len(rows) > 20 else ""))
+                            if rows else "背包里没发现问题 ✓",
+                            parent=self.root)
+        self.fill_party()
+        return rows
+
+    def bag_fix(self):
+        """一键修复：重复格合并、数量超上限截断、坏格子清空。"""
+        if not self.g:
+            return
+        try:
+            done = self.g.pack_fix()
+        except Exception as e:
+            messagebox.showerror("修复失败", human(str(e)), parent=self.root)
+            return
+        if done:
+            self.mark_dirty()
+            self.refresh_panels()
+        messagebox.showinfo(
+            "背包修复",
+            "已处理：\n  " + "\n  ".join("%s 槽 %s %s" % d for d in done[:20])
+            if done else "没发现需要修的。",
+            parent=self.root)
+
+    # ------------------------------------------------ 机器码（存档绑定）
+    def machine_show(self, quiet=False):
+        """读本机机器码 + 存档里记录的机器码。本机码放进输入框方便直接用。"""
+        if not self.g:
+            return
+        try:
+            now, err, ids, ok = self.g.machine_status()
+        except Exception as e:
+            self.var_machine.set("机器码：读失败（%s）" % human(str(e))[:70])
+            return
+        if now and not self.var_machine_id.get().strip():
+            self.var_machine_id.set(now)
+        if err:
+            self.var_machine.set("本机机器码：读不到 — %s" % err.splitlines()[0][:80])
+        else:
+            self.var_machine.set(
+                "本机机器码：%s　%s\n存档记录的机器码：%s"
+                % (now, "✓ 在存档记录里" if ok else "✗ 不在存档记录里（换机器玩会弹「存档异常」）",
+                   "、".join(ids) or "（空）"))
+        if not quiet:
+            self.set_status("机器码：本机 %s / 存档 %s"
+                            % (now or "?", "、".join(ids) or "空"))
+
+    def machine_fill_local(self):
+        """只读一次本机机器码填进输入框（不写入存档）。"""
+        if not self.g:
+            return
+        now, err, _ids, _ok = self.g.machine_status()
+        if err:
+            messagebox.showerror("取机器码", human(err), parent=self.root)
+            return
+        self.var_machine_id.set(now)
+        self.machine_show(quiet=True)
+
+    def _machine_apply(self, replace=False):
+        mid = self.var_machine_id.get().strip()
+        if not mid:
+            messagebox.showinfo("提示", "先填一个机器码（可以点「读取本机机器码」）。",
+                                parent=self.root)
+            return
+        try:
+            if replace:
+                ids = self.g.set_machine_ids([mid])
+            else:
+                ids = self.g.add_machine_id(mid)
+        except Exception as e:
+            messagebox.showerror("写入失败", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.machine_show(quiet=True)
+        if self.g:
+            self.guard_check()
+        self.set_status("存档机器码现在有：%s" % "、".join(ids))
+
+    def machine_add(self):
+        self._machine_apply(False)
+
+    def machine_set(self):
+        self._machine_apply(True)
 
     # ------------------------------------------------ 背包操作
     def _bag_sel(self):

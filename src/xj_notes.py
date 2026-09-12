@@ -136,7 +136,9 @@ IVAR_NOTES = {
     "@version_id": "版本号",
     "@gm_version": "GM 版本",
     "@seeds": "随机种子表（防作弊校验种子在这里面）",
-    "@security": "安全/校验信息",
+    "@security": "安全/校验信息（物品计数校验：id → Change 对象）",
+    "@config": "系统设置（机器码、网码、快捷键…）；换机器玩要改里面的 hard_disk_code",
+    "@seeds": "随机种子（含防作弊用的 :shield）",
     "@frames_on_save": "存档时的游戏帧数",
     "@game_time": "游戏时间",
     "@config": "设置（音量、按键、本机硬盘码…）",
@@ -229,6 +231,17 @@ SWITCH_NAMES = {
     1: "MAP_SCROLL 地图卷动",
     2: "PLOTING 剧情进行中（演出时锁操作）",
 }
+
+# `$game_system.config` 里的键（存档绑定等）
+CONFIG_NOTES = {
+    "hard_disk_code": "机器码（数组）：游戏启动时比对本机机器码，不匹配就弹「存档异常」；"
+                      "换机器玩就把它加进去（工具里「机器码」面板可以一键处理）",
+    "network_synchronous_code": "联网同步码",
+    "send_temp": "发送临时标记",
+    "shortcut_skill": "快捷键技能",
+    "show_mp_bar": "显示魔法条",
+    "dead_battler_command": "倒下队友指令",
+}
 VARIABLE_NAMES = {
     0: "（未使用）",
     1: "CHOICS_COLUMN 选项列数（对话框选项排几列）",
@@ -280,3 +293,8 @@ def note_of_variable(i, raw=None):
 def note_of_container(cls):
     """按容器/对象类名给一句说明。"""
     return CLASS_NOTES.get(cls, "")
+
+
+def note_of_config(key):
+    """`$game_system.config` 里的键 → 中文说明。"""
+    return CONFIG_NOTES.get(key, "")
