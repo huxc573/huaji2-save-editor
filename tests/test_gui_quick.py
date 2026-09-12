@@ -228,6 +228,11 @@ def main():
                   "%r" % (row0[:1],))
         say("往空格加一件物品…")
         free = app.g.empty_slots("Items")[0]
+        # 空格可能在别的翻页上：先切到那一页，列里才有这个格子
+        if free // 20 != app.var_bag_page.get():
+            app.var_bag_page.set(free // 20)
+            app.fill_party()
+            root.update()
         app.var_bag_id.set("1")
         app.var_bag_cnt.set("3")
         app.tv_pack.selection_set("s%d" % free)
@@ -241,6 +246,10 @@ def main():
         root.update()
         check("界面清空格子生效",
               not [r for r in app.g.bag("Items") if r[0] == free])
+        if app.var_bag_page.get() != 0:      # 切回第 1 页，后面的用例按第 1 页写的
+            app.var_bag_page.set(0)
+            app.fill_party()
+            root.update()
 
         # ---------------- v0.5：模板列表 / 写进格子 / 批量 / 体检
         check("模板列表已填充（画迹1 那种右栏）",
@@ -395,6 +404,92 @@ def main():
             check("召唤兽预设生效",
                   app.g.baby_value(app._baby(), "loyalty") == 100.0,
                   app.g.baby_value(app._baby(), "loyalty"))
+
+        # ---------------- v0.4.6：召唤兽补全（列表 / 新增 / 技能 / 出战 / 改名 / 放生）
+        say("召唤兽补全（新增小孩 / 技能 / 出战 / 改名 / 放生）…")
+        dlg_mark2 = len(dialogs)
+        check("召唤兽一览表建得起来",
+              hasattr(app, "tv_babies") and len(app.tv_babies.get_children()) >= 1,
+              "%d 只" % len(app.tv_babies.get_children()))
+        n0 = len(app.baby_rows)
+        a0 = app._baby_actor()
+        app._quick_add(a0, 181)                 # 小精灵（神兽资质3）
+        root.update()
+        check("界面「新增召唤兽」能加小孩（小精灵）",
+              len(app.baby_rows) == n0 + 1
+              and any(app.g.baby_name(x) == "小精灵" for _i, x in app.baby_rows),
+              "%d -> %d：%s" % (n0, len(app.baby_rows),
+                               [app.g.baby_name(x) for _i, x in app.baby_rows]))
+        newb = [x for _i, x in app.baby_rows if app.g.baby_name(x) == "小精灵"][0]
+        check("新召唤兽资质 = 神兽资质3 定值",
+              [app.g.baby_value(newb, k)
+               for k in ("atk", "def", "hpq", "mpq", "agi", "eva")]
+              == [2400, 2400, 7500, 4800, 2100, 2100],
+              app.g.baby_value(newb, "atk"))
+        check("新召唤兽自带技能（神兽 = 全学）",
+              len(app.babies_ed().skills(newb)) > 0,
+              "%d 个" % len(app.babies_ed().skills(newb)))
+        app.tv_babies.selection_set("bb%d" % app.baby_rows[-1][0])
+        app.on_baby_select()
+        root.update()
+        check("选中新那只后名字显示出来",
+              app.var_baby_name.get() == "小精灵", app.var_baby_name.get())
+        say("改技能…")
+        app.babies_ed().clear_skills(app._baby())
+        app.load_baby()
+        app.fill_skill_templates()
+        app.var_skill_pick.set("#45 高级必杀"
+                               if "#45 高级必杀" in app.cb_skill["values"]
+                               else app.cb_skill["values"][0])
+        app.baby_skill_add()
+        root.update()
+        check("界面「学会技能」生效",
+              len(app.babies_ed().skills(app._baby())) == 1,
+              app.babies_ed().skills(app._baby()))
+        app.tv_baby_skills.selection_set("sk%d" % app.babies_ed().skills(app._baby())[0])
+        app.baby_skill_del()
+        root.update()
+        check("界面「忘掉选中」生效",
+              app.babies_ed().skills(app._baby()) == [],
+              app.babies_ed().skills(app._baby()))
+        say("改名 / 出战 / 放生…")
+        app.var_baby_name.set("我的小精灵")
+        app.baby_rename()
+        root.update()
+        check("界面「改显示名」生效（不在名字表里会先弹确认）",
+              app.g.baby_name(app._baby()) == "我的小精灵",
+              app.g.baby_name(app._baby()))
+        app.baby_restore_name()
+        root.update()
+        check("界面「恢复模板名」生效",
+              app.g.baby_name(app._baby()) == "小精灵", app.g.baby_name(app._baby()))
+        app.baby_set_active()
+        root.update()
+        check("界面「设为出战」生效",
+              app.babies_ed().active_index(a0) == app.baby_rows[-1][0],
+              app.babies_ed().active_index(a0))
+        n1 = len(app.baby_rows)
+        app.baby_delete()
+        root.update()
+        check("界面「放生」生效", len(app.baby_rows) == n1 - 1,
+              "%d -> %d" % (n1, len(app.baby_rows)))
+        check("删掉出战那只后自动换人出战",
+              app.babies_ed().active_index(a0) == 0,
+              app.babies_ed().active_index(a0))
+        app.baby_add_dialog()          # 打开「新增召唤兽」窗口（不点确定，只建得起来）
+        root.update()
+        opened = [w for w in root.winfo_children()
+                  if isinstance(w, app.tk.Toplevel)]
+        check("「新增召唤兽」窗口能打开",
+              any(w.winfo_exists() for w in opened), "%d 个窗口" % len(opened))
+        for w in opened:               # 关掉，别把 grab 留着
+            try:
+                w.grab_release()
+            except Exception:
+                pass
+            w.destroy()
+        root.update()
+        del dialogs[dlg_mark2:]        # 这一段自造的弹框不算数
 
         # ---------------- 防作弊体检
         say("防作弊体检…")

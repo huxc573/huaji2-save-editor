@@ -51,6 +51,7 @@ import tkinter as tk                              # noqa: E402
 from tkinter import filedialog, messagebox, ttk  # noqa: E402
 
 import xj_backup  # noqa: E402
+import xj_baby    # noqa: E402
 import xj_codec   # noqa: E402
 import xj_db      # noqa: E402
 import xj_env     # noqa: E402
@@ -61,8 +62,24 @@ import xj_nodes   # noqa: E402
 import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
+
+class _IV(object):
+    """`xj_save.ival(节点, "@actor_id")` 那种写法的小侍从（拿整数 ivar）。"""
+
+    @staticmethod
+    def ival(obj, name, default=0):
+        v = M.value_of(xj_save._deref(xj_save.ivar(obj, name)))
+        try:
+            return default if v is None else int(v)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def none(obj, name, default=None):
+        return xj_save._deref(xj_save.ivar(obj, name))
+
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.5"
+VERSION = "v0.4.6"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -978,31 +995,44 @@ class App(object):
         ttk.Label(top, text="角色：").pack(side="left")
         self.var_baby_actor = tk.StringVar()
         self.cb_baby_actor = ttk.Combobox(top, textvariable=self.var_baby_actor,
-                                          state="readonly", width=24)
+                                          state="readonly", width=22)
         self.cb_baby_actor.pack(side="left")
         self.cb_baby_actor.bind("<<ComboboxSelected>>",
                                 lambda e: self.fill_baby_list())
-        ttk.Label(top, text="　召唤兽：").pack(side="left")
-        self.var_baby_sel = tk.StringVar()
-        self.cb_baby = ttk.Combobox(top, textvariable=self.var_baby_sel,
-                                    state="readonly", width=24)
-        self.cb_baby.pack(side="left")
-        self.cb_baby.bind("<<ComboboxSelected>>", lambda e: self.load_baby())
-        ttk.Label(top, text="　（游戏里\"携带\"的那几只，上限 65 级）",
-                  foreground="#777").pack(side="left")
+        ttk.Button(top, text="新增召唤兽",
+                   command=self.baby_add_dialog).pack(side="left", padx=(10, 4))
+        ttk.Button(top, text="设为出战",
+                   command=self.baby_set_active).pack(side="left")
+        ttk.Button(top, text="放生（删除）",
+                   command=self.baby_delete).pack(side="left", padx=4)
+        ttk.Button(top, text="恢复模板名",
+                   command=self.baby_restore_name).pack(side="left")
 
-        cols = ("k", "v", "note")
-        self.tv_baby = ttk.Treeview(f, columns=cols, show="headings", height=13)
-        for c, w, t in (("k", 200, "字段"), ("v", 120, "当前值"),
-                        ("note", 460, "说明")):
-            self.tv_baby.heading(c, text=t)
-            self.tv_baby.column(c, width=w, anchor="w")
-        self.tv_baby.pack(fill="both", expand=True, pady=6)
-        self.tv_baby.bind("<<TreeviewSelect>>", lambda e: self.baby_pick())
+        self.var_baby_note = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.var_baby_note, foreground="#555",
+                  justify="left", wraplength=1180).pack(anchor="w", pady=(4, 4))
+
+        # ---------------- 召唤兽列表（画迹1 那种一览）
+        cols = ("no", "name", "tpl", "lv", "grow", "loyal", "life", "atk",
+                "def", "hp", "mp", "agi", "eva", "sk", "act")
+        heads = ("序", "名字", "模板", "等级", "成长", "忠诚", "寿命", "攻资",
+                 "防资", "体资", "法资", "速资", "躲资", "技能", "出战")
+        widths = (34, 104, 108, 50, 54, 54, 66, 60, 60, 60, 60, 60, 60, 44, 44)
+        self.tv_babies = ttk.Treeview(f, columns=cols, show="headings",
+                                      height=8, selectmode="browse")
+        for c, h, w in zip(cols, heads, widths):
+            self.tv_babies.heading(c, text=h)
+            self.tv_babies.column(c, width=w, anchor="w")
+        self.tv_babies.tag_configure("active", foreground="#0a0")
+        hs = ttk.Scrollbar(f, orient="horizontal", command=self.tv_babies.xview)
+        self.tv_babies.configure(xscrollcommand=hs.set)
+        self.tv_babies.pack(fill="x")
+        hs.pack(fill="x")
+        self.tv_babies.bind("<<TreeviewSelect>>", lambda e: self.on_baby_select())
 
         edit = ttk.Frame(f)
-        edit.pack(fill="x")
-        ttk.Label(edit, text="改：").pack(side="left")
+        edit.pack(fill="x", pady=(6, 0))
+        ttk.Label(edit, text="改字段：").pack(side="left")
         self.var_baby_key = tk.StringVar()
         ttk.Entry(edit, textvariable=self.var_baby_key, width=12,
                   state="readonly").pack(side="left")
@@ -1012,14 +1042,71 @@ class App(object):
                                                                    padx=6)
         for txt, what in (("满级(65)", "maxlv"), ("回满气血/魔法", "heal"),
                           ("忠诚满", "loyalty"), ("寿命满", "life"),
-                          ("六项资质+100", "qual"), ("五维+10", "five")):
+                          ("六项资质+100", "qual"), ("六项资质+500", "qual500"),
+                          ("成长+0.1", "grow"), ("五维+10", "five")):
             ttk.Button(edit, text=txt,
                        command=lambda w=what: self.baby_preset(w)
-                       ).pack(side="left", padx=3)
+                       ).pack(side="left", padx=2)
 
-        self.txt_baby = tk.Text(f, height=6, wrap="word",
+        mid = ttk.Frame(f)
+        mid.pack(fill="both", expand=True, pady=(6, 0))
+        left = ttk.Frame(mid)
+        left.pack(side="left", fill="both", expand=True)
+        cols2 = ("k", "v", "note")
+        self.tv_baby = ttk.Treeview(left, columns=cols2, show="headings", height=12)
+        for c, w, t in (("k", 190, "字段"), ("v", 110, "当前值"),
+                        ("note", 300, "说明")):
+            self.tv_baby.heading(c, text=t)
+            self.tv_baby.column(c, width=w, anchor="w")
+        self.tv_baby.pack(fill="both", expand=True)
+        self.tv_baby.bind("<<TreeviewSelect>>", lambda e: self.baby_pick())
+
+        # ---------------- 名字 + 技能
+        right = ttk.Frame(mid)
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        nf = ttk.LabelFrame(right, text="名字（游戏显示 @attr.@name）", padding=6)
+        nf.pack(fill="x")
+        self.var_baby_name = tk.StringVar()
+        ttk.Entry(nf, textvariable=self.var_baby_name, width=16).pack(side="left")
+        ttk.Button(nf, text="改显示名",
+                   command=self.baby_rename).pack(side="left", padx=3)
+        ttk.Button(nf, text="改基础名",
+                   command=lambda: self.baby_rename(base=True)).pack(side="left")
+        self.var_baby_name_ok = tk.StringVar(value="")
+        ttk.Label(nf, textvariable=self.var_baby_name_ok,
+                  foreground="#777").pack(side="left", padx=8)
+
+        skf = ttk.LabelFrame(right, text="技能（@skills，最多 12 个）", padding=6)
+        skf.pack(fill="both", expand=True, pady=(6, 0))
+        skbar = ttk.Frame(skf)
+        skbar.pack(fill="x")
+        ttk.Label(skbar, text="搜索").pack(side="left")
+        self.var_skill_search = tk.StringVar()
+        ske = ttk.Entry(skbar, textvariable=self.var_skill_search, width=10)
+        ske.pack(side="left", padx=3)
+        ske.bind("<KeyRelease>", lambda e: self.fill_skill_templates())
+        self.var_skill_pick = tk.StringVar()
+        self.cb_skill = ttk.Combobox(skbar, textvariable=self.var_skill_pick,
+                                     state="readonly", width=26)
+        self.cb_skill.pack(side="left")
+        ttk.Button(skbar, text="学会", command=self.baby_skill_add).pack(side="left",
+                                                                       padx=4)
+        ttk.Button(skbar, text="忘掉选中",
+                   command=self.baby_skill_del).pack(side="left")
+        ttk.Button(skbar, text="清空", command=self.baby_skill_clear).pack(
+            side="left", padx=4)
+        self.tv_baby_skills = ttk.Treeview(skf, columns=("id", "name"),
+                                           show="headings", height=6,
+                                           selectmode="browse")
+        self.tv_baby_skills.heading("id", text="技能 id")
+        self.tv_baby_skills.heading("name", text="名字")
+        self.tv_baby_skills.column("id", width=70, anchor="w")
+        self.tv_baby_skills.column("name", width=220, anchor="w")
+        self.tv_baby_skills.pack(fill="both", expand=True, pady=(6, 0))
+
+        self.txt_baby = tk.Text(f, height=3, wrap="word",
                                 font=("Microsoft YaHei UI", 10))
-        self.txt_baby.pack(fill="both", expand=True, pady=(6, 0))
+        self.txt_baby.pack(fill="x", pady=(6, 0))
 
     def fill_babies(self):
         """刷角色下拉框（召唤兽列表依赖它）。"""
@@ -1047,57 +1134,394 @@ class App(object):
                 return a
         return None
 
+    def babies_ed(self):
+        """召唤兽助手（xj_baby.Babies）——换存档后重建一次。"""
+        if getattr(self, "_babies_src", None) is not self.g or not hasattr(
+                self, "_babies_obj"):
+            self._babies_obj = xj_baby.Babies(self.g) if self.g is not None \
+                else None
+            self._babies_src = self.g
+        return self._babies_obj
+
+    @staticmethod
+    def _life_text(v):
+        if v == "infinite":
+            return "永生"
+        return "" if v is None else v
+
     def fill_baby_list(self):
+        """刷召唤兽列表（画迹1 那种一览表）。"""
         self.baby_rows = []
+        self.tv_babies.delete(*self.tv_babies.get_children())
         a = self._baby_actor()
-        if a is None or self.g is None:
-            self.cb_baby["values"] = []
+        bd = self.babies_ed()
+        if a is None or self.g is None or bd is None:
+            self.var_baby_note.set("")
             return
         self.baby_rows = self.g.babies(a)
-        names = []
+        act_i = bd.active_index(a)
         for i, b in self.baby_rows:
-            tag = "（出战）" if self.g.active_baby(a) is b else ""
-            names.append("#%d %s%s" % (i, self.g.baby_name(b), tag))
-        self.cb_baby["values"] = names
-        if names:
-            self.var_baby_sel.set(names[0])
-            self.load_baby()
+            def v(k, _b=b):
+                return self.g.baby_value(_b, k)
+            tags = ("active",) if i == act_i else ()
+            self.tv_babies.insert(
+                "", "end", iid="bb%d" % i,
+                values=("%d" % i, self.g.baby_name(b),
+                        "%s(%s)" % (bd.template_name(b), _IV.ival(b, "@actor_id")),
+                        v("level"), v("grow"), v("loyalty"), self._life_text(v("life")),
+                        v("atk"), v("def"), v("hpq"), v("mpq"), v("agi"), v("eva"),
+                        len(bd.skills(b)), "★" if i == act_i else ""),
+                tags=tags)
+        self.var_baby_note.set(
+            "共 %d 只（★ = 当前出战）；「新增召唤兽」可以加任意一种，"
+            "包括正常玩法拿不到的**小孩**（小精灵/小毛头/小魔头/小仙灵/"
+            "小仙女/小丫丫，它们属于神兽资质3 池，没有任何道具能开出来）。"
+            % len(self.baby_rows))
+        kids = self.tv_babies.get_children()
+        if kids:
+            self.tv_babies.selection_set(kids[0])
+            self.on_baby_select()
         else:
-            self.var_baby_sel.set("")
-            self.tv_baby.delete(*self.tv_baby.get_children())
+            self.load_baby()
+
+    def on_baby_select(self):
+        self.load_baby()
+
+    def refresh_baby_list_keep(self, baby):
+        """刷列表，但“选中”还是原来那只（不然会跳回第一行）。"""
+        idx = [k for k, x in self.baby_rows if x is baby]
+        self.fill_baby_list()
+        if not idx:
+            return
+        iid = "bb%d" % idx[0]
+        try:
+            if self.tv_babies.exists(iid):
+                self.tv_babies.selection_set(iid)
+                self.on_baby_select()
+        except Exception:
+            pass
 
     def _baby(self):
-        sel = self.var_baby_sel.get()
-        for i, b in self.baby_rows:
-            if sel.startswith("#%d " % i):
+        sel = self.tv_babies.selection()
+        if not sel:
+            return None
+        i = int(sel[0][2:])
+        for k, b in self.baby_rows:
+            if k == i:
                 return b
         return None
 
     def load_baby(self):
         b = self._baby()
         self.tv_baby.delete(*self.tv_baby.get_children())
+        self.tv_baby_skills.delete(*self.tv_baby_skills.get_children())
         self.txt_baby.delete("1.0", "end")
+        self.var_baby_name.set("")
+        self.var_baby_name_ok.set("")
         if b is None or self.g is None:
             return
+        bd = self.babies_ed()
         for key, label, _path, _t in xj_game.GameEditor.BABY_FIELDS:
             v = self.g.baby_value(b, key)
+            if key == "life":
+                v = self._life_text(v)
             self.tv_baby.insert("", "end", iid="b_%s" % key,
                                 values=(label, "" if v is None else v, key))
-        sk = "、".join("#%d %s" % (i, nm) for i, nm in self.g.baby_skills(b))
+        sk = self.g.baby_skills(b)
+        tpl_id = _IV.ival(b, "@actor_id")
+        idx = [k for k, x in self.baby_rows if x is b]
+        names = self._skill_names()
+        for sid in bd.skills(b):
+            self.tv_baby_skills.insert("", "end", iid="sk%d" % sid,
+                                       values=(sid, names.get(sid, "?")))
+        self.var_baby_name.set(bd.display_name(b))
+        ok = bd.name_ok(bd.display_name(b))
+        self.var_baby_name_ok.set("√ 名字在游戏名字表里" if ok
+                                  else "⚠ 名字不在名字表里（战斗可能取不到立绘）")
+        self.fill_skill_templates()
         self.txt_baby.insert("1.0", "\n".join([
-            "召唤兽：%s（@attr.@name = %s）"
-            % (self.g.baby_name(b), self.g.baby_name(b)),
-            "已学技能：%s" % (sk or "（无）"),
-            "等级/忠诚/寿命/成长：%s / %s / %s / %s"
-            % (self.g.baby_value(b, "level"), self.g.baby_value(b, "loyalty"),
-               self.g.baby_value(b, "life"), self.g.baby_value(b, "grow")),
-            "提示：游戏的周期检查只看\"当前出战那只\"的等级（>65 算作弊），"
-            "所以这里所有召唤兽都别超过 65 级。",
+            "第 %d 只：%s（模板 %s #%d，%s）　等级 %s / 忠诚 %s / 寿命 %s / 成长 %s"
+            % (idx[0] if idx else -1, bd.display_name(b), bd.template_name(b),
+               tpl_id, "神兽" if bd.is_god(tpl_id) else "普通",
+               self.g.baby_value(b, "level"), self.g.baby_value(b, "loyalty"),
+               self._life_text(self.g.baby_value(b, "life")),
+               self.g.baby_value(b, "grow")),
+            "已学技能：%s" % ("、".join("#%d %s" % (i, n) for i, n in sk) or "（无）"),
+            "提示：游戏的周期检查只看「当前出战那只」的等级（>65 算作弊）；"
+            "五维总点数也有上限（等级×10+500）。改完记得 Ctrl+S。",
         ]))
         kids = self.tv_baby.get_children()
         if kids:
             self.tv_baby.selection_set(kids[0])
             self.baby_pick()
+
+    # -------------------------------------------------- 4.6 召唤兽：新增/删除/名字/技能
+    def _skill_names(self):
+        if getattr(self, "_skill_name_cache", None) is None:
+            try:
+                self._skill_name_cache = xj_db.name_map("Skills")
+            except Exception:
+                self._skill_name_cache = {}
+        return self._skill_name_cache
+
+    def fill_skill_templates(self):
+        nm = self._skill_names()
+        kw = self.var_skill_search.get().strip()
+        vals = []
+        for i in sorted(nm):
+            if not nm[i]:
+                continue
+            if kw and kw not in nm[i] and kw != str(i):
+                continue
+            vals.append("#%d %s" % (i, nm[i]))
+        self._skill_choices = vals
+        self.cb_skill["values"] = vals
+        if vals and self.var_skill_pick.get() not in vals:
+            self.var_skill_pick.set(vals[0])
+
+    def _skill_pick_id(self):
+        s = self.var_skill_pick.get()
+        if s.startswith("#") and " " in s:
+            try:
+                return int(s[1:s.index(" ")])
+            except ValueError:
+                return None
+        return None
+
+    def baby_skill_add(self):
+        b = self._baby()
+        sid = self._skill_pick_id()
+        if b is None or sid is None:
+            messagebox.showinfo("提示", "先在列表里选一只召唤兽、再选一个技能。",
+                                parent=self.root)
+            return
+        try:
+            self.babies_ed().learn(b, sid)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        self.load_baby()
+        self.refresh_baby_list_keep(b)
+        self.set_status("已学会技能 #%d" % sid)
+
+    def baby_skill_del(self):
+        b = self._baby()
+        sel = self.tv_baby_skills.selection()
+        if b is None or not sel:
+            messagebox.showinfo("提示", "先在技能列表里选一个要忘掉的技能。",
+                                parent=self.root)
+            return
+        sid = int(sel[0][2:])
+        self.babies_ed().forget(b, sid)
+        self.mark_dirty()
+        self.load_baby()
+        self.refresh_baby_list_keep(b)
+        self.set_status("已忘掉技能 #%d" % sid)
+
+    def baby_skill_clear(self):
+        b = self._baby()
+        if b is None:
+            return
+        if not self.confirm("清空技能", "把这只召唤兽的技能全忘掉？"):
+            return
+        self.babies_ed().clear_skills(b)
+        self.mark_dirty()
+        self.load_baby()
+        self.refresh_baby_list_keep(b)
+
+    def baby_add_dialog(self):
+        """新增召唤兽：列出全部可选项（含小孩），挑一个加给当前角色。"""
+        bd = self.babies_ed()
+        a = self._baby_actor()
+        if bd is None or a is None:
+            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+            return
+        tk, ttk = self.tk, self.ttk
+        win = self.tk.Toplevel(self.root)
+        win.title("新增召唤兽")
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=8)
+        f.pack(fill="both", expand=True)
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="搜索（名字 / id / 池）：").pack(side="left")
+        var_kw = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=var_kw, width=18)
+        ent.pack(side="left", padx=4)
+        var_god = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="只看神兽（含小孩）",
+                        variable=var_god).pack(side="left", padx=6)
+        var_child = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="只看小孩 181-187",
+                        variable=var_child).pack(side="left")
+        var_mut = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="变异（普通召唤兽资质区间 ×0.66）",
+                        variable=var_mut).pack(side="left", padx=6)
+
+        cols = ("id", "name", "type", "pool", "lv", "zi", "grow", "life")
+        heads = ("id", "名字", "类型", "备注池", "携带等级", "六项资质", "成长", "寿命")
+        widths = (46, 116, 50, 90, 60, 230, 50, 60)
+        tv = ttk.Treeview(f, columns=cols, show="headings", height=16,
+                          selectmode="browse")
+        for c, h, w in zip(cols, heads, widths):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="w")
+        tv.pack(fill="both", expand=True, pady=6)
+
+        info = tk.StringVar(value="")
+        ttk.Label(f, textvariable=info, foreground="#555", justify="left",
+                  wraplength=900).pack(anchor="w")
+
+        all_c = bd.candidates()
+
+        def refill(*_a):
+            tv.delete(*tv.get_children())
+            kw = var_kw.get().strip()
+            rows = []
+            for c in all_c:
+                if var_god.get() and c["type"] != "神兽":
+                    continue
+                if var_child.get() and not (181 <= c["id"] <= 187):
+                    continue
+                if kw and kw not in c["name"] and kw != str(c["id"]) \
+                        and kw not in c["pool"]:
+                    continue
+                rows.append(c)
+            for c in rows:
+                life = "永生" if c["life"] == "infinite" else c["life"]
+                tv.insert("", "end", iid="c%d" % c["id"],
+                          values=(c["id"], c["name"], c["type"], c["pool"] or "（无）",
+                                  c["allow_lv"],
+                                  "%s/%s/%s/%s/%s/%s" % (c["atk"], c["def"], c["hp"],
+                                                         c["mp"], c["agi"], c["eva"]),
+                                  c["grow"], life))
+            info.set("共 %d 种可选。小孩（181-187）在「神兽资质3」池："
+                     "资质 2400/2400/7500/4800/2100/2100、成长 1.8、永生，"
+                     "但正常玩法**没有任何道具**能开出来。" % len(rows))
+            self._add_rows = rows
+            kids = tv.get_children()
+            if kids:
+                tv.selection_set(kids[0])
+
+        for w in (var_kw, var_god, var_child):
+            if hasattr(w, "trace_add"):
+                w.trace_add("write", refill)
+            else:
+                w.trace("w", refill)
+        refill()
+
+        btns = ttk.Frame(f)
+        btns.pack(fill="x", pady=(6, 0))
+
+        def do_add():
+            sel = tv.selection()
+            if not sel:
+                rrefresh_panels(sel[0][1:])
+            try:
+                self.babies_ed().add(a, cid, mutation=bool(var_mut.get()))
+            except Exception as e:
+                messagebox.showerror("加不了", zh_error(e), parent=self.root)
+                return
+            self.mark_dirty()
+            win.destroy()
+            self.fill_baby_list()
+            self.load()
+            self.set_status("已新增召唤兽：%s（id=%d）" % (bd.name_of(cid), cid))
+
+        ttk.Button(btns, text="加这只", command=do_add).pack(side="left")
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(btns, text="只加小孩（小精灵）",
+                   command=lambda: self._quick_add(a, 181)).pack(side="left",
+                                                                 padx=(20, 0))
+        for txt, cid in (("小毛头", 182), ("小魔头", 183), ("小仙灵", 184),
+                         ("小仙女", 185), ("小丫丫", 186), ("善财童子", 187)):
+            ttk.Button(btns, text=txt,
+                       command=lambda c=cid: self._quick_add(a, c)).pack(
+                side="left", padx=2)
+        self.set_status("新增召唤兽：选一只 → 「加这只」")
+
+    def _quick_add(self, actor, cid):
+        try:
+            self.babies_ed().add(actor, cid)
+        except Exception as e:
+            messagebox.showerror("加不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        self.refresh_panels()
+        kids = self.tv_babies.get_children()
+        if kids:
+            self.tv_babies.selection_set(kids[-1])
+            self.on_baby_select()
+        self.set_status("已新增召唤兽：%s（id=%d）"
+                        % (self.babies_ed().name_of(cid), cid))
+
+    def baby_delete(self):
+        b = self._baby()
+        if b is None:
+            messagebox.showinfo("提示", "先在列表里选一只召唤兽。", parent=self.root)
+            return
+        idx = [k for k, x in self.baby_rows if x is b][0]
+        name = self.g.baby_name(b)
+        if not self.confirm("放生（删除）",
+                            "把「%s」从这只角色身上删掉？（不可撤销）\n\n"
+                            "游戏里相当于放生：数据没了，想找回来只能重新加一只。"
+                            % name):
+            return
+        try:
+            self.babies_ed().remove(self._baby_actor(), idx)
+        except Exception as e:
+            messagebox.showerror("删不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_baby_list()
+        self.set_status("已放生：%s" % name)
+
+    def baby_set_active(self):
+        b = self._baby()
+        if b is None:
+            return
+        idx = [k for k, x in self.baby_rows if x is b][0]
+        self.babies_ed().set_active(self._baby_actor(), idx)
+        self.mark_dirty()
+        self.refresh_baby_list_keep(b)
+        self.set_status("已设为出战：%s" % self.g.baby_name(b))
+
+    def baby_rename(self, base=False):
+        b = self._baby()
+        if b is None:
+            return
+        name = self.var_baby_name.get().strip()
+        if not name:
+            messagebox.showinfo("提示", "名字不能是空的。", parent=self.root)
+            return
+        bd = self.babies_ed()
+        if not bd.name_ok(name) and not self.confirm(
+                "名字不在名字表里",
+                "「%s」不在游戏的召唤兽名字表里。\n\n"
+                "名字不是取不到的话，只是战斗里可能取不到对应立绘/音效，"
+                "也可能显示成默认样子。仍要改吗？" % name):
+            return
+        if base:
+            bd.set_base_name(b, name)
+        else:
+            bd.set_display_name(b, name)
+        self.mark_dirty()
+        self.load_baby()
+        self.refresh_baby_list_keep(b)
+        self.set_status("已改名：%s" % name)
+
+    def baby_restore_name(self):
+        b = self._baby()
+        if b is None:
+            return
+        tpl = self.babies_ed().restore_name(b)
+        self.mark_dirty()
+        self.load_baby()
+        self.refresh_baby_list_keep(b)
+        self.set_status("名字已恢复成模板本名：%s" % tpl)
 
     def baby_pick(self):
         sel = self.tv_baby.selection()

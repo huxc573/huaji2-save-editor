@@ -35,7 +35,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.4.5"
+APP_VERSION = "0.4.6"
 EXE_NAME = "画迹2存档工具v" + APP_VERSION
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")

@@ -92,7 +92,11 @@ def nil_node():
 
 def get_int(node, default=0):
     v = M.value_of(_deref(node))
-    return default if v is None else int(v)
+    try:
+        return default if v is None else int(v)
+    except (TypeError, ValueError):
+        # 寿命这种字段可能是符号 `:infinite`（神兽永生）
+        return default
 
 
 def get_float(node, default=0.0):
@@ -1112,8 +1116,21 @@ class GameEditor(object):
                 node = self._resolve(baby, path)
                 if node is None:
                     return None
+                n = _deref(node)
+                if isinstance(n, M.SymbolNode):
+                    return n.name          # 神兽的寿命是 :infinite（永生）
                 return (get_float(node) if typ == "float" else get_int(node))
         return None
+
+    def _resolve_parent(self, baby, path):
+        """返回 (父节点, ivar 名)——换整个节点时用（比如把 :infinite 换成数字）。"""
+        parts = path.split(".")
+        node = baby
+        for p in parts[:-1]:
+            node = _deref(ivar(node, p))
+            if node is None:
+                return None, parts[-1]
+        return node, parts[-1]
 
     def set_baby(self, baby, key, value):
         for k, _label, path, typ in self.BABY_FIELDS:
@@ -1122,6 +1139,13 @@ class GameEditor(object):
             node = self._resolve(baby, path)
             if node is None:
                 raise KeyError("召唤兽没有 %s（%s）" % (k, path))
+            if isinstance(_deref(node), M.SymbolNode):
+                # 例如神兽的 @life = :infinite：整个换成数字节点
+                parent, leaf = self._resolve_parent(baby, path)
+                if parent is None or not set_ivar(parent, leaf, int_node(int(value))):
+                    raise KeyError("改不了 %s（%s）" % (k, path))
+                self.doc.mark_structural()
+                return value
             if typ == "float":
                 self.doc.set_value(node, float(value))
             else:
@@ -1152,6 +1176,17 @@ class GameEditor(object):
                 if v is not None:
                     self.set_baby(baby, k, v + 100)
             did.append("六项资质 +100")
+        elif what == "qual500":
+            for k in ("atk", "def", "hpq", "mpq", "agi", "eva"):
+                v = self.baby_value(baby, k)
+                if v is not None:
+                    self.set_baby(baby, k, v + 500)
+            did.append("六项资质 +500")
+        elif what == "grow":
+            v = self.baby_value(baby, "grow")
+            if v is not None:
+                self.set_baby(baby, "grow", round(v + 0.1, 2))
+                did.append("成长 +0.1")
         elif what == "five":
             for k in ("体质", "法力", "力量", "耐力", "敏捷"):
                 v = self.baby_value(baby, k)
