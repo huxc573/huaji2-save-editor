@@ -20,6 +20,7 @@
 // 输出格式（供 Python 解析）：
 //   [OK] ...   [ERR] ...   [INFO] key=value
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -35,6 +36,12 @@ internal static class XJCodec32
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetDllDirectoryW(string path);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool VirtualProtect(IntPtr addr, IntPtr size, uint newProtect,
+                                              out uint oldProtect);
+
+    private const uint PAGE_EXECUTE_READWRITE = 0x40;
+
     private const uint LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008;
 
     private delegate int D3(IntPtr a, IntPtr b, IntPtr c);
@@ -46,7 +53,161 @@ internal static class XJCodec32
         IntPtr h = LoadLibraryExW(dll, IntPtr.Zero, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (h == IntPtr.Zero)
             throw new IOException("LoadLibrary 失败, win32err=" + Marshal.GetLastWin32Error());
+        ApplyState(h);
         return h;
+    }
+
+    /// <summary>
+    /// 把「游戏进程里的密钥状态」搬进当前进程的 main.dll（v0.2 的实验工具）。
+    /// 状态文件（XJCodec32.exe 旁的 xj_state.txt，可用环境变量 XJ_STATE 覆盖）
+    /// 每行格式： 0x00A1B2C3 &lt;十六进制字节&gt;
+    /// </summary>
+    private static void ApplyState(IntPtr h)
+    {
+        string exeDir = Path.GetDirectoryName(
+            System.Reflection.Assembly.GetExecutingAssembly().Location);
+        string f = Environment.GetEnvironmentVariable("XJ_STATE");
+        if (string.IsNullOrEmpty(f)) f = Path.Combine(exeDir, "xj_state.txt");
+        if (!File.Exists(f)) return;
+        int n = 0, total = 0;
+        foreach (string raw in File.ReadAllLines(f))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0 || line[0] == '#' || line[0] == ';') continue;
+            string[] tk = line.Split(new[] { ' ', '\t' }, 2,
+                                     StringSplitOptions.RemoveEmptyEntries);
+            if (tk.Length < 2) continue;
+            uint off = ParseU32(tk[0]);
+            byte[] data = HexToBytes(tk[1]);
+            if (data.Length == 0) continue;
+            IntPtr addr = (IntPtr)(h.ToInt64() + off);
+            uint old;
+            if (!VirtualProtect(addr, (IntPtr)data.Length, PAGE_EXECUTE_READWRITE, out old))
+            {
+                Console.WriteLine("[WARN] VirtualProtect 失败 @" + tk[0]);
+                continue;
+            }
+            Marshal.Copy(data, 0, addr, data.Length);
+            VirtualProtect(addr, (IntPtr)data.Length, old, out old);
+            n++;
+            total += data.Length;
+        }
+        Console.WriteLine("[INFO] state=" + f + " 片段=" + n + " 字节=" + total);
+    }
+
+    /// <summary>
+    /// 批量试密钥：对每一行候选、每一个目标调用 decryption_file(目标, 临时输出, 候选)，
+    /// 输出非空即判定该目标命中该候选。
+    /// </summary>
+    private static int Brute(IntPtr h, string keyFile, string outPrefix, string targetsArg,
+                            int startAt, int maxCount)
+    {
+        IntPtr fn = Export(h, "decryption_file");
+        string tmp = outPrefix + ".tmp";                 // 临时输出放在指定目录，避免 %TEMP% 不存在
+        string tmpDir = Path.GetDirectoryName(Path.GetFullPath(tmp));
+        if (!Directory.Exists(tmpDir)) Directory.CreateDirectory(tmpDir);
+        Console.WriteLine("[INFO] tmp=" + tmp);
+
+        List<string> targets = new List<string>();
+        foreach (string t in targetsArg.Split(';'))
+        {
+            string tt = t.Trim();
+            if (tt.Length == 0) continue;
+            tt = Path.GetFullPath(tt);
+            if (!File.Exists(tt)) { Console.WriteLine("[ERR] 找不到目标 " + tt); return 3; }
+            targets.Add(tt);
+        }
+        if (targets.Count == 0) { Console.WriteLine("[ERR] 没有目标"); return 3; }
+        foreach (string t in targets) Console.WriteLine("[INFO] target=" + t);
+
+        List<string> keys = new List<string>();
+        if (File.Exists(keyFile))
+            keys.AddRange(File.ReadAllLines(keyFile, Encoding.UTF8));
+
+        int i = 0, done = 0;
+        D3 f = (D3)Marshal.GetDelegateForFunctionPointer(fn, typeof(D3));
+        for (int ki = startAt; ki < keys.Count; ki++)
+        {
+            if (maxCount > 0 && i >= maxCount)
+            {
+                Console.WriteLine("[INFO] 到达本批上限，续跑到 " + ki);
+                return 5;
+            }
+            i++;
+            string k = keys[ki].TrimEnd('\r', '\n');
+            if (k.Length == 0 || k[0] == '#') continue;
+            IntPtr pk;
+            if (k.StartsWith("hex:"))
+            {
+                byte[] b = HexToBytes(k.Substring(4));
+                pk = Marshal.AllocHGlobal(b.Length + 1);
+                Marshal.Copy(b, 0, pk, b.Length);
+                Marshal.WriteByte(pk, b.Length, 0);
+            }
+            else
+            {
+                pk = Utf8(k);
+            }
+            IntPtr po = Utf8(tmp);
+            for (int ti = 0; ti < targets.Count; ti++)
+            {
+                IntPtr pt = Utf8(targets[ti]);
+                if (File.Exists(tmp)) File.Delete(tmp);
+                f(pt, po, pk);
+                Marshal.FreeHGlobal(pt);
+                long n = File.Exists(tmp) ? new FileInfo(tmp).Length : -1;
+                if (n > 0)
+                {
+                    done++;
+                    Console.WriteLine("[HIT] 候选#" + (ki + 1) + " 目标[" + ti + "]=" + targets[ti]);
+                    Console.WriteLine("[HIT]     key=" + k);
+                    string dst = outPrefix + "_" + ti + ".bin";
+                    File.Copy(tmp, dst, true);
+                    Console.WriteLine("[HIT]     已存 -> " + dst + " (" + n + " 字节)");
+                    Console.Out.Flush();
+                }
+            }
+            Marshal.FreeHGlobal(po);
+            Marshal.FreeHGlobal(pk);
+            if (File.Exists(tmp)) File.Delete(tmp);
+            if (i % 100 == 0)
+            {
+                Console.WriteLine("[..] 本批 " + i + "  绝对位置 " + (ki + 1) + "/" + keys.Count +
+                                  "  命中 " + done + "  last=" + k +
+                                  " @" + DateTime.Now.ToString("HH:mm:ss"));
+                Console.Out.Flush();
+            }
+        }
+        Console.WriteLine("[INFO] 本批结束，命中 " + done);
+        return 0;
+    }
+
+    private static uint ParseU32(string s)
+    {
+        s = s.Trim();
+        if (s.StartsWith("0x") || s.StartsWith("0X")) return Convert.ToUInt32(s.Substring(2), 16);
+        return Convert.ToUInt32(s);
+    }
+
+    private static int ParseInt(string s)
+    {
+        s = s.Trim();
+        if (s.StartsWith("0x") || s.StartsWith("0X")) return Convert.ToInt32(s.Substring(2), 16);
+        return int.Parse(s);
+    }
+
+    private static byte[] HexToBytes(string s)
+    {
+        StringBuilder sb = new StringBuilder(s.Length);
+        foreach (char c in s)
+        {
+            if (Uri.IsHexDigit(c)) sb.Append(c);
+        }
+        if (sb.Length % 2 != 0) sb.Length -= 1;
+        byte[] b = new byte[sb.Length / 2];
+        for (int i = 0; i < b.Length; i++)
+            b[i] = Convert.ToByte(sb.ToString(i * 2, 2), 16);
+        return b;
     }
 
     /// <summary>把托管字符串按 UTF-8 写进非托管内存（main.dll 期望 UTF-8）。</summary>
@@ -104,6 +265,51 @@ internal static class XJCodec32
                         (p == IntPtr.Zero ? "<缺失>" : "0x" + p.ToInt64().ToString("X8")));
                 }
                 return 0;
+            }
+
+            if (mode == "dump")
+            {
+                // dump <main.dll> <out.bin> [size]   —— 导出解壳后的内存镜像
+                int size = args.Length > 3 ? ParseInt(args[3]) : 0x142000;
+                byte[] buf = new byte[size];
+                Marshal.Copy(h, buf, 0, size);
+                File.WriteAllBytes(Path.GetFullPath(args[2]), buf);
+                Console.WriteLine("[INFO] base=0x" + h.ToInt64().ToString("X8"));
+                Console.WriteLine("[INFO] size=" + size);
+                Console.WriteLine("[OK] dumped");
+                return 0;
+            }
+
+            if (mode == "brute")
+            {
+                // brute <main.dll> <密钥候选文件> <输出前缀> <目标1[;目标2;...]> [起点(0基)] [条数]
+                // 候选文件每行一个；`hex:` 前缀表示按十六进制原始字节当密钥。
+                if (args.Length < 5) { Console.WriteLine("[ERR] 参数不足"); return 2; }
+                int st = args.Length > 5 ? ParseInt(args[5]) : 0;
+                int cnt = args.Length > 6 ? ParseInt(args[6]) : 0;
+                return Brute(h, args[2], args[3], args[4], st, cnt);
+            }
+
+            if (mode == "probe")
+            {
+                // probe <main.dll> <目标密文> <密钥>   —— 单个密钥试一次
+                if (args.Length < 4) { Console.WriteLine("[ERR] 参数不足"); return 2; }
+                string t = Path.GetFullPath(args[2]);
+                string o = t + ".probe_out";
+                if (File.Exists(o)) File.Delete(o);
+                int r = Call3(Export(h, "decryption_file"), t, o, args[3]);
+                long n = File.Exists(o) ? new FileInfo(o).Length : -1;
+                Console.WriteLine("[INFO] ret=" + r + " outsize=" + n);
+                if (n > 0)
+                {
+                    byte[] hd = new byte[Math.Min(8, (int)n)];
+                    using (FileStream fs = File.OpenRead(o)) fs.Read(hd, 0, hd.Length);
+                    Console.WriteLine("[INFO] head=" + BitConverter.ToString(hd).Replace("-", " "));
+                    Console.WriteLine("[OK] hit");
+                    return 0;
+                }
+                Console.WriteLine("[ERR] miss");
+                return 4;
             }
 
             if (mode == "decrypt" || mode == "encrypt")

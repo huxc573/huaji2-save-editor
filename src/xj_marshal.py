@@ -22,7 +22,7 @@ __all__ = [
     'Node', 'NilNode', 'BoolNode', 'IntNode', 'FloatNode', 'BignumNode',
     'SymbolNode', 'StrNode', 'ArrayNode', 'HashNode', 'ObjNode',
     'StructNode', 'UserDefNode', 'UserMarshalNode', 'IVarNode', 'LinkNode',
-    'ExtNode',
+    'ExtNode', 'ClassNode', 'ModuleNode',
     'encode_long', 'encode_fixnum', 'encode_string', 'encode_bignum', 'reencode',
     'encode_integer', 'fits_fixnum', 'FIXNUM_MIN', 'FIXNUM_MAX',
     'serialize', 'serialize_with_header', 'w_symbol_bytes',
@@ -132,11 +132,12 @@ class SymbolNode(Node):
 
 class StrNode(Node):
     type = '"'
-    __slots__ = ('data',)
+    __slots__ = ('data', 'cls')
 
-    def __init__(self, data, start=0, end=0):
+    def __init__(self, data, start=0, end=0, cls=None):
         Node.__init__(self, start, end)
         self.data = data            # bytes
+        self.cls = cls              # 'C' 子类时才有
 
     def text(self):
         return self.str()
@@ -147,20 +148,23 @@ class StrNode(Node):
 
 class ArrayNode(Node):
     type = '['
-    __slots__ = ('items',)
+    __slots__ = ('items', 'cls')
 
-    def __init__(self, items, start=0, end=0):
+    def __init__(self, items, start=0, end=0, cls=None):
         Node.__init__(self, start, end)
         self.items = items
+        self.cls = cls              # 'C' 子类时才有
 
 
 class HashNode(Node):
     type = '{'
-    __slots__ = ('pairs',)
+    __slots__ = ('pairs', 'default', 'cls')
 
-    def __init__(self, pairs, start=0, end=0):
+    def __init__(self, pairs, start=0, end=0, default=None, cls=None):
         Node.__init__(self, start, end)
         self.pairs = pairs          # [(knode, vnode), ...]
+        self.default = default      # '}' (TYPE_HASH_DEF) 才有；否则 None
+        self.cls = cls              # 'C' 子类时才有
 
     def as_dict(self):
         """仅当键都是 int/str/symbol 时可用。"""
@@ -260,6 +264,52 @@ class ExtNode(Node):
     __slots__ = ()
 
 
+class ClassNode(Node):
+    """'c' —— 类对象（Ruby Marshal 的 TYPE_CLASS）。
+
+    编码：'c' + w_long(名字长度) + 名字字节（注意：**不是**符号，不带 ':'）。
+    存档里出现它是因为游戏把 RPG::Weapon / RPG::Armor 这种类本身当作数据存了。
+    """
+    type = 'c'
+    __slots__ = ('name',)
+
+    def __init__(self, name, start=0, end=0):
+        Node.__init__(self, start, end)
+        self.name = name            # bytes
+
+    def text(self):
+        return 'Class ' + self.name.decode('utf-8', 'replace')
+
+    def str(self):
+        return self.name.decode('utf-8', 'replace')
+
+
+class ModuleNode(ClassNode):
+    """'m' —— 模块对象（TYPE_MODULE），格式与 'c' 完全一致。"""
+    type = 'm'
+
+
+# 类/模块是否计入对象编号表。实验开关：RM 存档里两种行为都出现过，
+# 先按实测（不注册）走，解析失败时再翻过来试。
+REGISTER_CLASS_MODULE = True
+
+# 严格模式：'@N' 链接越界立刻报错。用来**第一时间**定位解析错位，
+# 而不是等到几万字节之后字节流彻底对不上才炸。
+STRICT_LINKS = True
+
+# 类名合理性检查（严格模式下启用）：Ruby 类名一定长这样，
+# 一旦解析错位，符号链接会指到乱七八糟的符号上，这一步能立刻发现。
+import re as _re  # noqa: E402
+CLASS_NAME_OK = _re.compile(r'^[A-Z][A-Za-z0-9_]*(::[A-Za-z0-9_]+)*$')
+
+# 实例变量名（本作里出现过 :E、:@体质 这类），只要求"不是控制字符、不太长"。
+IVAR_NAME_OK = _re.compile(r'^[^\x00-\x1f]{1,80}$')
+
+# 'I'（带实例变量的对象）是否**额外**占一个对象编号。Ruby 里是**不占**的（内层对象已占）。
+# 保留开关是为了万一遇到反过来的实现能快速对照。
+IVAR_REGISTER = False
+
+
 def value_of(node):
     """取标量值，用于展示/比较。"""
     if node is None:
@@ -317,6 +367,7 @@ class Parser(object):
         self.base = base
         self.links = []             # 对象链接表（'@'）
         self.symbols = []           # 符号链接表（';'）
+        self.trace = None           # 诊断用：[(offset, 类型字节), ...]
 
     # ---- 基础读取 ----
     def u8(self):
@@ -366,6 +417,14 @@ class Parser(object):
 
     def read_symbol(self):
         t = self.u8()
+        if t == ord('I'):
+            # ⚠ 非 ASCII 符号（本作里全是中文，如 :@体质）Ruby 1.9 会写成：
+            #       I  :符号名  <实例变量个数> { :E => true, ... }
+            #   也就是"带实例变量的符号"。以前这里只认 ':' 和 ';'，一遇到中文
+            #   实例变量名就报"坏符号 0x49"，整条存档解析不下去。
+            node = self.read_symbol()
+            self.read_ivars()
+            return node
         if t == ord(':'):
             n = self.w_long()
             raw = self.take(n)
@@ -384,20 +443,20 @@ class Parser(object):
         raise MarshalError('坏符号 0x%02X @%d' % (t, self.i - 1))
 
     def class_ref(self):
-        """'o' / 'u' / 'S' / 'U' 之后的类名引用（可能带 'c' 前缀）。"""
-        t = self.u8()
-        if t == ord('c'):
-            return self.read_symbol().name
-        if t in (ord(':'), ord(';')):
-            self.i -= 1
-            return self.read_symbol().name
-        raise MarshalError('坏类名 0x%02X @%d' % (t, self.i - 1))
+        """'o' / 'u' / 'S' / 'U' 之后的类名引用（: 符号 / ; 符号链接 / I 包装的符号）。"""
+        name = self.read_symbol().name
+        if STRICT_LINKS and not CLASS_NAME_OK.match(name):
+            raise MarshalError('类名不合理 %r @%d' % (name, self.i))
+        return name
 
     def read_ivars(self):
         n = self.w_long()
         out = []
         for _ in range(n):
             key = self.read_symbol()
+            if STRICT_LINKS and not IVAR_NAME_OK.match(key.name):
+                raise MarshalError('实例变量名不合理 %r @%d'
+                                   % (key.name, self.i))
             val = self.read_object()
             out.append((key.name, val))
         return out
@@ -411,6 +470,8 @@ class Parser(object):
         start = self.i
         t = self.u8()
         c = chr(t)
+        if self.trace is not None:
+            self.trace.append((start, c))
 
         if c == '0':
             return NilNode(start, self.i)
@@ -470,6 +531,30 @@ class Parser(object):
                 node.pairs.append((k, v))
             node.end = self.i
             return node
+        if c == '}':                              # 带默认值的 Hash（'[' 一样占编号）
+            n = self.w_long()
+            node = HashNode([], start, 0)
+            self.register(node)
+            for _ in range(n):
+                k = self.read_object()
+                v = self.read_object()
+                node.pairs.append((k, v))
+            node.default = self.read_object()
+            node.end = self.i
+            return node
+        if c == 'C':                              # String/Array/Hash 的子类
+            cls = self.class_ref()
+            inner = self.read_object()
+            if isinstance(inner, HashNode):
+                inner.cls = cls
+                return inner
+            if isinstance(inner, ArrayNode):
+                inner.cls = cls
+                return inner
+            if isinstance(inner, StrNode):
+                inner.cls = cls
+                return inner
+            return inner
         if c == 'o':
             cls = self.class_ref()
             node = ObjNode(cls, start, 0)
@@ -501,8 +586,11 @@ class Parser(object):
             return node
         if c == 'I':
             node = IVarNode(start, 0)
-            self.register(node)
+            # ⚠ 'I' 包装**不新增对象编号**：内层对象自己会登记。
+            #   以前这里多登记了一次，导致每次遇到 'I' 之后所有 '@N' 都错位。
             node.inner = self.read_object()
+            if IVAR_REGISTER and not node.inner.gidx == -1:
+                self.register(node)
             node.ivars = self.read_ivars()
             node.end = self.i
             return node
@@ -511,11 +599,22 @@ class Parser(object):
             node = LinkNode(idx, start, self.i)
             if idx < len(self.links):
                 node.target = self.links[idx]
+            elif STRICT_LINKS:
+                raise MarshalError('对象链接越界 @%d (%d 个对象) @%d'
+                                   % (idx, len(self.links), start))
             return node
         if c == 'e':                                  # 'e' + 模块名 + 对象（对象被 extend）
             self.read_symbol()
             # 被 extend 的是内层对象，编号也记在内层对象（它自己会注册）
             return self.read_object()
+        if c == 'c' or c == 'm':                      # 类 / 模块对象：名字是 **字节串**，不是符号
+            n = self.w_long()
+            name = self.take(n)
+            node = ClassNode(name, start, self.i) if c == 'c' else \
+                ModuleNode(name, start, self.i)
+            node.end = self.i
+            # 实测（本作存档）：类/模块**不**占对象编号，不注册；否则后面所有 '@N' 都会错位
+            return node if not REGISTER_CLASS_MODULE else self.register(node)
         raise MarshalError('未知类型 %r (0x%02X) @%d' % (c, t, start))
 
 
@@ -688,7 +787,8 @@ def w_symbol_bytes(name):
 # Symbol 之外，一切都占一个编号（含 String / Array / Hash / Object / Struct /
 # Float / Bignum / UserDef / UserMarshal / 带 ivar 包装的对象）。
 NUMBERED_NODES = (StrNode, ArrayNode, HashNode, ObjNode, StructNode,
-                  UserDefNode, UserMarshalNode, IVarNode, FloatNode, BignumNode)
+                  UserDefNode, UserMarshalNode, FloatNode, BignumNode,
+                  ClassNode, ModuleNode)
 
 
 def serialize(node, depth=0, table=None, base=None):
@@ -750,18 +850,30 @@ def serialize(node, depth=0, table=None, base=None):
     if isinstance(node, SymbolNode):
         return w_symbol_bytes(node.raw)
     if isinstance(node, StrNode):
-        return b'"' + encode_long(len(node.data)) + node.data
+        body = b'"' + encode_long(len(node.data)) + node.data
+        if node.cls is not None:
+            return b'C' + w_symbol_bytes(node.cls) + body
+        return body
     if isinstance(node, ArrayNode):
         out = [b'[', encode_long(len(node.items))]
         for it in node.items:
             out.append(serialize(it, depth + 1, table, base))
-        return b''.join(out)
+        body = b''.join(out)
+        if node.cls is not None:
+            return b'C' + w_symbol_bytes(node.cls) + body
+        return body
     if isinstance(node, HashNode):
-        out = [b'{', encode_long(len(node.pairs))]
+        out = [b'}' if node.default is not None else b'{',
+               encode_long(len(node.pairs))]
         for k, v in node.pairs:
             out.append(serialize(k, depth + 1, table, base))
             out.append(serialize(v, depth + 1, table, base))
-        return b''.join(out)
+        if node.default is not None:
+            out.append(serialize(node.default, depth + 1, table, base))
+        body = b''.join(out)
+        if node.cls is not None:
+            return b'C' + w_symbol_bytes(node.cls) + body
+        return body
     if isinstance(node, (ObjNode, StructNode)):
         tag = b'o' if isinstance(node, ObjNode) else b'S'
         out = [tag, w_symbol_bytes(node.cls), encode_long(len(node.ivars))]
@@ -769,6 +881,9 @@ def serialize(node, depth=0, table=None, base=None):
             out.append(w_symbol_bytes(k))
             out.append(serialize(v, depth + 1, table, base))
         return b''.join(out)
+    if isinstance(node, (ClassNode, ModuleNode)):
+        tag = b'm' if isinstance(node, ModuleNode) else b'c'
+        return tag + encode_long(len(node.name)) + node.name
     if isinstance(node, UserDefNode):
         return (b'u' + w_symbol_bytes(node.cls) + encode_long(len(node.data))
                 + node.data)

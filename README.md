@@ -1,176 +1,136 @@
-# 画迹2 存档工具（huaji2-save-editor）
+# 画迹2 存档修改器（huaji2-save-editor）
 
-> 针对 RPG Maker VX Ace 游戏《画迹2：缘起凡尘》（尝鲜版）的**存档工具**。
-> 是《画迹1：落日情缘》存档工具（`huaji1-save-editor`）的迭代产品 ——
-> 但引擎从 RMXP 换成了 VX Ace，加密也从 `tp.dll` 换成了 `System\main.dll`
-> （QQEat / MPRESS 加壳），**两者不通用**。
+> 《画迹2：缘起凡尘》[尝鲜版] 的存档编辑器 —— 解密 → 解析 → 改 → 加密写回，
+> 连游戏自带的**防作弊校验**一起修好。
 >
-> 作者 **[@huxc573](https://github.com/huxc573)** · 开源协议 **MIT** · 当前版本 **v0.1**
+> 作者 **[@huxc573](https://github.com/huxc573)** · 开源协议 **MIT** · 当前版本 **v0.2**
 
-![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
-![license](https://img.shields.io/badge/license-MIT-green)
-
----
-
-## ⚠ v0.1 的实话
-
-这是**第一版脚手架 + 逆向成果**，还不是能直接改存档的成品：
-
-| | 状态 |
-|---|---|
-| 逆向：引擎 / 存档位置 / 加密容器形态 / DLL 导出接口 | ✅ 已完成（见 `docs/存档格式.md`） |
-| 32 位编解码宿主，能调通 `main.dll` 的加解密 | ✅ 已完成，往返自检通过 |
-| Ruby Marshal（VX Ace）解析 / 区间补丁 / 序列化 | ✅ 已完成，回归测试通过 |
-| 界面（概览 / 数据树 / 说明） | ✅ 骨架可用 |
-| **直接解密游戏原来的密文存档** | ❌ **未完成**：`main.dll` 的密钥状态需继续逆向，见 `docs/待解决问题.md` |
-
-也就是说：**现在能打开"已经解密好的明文存档"，能改、能写回；
-但还不能解开游戏自己写的 `save.rvdata2`。** 这是 v0.2 的第一优先级。
+`huaji1-save-editor` 的迭代作品（画迹1 的编辑器见 `!Tools\Github\huaji1-save-editor`）。
+本作换了保护壳：`Data\*.rvdata2` 和存档都被 `System\main.dll` 加密，
+v0.2 已经把三个密钥全部逆向出来，所以**现在是真的能用**。
 
 ---
 
-## 目录
+## ✨ 能做什么
 
-* [它是什么 / 能做什么](#它是什么--能做什么)
-* [快速开始](#快速开始)
-* [运行测试](#运行测试)
-* [仓库结构](#仓库结构)
-* [文档](#文档)
-* [与画迹1工具的差异](#与画迹1工具的差异)
-* [免责声明](#免责声明)
+| 功能 | 状态 |
+| --- | --- |
+| 自动选密钥解密游戏原档 `save.rvdata2` / `AutoSave\*.rvdata2` | ✅ |
+| 解析 Ruby Marshal 4.8（含中文字段名、类对象、对象链接） | ✅ |
+| **改金钱**（自动同步防作弊校验和） | ✅ |
+| 改角色等级 / HP / MP / 名字 | ✅ |
+| 改开关 / 变量 | ✅ |
+| 数据树浏览任意字段，标量就地改（区间补丁，不动其它字节） | ✅ |
+| **一键检查并修复 `Lock` 防作弊校验** | ✅ |
+| 写回前自检 + 自动 `*.bak.<时间戳>` 备份 | ✅ |
+| 数据文件（System/Actors/Items/Map…）解密查看 | ✅ |
+| 物品 / 装备增删、批量操作、打包成 exe | ⏳ 见 `docs\待解决问题.md` |
 
 ---
 
-## 它是什么 / 能做什么
+## 🚀 快速开始
 
-《画迹2：缘起凡尘》是 RPG Maker **VX Ace**（RGSS301）游戏：
+```bat
+:: 1) 需要 Python 3.8+（64 位），不用装任何第三方库
+:: 2) 编译 32 位宿主（仓库里已经带了一份编译好的，改过 .cs 才需要重编）
+python tools\build_host.py
 
-```
-<游戏根>\save.rvdata2                  ← 默认存档（密文）
-<游戏根>\AutoSave\save00..29.rvdata2   ← 自动存档（密文）
-<游戏根>\System\main.dll               ← 加密/防作弊库（MPRESS 加壳）
-<游戏根>\Data\main.rvdata2             ← 明文引导脚本，只做一件事：
-                                          Win32API.new('System/main','qqeat','v','v').call
+:: 3) 跑测试（可选，但建议）
+python tests\test_marshal.py
+python tests\test_codec.py
+python tests\test_model.py
+python tests\test_gui.py
+python tools\smoke.py
+python tools\test_save_layer.py
+
+:: 4) 开图形界面
+python src\xj_viewer.py
 ```
 
-工具做的事：
+界面会自动定位游戏目录和存档；找不到就设环境变量：
 
-* 用 `main.dll` 自己的 `encryption_file` / `decryption_file` 加解密文件
-  （64 位 Python 加载不了 32 位 DLL，所以带了一个 32 位宿主 `XJCodec32.exe` 中转）；
-* 解析解密后的 Ruby Marshal 明文，树形浏览、改标量、区间补丁写回
-  （**不会破坏 `@N` 对象链接**，这是 huaji1 时期踩过的大坑）；
-* 自检 + 环境诊断，出错时说清原因而不是写坏存档。
-
----
-
-## 快速开始
-
-1. **依赖**：Windows 10/11、Python 3.10+、.NET Framework 4.x（Windows 自带，提供 `csc.exe`）。
-2. **编译 32 位宿主**（仓库里已带编译好的，需要重编时用）：
-
-   ```powershell
-   python tools/build_host.py
-   ```
-3. **告诉脚本游戏在哪**（不设也能自动找到，找不到就设）：
-
-   ```powershell
-   $env:XJ_GAME = "D:\Life\Game\Local\MH\画迹\【画迹2：缘起凡尘】 [尝鲜版]"
-   ```
-4. **体检**：
-
-   ```powershell
-   python src/xj_codec.py info
-   python src/xj_codec.py selftest      # 加密→解密 往返自检
-   ```
-5. **开界面**：
-
-   ```powershell
-   python src/xj_viewer.py
-   ```
-
-   v0.1 里"打开存档"对密文会明确报错（见上表），
-   可以先用【打开文件…】打开明文样本（例如
-   `Logs\Battle\<时间>\Battle.bt2`）体验浏览与修改。
-6. **命令行加解密**（对自己加密过的文件有效）：
-
-   ```powershell
-   python src/xj_codec.py encrypt 某个明文.bin 输出.bin
-   python src/xj_codec.py decrypt 输出.bin 还原.bin
-   ```
-
----
-
-## 运行测试
-
-```powershell
-python tools/build_host.py          # 先编宿主
-python tests/test_marshal.py        # Marshal 解析/编码/边界
-python tests/test_codec.py          # 加解密往返 + 环境 + 导出表（含"原档预期失败"检查）
-python tests/test_model.py          # 语义层 / 区间补丁
-python tests/test_gui.py            # 界面冒烟（无图形环境会自动跳过）
+```bat
+set XJ_GAME=D:\Life\Game\Local\MH\画迹\【画迹2：缘起凡尘】 [尝鲜版]
 ```
 
-测试**只读**游戏目录里的文件；写回测试都在系统临时目录里做。
+命令行也能用：
 
----
-
-## 仓库结构
-
-```
-huaji2-save-editor/
-├─ src/
-│  ├─ xj_viewer.py        tkinter 界面（概览 / 数据树 / 说明）
-│  ├─ xj_model.py         存档语义层 Doc：打开 / 摘要 / 改值 / 写回
-│  ├─ xj_edit.py          区间补丁写入引擎（只改动过的字节）
-│  ├─ xj_marshal.py       Ruby Marshal 4.8 解析/序列化（VX Ace 语义）
-│  ├─ xj_codec.py         加解密层：驱动 XJCodec32.exe 调 main.dll
-│  ├─ xj_env.py           定位游戏目录 / 存档 / main.dll
-│  ├─ xj_codec32.cs       32 位宿主源码（XJCodec32.exe）
-│  └─ XJCodec32.exe       编译好的 32 位宿主（随包分发）
-├─ tools/
-│  └─ build_host.py       用 csc.exe 编译 32 位宿主
-├─ tests/                 独立回归测试（自带断言与统计，退出码即结果）
-├─ probes/                逆向探针（本次全过程，可复现所有结论）
-├─ docs/
-│  ├─ 存档格式.md         格式结论（引擎 / 容器 / ECB / 导出表 / UTF-8 坑）
-│  ├─ 逆向过程.md         时间线式记录 + 踩坑清单
-│  └─ 待解决问题.md       v0.2 工作清单（密钥状态怎么继续挖）
-├─ 使用说明.txt
-├─ CHANGELOG.md
-├─ LICENSE                MIT（只覆盖本仓库自己写的代码）
-├─ NOTICE.md              授权范围与例外
-└─ README.md
+```bat
+python src\xj_save.py            :: 存档概览 + 防作弊校验状态
+python src\xj_save.py repair     :: 一键修好所有 Lock 并写回
+python tools\decrypt_all.py      :: 把各文件解密到 tools\_plain\
 ```
 
 ---
 
-## 文档
+## 🔑 三个密钥（逆向结果，实测通过）
 
-| 文档 | 内容 |
-|---|---|
-| [`docs/存档格式.md`](docs/存档格式.md) | 引擎、存档位置、哪些文件加密、ECB 形态实测、`main.dll` 导出表与调用约定 |
-| [`docs/逆向过程.md`](docs/逆向过程.md) | 解壳、差分实验、UTF-8 大坑、Windows 中文路径工具链备忘 |
-| [`docs/待解决问题.md`](docs/待解决问题.md) | 密钥状态问题、已排除的假设、下一步路线（含风险提示） |
+| 密钥 | 用途 |
+| --- | --- |
+| `761205` | `Data\*.rvdata2` 数据库、`System\Game.md5` |
+| `imoutogadaisuki` | `Data\Scripts.rvdata2`（游戏脚本本体） |
+| `tiyan_version` | 存档 `save.rvdata2` / `AutoSave\*.rvdata2` |
 
----
-
-## 与画迹1工具的差异
-
-| 项 | 画迹1（huaji1-save-editor） | 画迹2（本仓库） |
-|---|---|---|
-| 引擎 | RMXP（RGSS102J/103J） | **VX Ace**（RGSS301） |
-| 存档位置 | `Audio\BGM\sy.ogg`（伪装成 BGM） | **`<根>\save.rvdata2`**（另有 `AutoSave\`） |
-| 容器 | `0D 0F 3E 03` + 长度 + zlib(密文) | **没有容器**，直接是密文 |
-| 加密 | `tp.dll` 的 `DS1/DS2`，口令 `xjy.11`，位置相关 | `System\main.dll`（QQEat，MPRESS），**ECB、位置无关、无口令** |
-| 解密方式 | 直接调 `tp.dll`（成功） | 调 `main.dll`（能加解密，但**密钥状态不对**，v0.2 解决） |
-| 复用 | — | `xj_marshal.py` 直接继承，其余重写 |
+怎么找出来的（以及走过的弯路）见 `docs\逆向过程.md`。
 
 ---
 
-## 免责声明
+## 🛡 防作弊是怎么被解决的
 
-* 本工具只操作**你自己机器上**的游戏存档。修改存档前请**自行备份**。
-* 仓库里**不包含**游戏的任何素材、脚本或 `main.dll` ——
-  宿主运行时从你本机的游戏目录里加载它。
-* 请勿把本工具用于商业用途或在线排行等破坏公平性的场景。
+游戏把金钱这类关键数值包在 `Lock` 对象里，读的时候校验一个校验和：
+
+```ruby
+class Lock
+  def get_encryption(v); v * 91 + 45 + seed / 800; end   # seed = $game_system.seeds[:shield]
+  def show
+    if get_encryption(@value) != @master
+      msgbox '游戏异常！'; exit          # ← 直接改数值就会踩这里
+    end
+    @value
+  end
+end
+```
+
+所以本工具改 `@value` 时会**顺手把 `@master` 重算**，
+另外提供「检查并修复防作弊校验」按钮，可以一次性修好整个存档里所有 `Lock`。
+
+> 改存档 / 改 `Data` 都不会被 `Config.ini` 里那个 md5 校验发现
+> —— 那份清单只包含 `Game.exe` 和 `System\main.dll`。
+
+---
+
+## 📁 仓库结构
+
+```
+src\
+  xj_viewer.py      tkinter 界面（概览 / 快捷修改 / 数据树 / 说明）
+  xj_save.py        存档语义层（金钱、角色、开关变量、Lock 防作弊校验修复）
+  xj_model.py       打开/摘要/写回
+  xj_edit.py        区间补丁 + 自包含序列化
+  xj_marshal.py     Ruby Marshal 4.8 解析 / 序列化
+  xj_codec.py       加解密（调用 32 位宿主，自动选密钥）
+  xj_codec32.cs     32 位宿主源码（LoadLibrary + 调用 main.dll 导出）
+  XJCodec32.exe     编译产物
+  xj_env.py         游戏目录 / 存档路径定位
+tests\              test_marshal / test_codec / test_model / test_gui
+tools\              逆向与验证脚本（爆破、导出脚本、hexdump、总体验证…）
+docs\
+  存档格式.md        文件位置 / 密钥 / 结构 / Lock 校验 / 解析的坑
+  逆向过程.md        保护机制怎么破的（含失败路线）
+  开发指南.md        代码结构、扩展方式
+  待解决问题.md      还没做的增强项
+```
+
+---
+
+## ⚠ 注意
+
+* 游戏**运行中**改存档无效：游戏只在存/读档时读文件，改之前请先退出游戏。
+* 改完建议先进游戏读一次档确认（有问题可以用 `.bak.` 备份回滚）。
+* 存档里存着本机硬盘码（`@config[:hard_disk_code]`），
+  换机器玩请用游戏自己的存档功能。
+* 本工具只做**离线存档编辑**，不含内存修改 / 反调试对抗。
+
+## 📜 许可
+
+MIT，见 `LICENSE`。仅用于单机游戏存档的互操作与备份，请勿用于传播游戏本体。

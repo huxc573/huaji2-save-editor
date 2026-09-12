@@ -66,15 +66,34 @@ def main():
     dec, n2 = xj_codec.decrypt_file(enc, os.path.join(tmp, "dec.bin"), main_dll=mian)
     check(n2 == len(data) and open(dec, "rb").read() == data, "解密回原文")
 
-    print("\n== 游戏原档（预期失败：密钥状态不一致） ==")
+    print("\n== 游戏原档（用逆向出来的密钥真解） ==")
     save = xj_env.save_path(game)
-    if save and os.path.exists(save) and len(data):
-        try:
-            p, n = xj_codec.decrypt_file(save, os.path.join(tmp, "save.out"), main_dll=mian)
-            print("  [!!] 竟然成功了：%s (%d 字节)" % (p, n))
-        except xj_codec.CodecError as e:
-            check("密钥状态" in str(e) or "输出为空" in str(e),
-                  "如实报错（这是 v0.1 的已知限制）")
+    if save and os.path.exists(save):
+        p, n = xj_codec.decrypt_file(save, os.path.join(tmp, "save.out"), main_dll=mian)
+        body = open(p, "rb").read()
+        check(len(body) == n and body[:2] == b"\x04\x08",
+              "存档解密出 Marshal 4.8 (%d 字节)" % n)
+        check(xj_codec.key_for(save) == xj_codec.KEY_SAVE,
+              "存档自动选到密钥 %s" % xj_codec.KEY_SAVE)
+    data_files = ["Data/System.rvdata2", "Data/Actors.rvdata2",
+                  "Data/Scripts.rvdata2"]
+    for rel in data_files:
+        f = os.path.join(game, rel.replace("/", os.sep))
+        if not os.path.exists(f):
+            continue
+        p, n = xj_codec.decrypt_file(f, os.path.join(tmp, os.path.basename(f) + ".out"),
+                                     main_dll=mian)
+        body = open(p, "rb").read()
+        check(body[:2] == b"\x04\x08",
+              "%s 解密出 Marshal (%d 字节, key=%s)"
+              % (rel, n, xj_codec.key_for(f)))
+    # 错误密钥必须给出明确失败（不能悄悄写出垃圾）
+    bad = os.path.join(tmp, "bad.bin")
+    try:
+        xj_codec.decrypt_file(save, bad, key="wrong-key", main_dll=mian)
+        check(False, "错误密钥应当报错")
+    except xj_codec.CodecError as e:
+        check("输出为空" in str(e), "错误密钥被如实拒绝")
     shutil.rmtree(tmp, ignore_errors=True)
 
     print("\n==== 通过 %d, 失败 %d ====" % (OK, NG))

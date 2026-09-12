@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""《画迹2：缘起凡尘》存档工具 v0.1 —— tkinter 界面。
+"""《画迹2：缘起凡尘》存档工具 v0.2 —— tkinter 界面。
 
 页签：
-  * 概览        存档概况 + 加解密自检
+  * 概览        存档概况 + 加解密自检 + 环境信息
+  * 快捷修改    金钱 / 角色属性 / 开关 / 变量 / 防作弊校验一键修复
   * 数据树      全部顶层对象树形浏览（字段 / 类型 / 值），右键改标量
-  * 说明        格式与机制说明（内置 docs 摘要）
-  * 更新日志
+  * 说明        格式、密钥与防作弊机制说明
 
 启动： python src/xj_viewer.py
 """
@@ -25,8 +25,9 @@ import xj_edit  # noqa: E402
 import xj_env  # noqa: E402
 import xj_marshal as M  # noqa: E402
 import xj_model  # noqa: E402
+import xj_save  # noqa: E402
 
-APP = "画迹2 存档工具 v0.1"
+APP = "画迹2 存档工具 v0.2"
 LAST_TXT = os.path.join(os.path.expanduser("~"), ".huaji2_save_editor_last.txt")
 
 
@@ -43,17 +44,21 @@ class App(tk.Tk):
         self.geometry("1080x680")
         self.doc = None
         self.nodes = {}                     # tree item id -> node
+        self.sv = None                      # xj_save.SaveDoc（快捷面板用）
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
         self.tab_over = ttk.Frame(nb)
+        self.tab_quick = ttk.Frame(nb)
         self.tab_tree = ttk.Frame(nb)
         self.tab_help = ttk.Frame(nb)
         nb.add(self.tab_over, text="概览")
+        nb.add(self.tab_quick, text="快捷修改")
         nb.add(self.tab_tree, text="数据树")
         nb.add(self.tab_help, text="说明 / 机制")
 
         self._build_over()
+        self._build_quick()
         self._build_tree()
         self._build_help()
 
@@ -74,6 +79,166 @@ class App(tk.Tk):
         self.txt_over.pack(fill="both", expand=True, padx=8, pady=6)
         self.bind_all("<Control-s>", lambda e: self.save())
         self.show_env()
+
+    # ------------------------------------------------------------- 快捷修改页
+    def _build_quick(self):
+        f = self.tab_quick
+
+        # 金钱
+        box = ttk.LabelFrame(f, text="金钱（Lock 包装，改值会同步修校验）")
+        box.pack(fill="x", padx=8, pady=6)
+        ttk.Label(box, text="当前：").grid(row=0, column=0, padx=6, pady=4)
+        self.lbl_gold = ttk.Label(box, text="-", width=18)
+        self.lbl_gold.grid(row=0, column=1, sticky="w")
+        ttk.Label(box, text="改为：").grid(row=0, column=2, padx=6)
+        self.var_gold = tk.StringVar()
+        ttk.Entry(box, textvariable=self.var_gold, width=14).grid(row=0, column=3)
+        ttk.Button(box, text="应用", command=self.apply_gold).grid(
+            row=0, column=4, padx=6)
+        self.lbl_lock = ttk.Label(box, text="")
+        self.lbl_lock.grid(row=0, column=5, padx=6)
+
+        # 角色
+        box2 = ttk.LabelFrame(f, text="角色（选中后填新值再应用）")
+        box2.pack(fill="both", expand=True, padx=8, pady=6)
+        left = ttk.Frame(box2)
+        left.pack(side="left", fill="both", expand=True)
+        self.lst_actors = tk.Listbox(left, height=8)
+        self.lst_actors.pack(fill="both", expand=True, padx=6, pady=4)
+        self.lst_actors.bind("<<ListboxSelect>>", lambda e: self.sync_actor_fields())
+        right = ttk.Frame(box2)
+        right.pack(side="left", fill="y", padx=6)
+        self.actor_vars = {}
+        for i, (field, label) in enumerate([("@level", "等级"), ("@hp", "HP"),
+                                            ("@mp", "MP"), ("@name", "名字")]):
+            ttk.Label(right, text=label).grid(row=i, column=0, sticky="e", padx=4, pady=2)
+            v = tk.StringVar()
+            ttk.Entry(right, textvariable=v, width=18).grid(row=i, column=1, pady=2)
+            self.actor_vars[field] = v
+        ttk.Button(right, text="应用", command=self.apply_actor).grid(
+            row=len(self.actor_vars), column=1, pady=6)
+
+        # 开关 / 变量
+        box3 = ttk.LabelFrame(f, text="开关 / 变量（编号从 0 开始）")
+        box3.pack(fill="x", padx=8, pady=6)
+        ttk.Label(box3, text="编号").grid(row=0, column=0, padx=4)
+        self.var_idx = tk.StringVar(value="0")
+        ttk.Entry(box3, textvariable=self.var_idx, width=8).grid(row=0, column=1)
+        ttk.Label(box3, text="值").grid(row=0, column=2, padx=4)
+        self.var_val = tk.StringVar()
+        ttk.Entry(box3, textvariable=self.var_val, width=12).grid(row=0, column=3)
+        ttk.Button(box3, text="设开关", command=lambda: self.apply_sw(True)).grid(
+            row=0, column=4, padx=6)
+        ttk.Button(box3, text="设变量", command=lambda: self.apply_sw(False)).grid(
+            row=0, column=5, padx=6)
+
+        # 防作弊 / 保存
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", padx=8, pady=8)
+        ttk.Button(bar, text="检查并修复防作弊校验", command=self.fix_locks).pack(side="left")
+        ttk.Button(bar, text="保存 (Ctrl+S)", command=self.save).pack(side="left", padx=8)
+        ttk.Button(bar, text="重新加载", command=lambda: self.load(self.doc.path if self.doc else None, quiet=True)).pack(side="left")
+
+    # ------------------------------------------------------------- 快捷操作
+    def refresh_quick(self):
+        """刷新快捷面板。任何解析不了的文件（比如普通数据文件）都只是"不显示"。"""
+        self.sv = None
+        try:
+            self.lst_actors.delete(0, "end")
+        except Exception:
+            pass
+        try:
+            self.lbl_gold.configure(text="-")
+            self.lbl_lock.configure(text="")
+        except Exception:
+            return
+        if not self.doc:
+            return
+        try:
+            self.sv = xj_save.SaveDoc(self.doc.path)
+            g = self.sv.gold()
+            self.lbl_gold.configure(text=str(g))
+            bad = self.sv.check_locks()
+            self.lbl_lock.configure(
+                text="防作弊校验：正常" if not bad
+                else "防作弊校验：不一致 %d 处（可一键修复）" % len(bad))
+            for aid, a in self.sv.actors():
+                self.lst_actors.insert("end", "#%d %s" % (aid, self.sv.actor_summary(a)))
+        except Exception as e:
+            self.sv = None
+            self.lbl_lock.configure(text="（此文件不是本作存档：%s）" % human(str(e))[:40])
+
+    def _picked_actor(self):
+        if not self.sv:
+            return None
+        sel = self.lst_actors.curselection()
+        if not sel:
+            return None
+        return self.sv.actors()[sel[0]][1]
+
+    def sync_actor_fields(self):
+        a = self._picked_actor()
+        if a is None:
+            return
+        for field, var in self.actor_vars.items():
+            var.set(str(self.sv.actor_field(a, field)))
+
+    def apply_gold(self):
+        if not self.sv:
+            return
+        try:
+            self.sv.set_gold(int(self.var_gold.get(), 0))
+        except Exception as e:
+            messagebox.showerror("修改失败", human(str(e)))
+            return
+        self.doc.dirty = True
+        self.refresh_quick()
+        self.log_over("\n".join(self.sv.summary_lines()))
+
+    def apply_actor(self):
+        a = self._picked_actor()
+        if a is None:
+            messagebox.showinfo("提示", "先在左边选一个角色。")
+            return
+        for field, var in self.actor_vars.items():
+            raw = var.get().strip()
+            if not raw:
+                continue
+            try:
+                self.sv.set_actor_field(a, field, raw)
+            except Exception as e:
+                messagebox.showerror("修改失败", human(str(e)))
+                return
+        self.doc.dirty = True
+        self.refresh_quick()
+
+    def apply_sw(self, is_switch):
+        if not self.sv:
+            return
+        try:
+            idx = int(self.var_idx.get(), 0)
+            if is_switch:
+                v = self.var_val.get().strip().lower() in ("1", "true", "t", "y", "yes", "开")
+                self.sv.set_switch(idx, v)
+            else:
+                self.sv.set_variable(idx, int(self.var_val.get(), 0))
+        except Exception as e:
+            messagebox.showerror("修改失败", human(str(e)))
+            return
+        self.doc.dirty = True
+        self.refresh_quick()
+
+    def fix_locks(self):
+        if not self.sv:
+            return
+        bad = self.sv.check_locks()
+        n = self.sv.repair_locks()
+        if n:
+            self.doc.dirty = True
+        self.refresh_quick()
+        messagebox.showinfo("防作弊校验",
+                            "检查到不一致 %d 处，已修复 %d 处。\n（记得按 Ctrl+S 保存）"
+                            % (len(bad), n))
 
     # ------------------------------------------------------------- 数据树页
     def _build_tree(self):
@@ -147,6 +312,7 @@ class App(tk.Tk):
             pass
         self.log_over(self.doc.summary())
         self.fill_tree()
+        self.refresh_quick()
 
     # ------------------------------------------------------------- 树
     def fill_tree(self):
@@ -267,8 +433,14 @@ class App(tk.Tk):
         ]))
 
     def log_over(self, text):
+        """概览页永远带上环境尾巴，方便一眼确认"现在改的是哪个游戏/哪个文件"。"""
+        tail = ("\n\n" + "-" * 60 + "\n"
+                "游戏目录 : %s\n" % xj_env.find_game_dir())
+        if self.doc:
+            tail += "当前文件 : %s%s\n" % (self.doc.path,
+                                        "（有未保存改动）" if self.doc.dirty else "")
         self.txt_over.delete("1.0", "end")
-        self.txt_over.insert("1.0", human(text))
+        self.txt_over.insert("1.0", human(text) + tail)
 
 
 class EditDialog(tk.Toplevel):
@@ -336,37 +508,64 @@ def short(v, n=80):
     return s if len(s) <= n else s[:n] + "…"
 
 
-HELP_TEXT = """《画迹2：缘起凡尘》存档工具 v0.1
+HELP_TEXT = """《画迹2：缘起凡尘》存档工具 v0.2
 
 【游戏与引擎】
   引擎      RPG Maker VX Ace（RGSS301，Ruby 1.9 语义的 Marshal 4.8）
   存档      <游戏根>\\save.rvdata2
   自动存档  <游戏根>\\AutoSave\\save00..29.rvdata2
   脚本入口  Data\\main.rvdata2（明文，内容只有一句 qqeat 调用）
-  加解密    System\\main.dll（MPRESS 加壳的自定义分组密码）
+  加解密    System\\main.dll（MPRESS 加壳的自定义分组密码，8 字节分组 ECB）
 
-【存档/数据文件的加密形态】
-  密文 = 8 字节定长头块 + 明文按 8 字节分组的 ECB 加密
-  * 密文长度 = 明文长度 + 8，且总是 8 的倍数
-  * 无随机量：同明文同位置 -> 同密文（实测同一明文加密两次字节完全一致）
-  * 长 0 区在密文里表现为同一 8 字节块大量重复（ECB 特征）
+【三个密钥（都已逆向出来并实测通过）】
+  761205            Data\\*.rvdata2 数据库、System\\Game.md5
+  imoutogadaisuki   Data\\Scripts.rvdata2（游戏脚本本体）
+  tiyan_version     存档 save.rvdata2 / AutoSave\\*.rvdata2
+
+  密钥不对时 main.dll 不报错，而是**输出 0 字节空文件** —— 本工具就靠这个
+  判断命中，并且在猜不出文件名时会自动依次试这三个密钥。
 
 【本工具怎么读文件】
   Python(64 位) --subprocess--> src\\XJCodec32.exe(32 位)
-      --LoadLibrary--> System\\main.dll --encryption_file/decryption_file-->
+      --LoadLibrary--> System\\main.dll --decryption_file/encryption_file-->
   参数一律用 UTF-8 传给 DLL（DLL 内部做 UTF8→GBK 936 转换）。
+  写回：明文 Marshal 重写 → 用同一密钥加密 → 覆盖原文件（自动留
+  `*.bak.<时间戳>` 备份）。
 
-【v0.1 已知限制】
-  main.dll 里这份分组密码的密钥状态，与游戏进程内写文件时使用的状态不一致，
-  因此**直接在外部解密游戏自身产生的 save.rvdata2 / Data\\*.rvdata2 会得到 0 字节**。
-  自检（本工具加密→解密）是同状态往返，所以能通过。
-  详见 docs\\待解决问题.md。
+【存档结构】
+  header   = Marshal.dump({ :temp => nil })
+  contents = Marshal.dump({ :system, :timer, :message, :switches, :variables,
+                            :self_switches, :actors, :party, :troop, :map, :player })
 
-【能做什么 / 不能做什么】
-  ✔ 打开已经解密好的明文存档（*.rvdata2/.rxdata/.bin）浏览与修改
-  ✔ 加解密自检、环境诊断
-  ✔ Ruby Marshal 的解析/序列化/区间补丁（不会破坏对象链接 @N）
-  ✘ v0.1 暂不能直接解密游戏原来的密文存档（密钥状态待解决）
+【防作弊机制（重要）】
+  游戏用 Lock 包装金钱等关键数值：
+
+    class Lock
+      def initialize(v); @value = v; @master = get_encryption(@value); end
+      def seed; $game_system.seeds[:shield]; end
+      def get_encryption(v); v * 91 + 45 + seed / 800; end   # Ruby 整除
+      def show
+        if get_encryption(@value) != @master
+          msgbox '游戏异常！'; exit          # ← 直接改数值会踩这里
+        end
+        @value
+      end
+    end
+
+  所以改 @value 必须同步重算 @master。本工具：
+    * 快捷修改里改金钱会自动重算；
+    * 「检查并修复防作弊校验」会扫描整个存档并修好所有 Lock。
+
+【能做什么】
+  ✔ 自动选密钥 → 解密 → 解析 → 浏览（概览 / 快捷修改 / 数据树）
+  ✔ 改金钱（含防作弊校验）、角色等级/HP/MP/名字、开关、变量
+  ✔ 任意标量字段就地改（区间补丁，不动其它字节）
+  ✔ 一键检查并修复所有 Lock 校验
+  ✔ 自动备份，写回前先自检能否重新解析
+
+【注意】
+  * 游戏运行中改存档没用：它只在存/读档时读文件，请先退出游戏再改。
+  * 改完最好先进游戏读一次档确认；有问题可以用备份回滚。
 """
 
 

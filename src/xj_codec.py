@@ -3,22 +3,20 @@
 
 游戏用 `System\\main.dll`（MPRESS 加壳的自定义分组密码）加解密文件：
 
-    encryption_file(输入路径, 输出路径, 第三参数) -> 0/1
-    decryption_file(输入路径, 输出路径, 第三参数) -> 0/1
+    encryption_file(输入路径, 输出路径, 密钥字符串) -> 0/1
+    decryption_file(输入路径, 输出路径, 密钥字符串) -> 0/1
 
-实测结论（见 docs/保护机制-QQEat.md）：
+实测结论（见 docs/逆向过程.md）：
 
 * 参数是 **UTF-8** 编码的 C 字符串（DLL 内部做 UTF8→GBK 936 转换）；
   传 ANSI 会让中文路径打不开文件。
-* 密文 = 8 字节 **定长头块** + 明文按 8 字节分组 **ECB** 加密；
-  密文长度 = 明文长度 + 8，且总是 8 的倍数；同明文同位置 -> 同密文（无随机量）。
+* **第 3 个参数就是密钥**（反过来用不同密钥试可以自证：输出 0 字节）。
+  密钥不对时不报错，而是**输出 0 字节的空文件** —— 这就是最好的“有没有命中”的判断依据。
+* 密文 = 8 字节头块 + 明文按 8 字节分组 ECB；密文长度是 8 的倍数，无随机量。
 * `System/main.dll` 是 32 位库，64 位 Python 加载不了 →
   随包带一个 32 位宿主 `src/XJCodec32.exe` 中转。
 
-⚠ **已知限制（v0.1）**：`main.dll` 里的分组密码有**出厂密钥状态**，
-本机（未运行游戏进程）下该状态与游戏写文件时使用的状态**不一致**，
-所以直接解密游戏自身产生的 `Data\\*.rvdata2` / `save.rvdata2` 会得到 0 字节。
-纯 Python 复刻该算法尚未完成，见 `docs/待解决问题.md`。
+密钥（均已实测验证）见 KEY_761205 / KEY_SCRIPT / KEY_SAVE，`key_for()` 会按文件名猜。
 """
 import os
 import subprocess
@@ -35,6 +33,41 @@ HOST = os.path.join(HERE, "XJCodec32.exe")
 
 # 明文 Ruby Marshal 4.8 的头
 MARSHAL_MAGIC = b"\x04\x08"
+
+# ---------------------------------------------------------------------------
+# 密钥表（逆向出来的，都是 main.dll / 游戏脚本里写死的常量）
+#   761205        —— Data\*.rvdata2 数据库、System\Game.md5
+#   imoutogadaisuki —— Data\Scripts.rvdata2（游戏脚本，藏在 main.dll 里）
+#   tiyan_version —— 存档 save.rvdata2 / AutoSave\*.rvdata2（写在游戏脚本 Config::File 里）
+# ---------------------------------------------------------------------------
+KEY_DATA = "761205"
+KEY_SCRIPT = "imoutogadaisuki"
+KEY_SAVE = "tiyan_version"
+DEFAULT_KEY = KEY_DATA
+
+
+def key_for(path):
+    """根据文件路径猜出该用哪个密钥。"""
+    name = os.path.basename(path or "").lower()
+    p = (path or "").replace("/", "\\").lower()
+    if name == "scripts.rvdata2":
+        return KEY_SCRIPT
+    if "\\autosave\\" in p or name.startswith("save") and name.endswith(".rvdata2"):
+        return KEY_SAVE
+    if name == "game.md5":
+        return KEY_DATA
+    if name.endswith(".rvdata2"):
+        return KEY_DATA
+    return DEFAULT_KEY
+
+
+def is_encrypted_size(path):
+    """密文长度总是 8 的倍数 —— 粗略判断一个文件是不是被加密过。"""
+    try:
+        n = os.path.getsize(path)
+    except OSError:
+        return False
+    return n > 0 and n % 8 == 0
 
 
 class CodecError(Exception):
@@ -97,35 +130,78 @@ def selftest(main_dll=None):
     return rc == 0, info, lines
 
 
-def _transform(mode, src, dst, key="", main_dll=None):
+def _transform(mode, src, dst, key=None, main_dll=None):
     main_dll = main_dll or xj_env.main_dll()
     if not main_dll:
         raise CodecError("找不到 System/main.dll，请用环境变量 XJ_GAME 指定游戏目录")
     if not os.path.exists(src):
         raise CodecError("找不到输入文件：%s" % src)
+    if key is None:
+        key = key_for(src)
     rc, txt = _run([mode, main_dll, src, dst, key])
     info, lines = parse_info(txt)
     size = os.path.getsize(dst) if os.path.exists(dst) else 0
     return rc, size, info, lines
 
 
-def decrypt_file(src, dst=None, key="", main_dll=None):
-    """解密一个文件。成功返回 (明文路径, 字节数)；失败抛 CodecError。"""
+ALL_KEYS = [KEY_DATA, KEY_SCRIPT, KEY_SAVE]
+
+
+def key_candidates(path):
+    """要试的密钥顺序：先按文件名猜，再试其它已知密钥。
+
+    为什么不能只按文件名：备份文件叫 `save.rvdata2.bak.20260101-120000`，
+    文件名里已经没有 `.rvdata2` 后缀了，猜不出来 —— 但内容一试就知道。
+    """
+    first = key_for(path)
+    return [first] + [k for k in ALL_KEYS if k != first]
+
+
+def decrypt_file(src, dst=None, key=None, main_dll=None):
+    """解密一个文件。成功返回 (明文路径, 字节数)；失败抛 CodecError。
+
+    `key=None` 时按文件名猜密钥，猜不中就**依次试已知密钥**
+    （密钥不对时 DLL 只输出 0 字节空文件，所以判定很干净）。
+    """
     if dst is None:
         dst = src + ".plain"
-    rc, size, info, lines = _transform("decrypt", src, dst, key, main_dll)
-    if size <= 0:
-        raise CodecError(
-            "解密失败：main.dll 输出为空。\n"
-            "原因：当前进程里 main.dll 的密钥状态与游戏写文件时不一致（见 docs/待解决问题.md）。\n"
-            "原始输出：\n  " + "\n  ".join(lines))
-    return dst, size
+    keys = [key] if key else key_candidates(src)
+    tried = []
+    last = ([], "")
+    for k in keys:
+        rc, size, info, lines = _transform("decrypt", src, dst, k, main_dll)
+        tried.append((k, size))
+        last = (lines, k)
+        if size > 0:
+            _LAST_KEY[os.path.abspath(src)] = k
+            return dst, size
+    raise CodecError(
+        "解密失败：main.dll 输出为空（密钥不对时它就是这么干的）。\n"
+        "已试过的密钥：%s\n本文件：%s\n原始输出：\n  %s"
+        % (", ".join("%s->%d 字节" % t for t in tried), src,
+           "\n  ".join(last[0])))
 
 
-def encrypt_file(src, dst=None, key="", main_dll=None):
-    """加密一个文件（用同一种状态，可用于把自己加密过的文件还原）。"""
+# 记住"哪个文件用了哪个密钥"，写回时保证用同一个
+_LAST_KEY = {}
+
+
+def key_used_for(path):
+    k = _LAST_KEY.get(os.path.abspath(path))
+    return k or key_for(path)
+
+
+def encrypt_file(src, dst=None, key=None, main_dll=None):
+    """加密一个文件（用同一个密钥就能还原自己加密过的东西）。
+
+    `key=None` 时会参考 `src` 对应的解密密钥（如果之前解过），
+    否则按目标文件名猜。
+    """
     if dst is None:
         dst = src + ".enc"
+    if key is None:
+        key = key_used_for(src) if os.path.abspath(src) in _LAST_KEY \
+            else key_for(dst)
     rc, size, info, lines = _transform("encrypt", src, dst, key, main_dll)
     if size <= 0:
         raise CodecError("加密失败：main.dll 输出为空。\n  " + "\n  ".join(lines))

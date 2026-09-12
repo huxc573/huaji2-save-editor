@@ -2,11 +2,16 @@
 """存档语义层：打开 → 解析 → 摘要 / 浏览 / 改值 → 写回。
 
 《画迹2：缘起凡尘》是 RPG Maker VX Ace（RGSS301），存档是
-`Marshal.dump` 的原始字节流（VX Ace 的 DataManager 会把 header 和 data
-分两次 dump 到同一个文件里，因此明文可能由多个 Marshal 顶层对象拼接而成）。
+`Marshal.dump` 的原始字节流（游戏把 header 和 contents **分两次 dump**
+写进同一个文件，所以明文是两个 Marshal 顶层对象拼接）：
 
-⚠ v0.1 状态：因为 main.dll 的密钥状态问题（见 docs/待解决问题.md），
-   本模块默认只能处理**已经解密好的明文**；对密文会给出明确报错。
+    {  :temp => nil }                       <- header
+    {  :system => ...  :actors => ... }     <- contents
+
+文件本身用 `main.dll` 的 `decryption_file` / `encryption_file` 加密，
+密钥 = `tiyan_version`（见 xj_codec.KEY_SAVE），本模块会自动选密钥。
+
+写回时先做 Marshal 重写 → 再加密，并且会备份 `*.bak.<时间戳>`。
 """
 import os
 import shutil
@@ -32,6 +37,7 @@ class Doc(object):
         self.engine = None             # PatchEngine
         self.objects = []              # [{'head':..,'node':..,'links':..}, ...]
         self.plain = False             # 打开时是不是明文
+        self.plain_key = None          # 打开密文时用的密钥
         self.dirty = False
         if path:
             self.load(path)
@@ -45,7 +51,12 @@ class Doc(object):
         else:
             tmp = path + ".xj_plain"
             xj_codec.decrypt_file(path, tmp)
+            self.plain_key = xj_codec.key_used_for(path)
             self.raw = open(tmp, "rb").read()
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         self.engine = xj_edit.PatchEngine(self.raw)
         self.objects = M.parse_stream(self.raw)
         self.dirty = False
@@ -82,7 +93,8 @@ class Doc(object):
         else:
             tmp = path + ".xj_new"
             open(tmp, "wb").write(new)
-            xj_codec.encrypt_file(tmp, path)
+            key = getattr(self, "plain_key", None) or xj_codec.key_used_for(path)
+            xj_codec.encrypt_file(tmp, path, key)
             os.remove(tmp)
         self.raw = new
         self.engine = xj_edit.PatchEngine(new)
@@ -119,16 +131,22 @@ def describe(node):
         return "UserDef(%s, %d 字节)" % (getattr(node, 'cls', '?'),
                                          node.end - node.start)
     if t == '@':
-        return "Link(-> #%d)" % node.idx
+        return "Link(-> #%d)" % getattr(node, 'index', getattr(node, 'idx', -1))
     return getattr(node, 'text', lambda: t)()
 
 
 def main():
     argv = sys.argv[1:]
-    if not argv:
+    if not argv or argv[0] in ("-h", "--help"):
         print("用法： python src/xj_model.py <存档文件>")
+        print("       python src/xj_model.py --default      # 自动定位 <游戏根>\\save.rvdata2")
         return
-    doc = Doc(argv[0])
+    path = xj_env.save_path() if argv[0] == "--default" else argv[0]
+    if not path:
+        print("[NG] 没找到游戏目录/存档，请设 XJ_GAME")
+        return
+    print("存档 =", path)
+    doc = Doc(path)
     print(doc.summary())
 
 
