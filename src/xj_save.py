@@ -107,11 +107,20 @@ def hash_put_pairs(h):
 class SaveDoc(object):
     """一份存档 + 常用字段的读写。底层还是 xj_model.Doc / 区间补丁。"""
 
-    def __init__(self, path=None):
-        self.path = path or xj_env.save_path()
-        if not self.path:
-            raise ValueError("没找到游戏目录/存档，可用环境变量 XJ_GAME 指定")
-        self.doc = xj_model.Doc(self.path)
+    def __init__(self, path=None, doc=None):
+        """doc 不为空则直接包住它（GUI 里必须这样用：
+
+        否则 SaveDoc 会自己另开一份 xj_model.Doc，改的是第二份内存副本，
+        界面上看到"改了"，但保存时写出去的是第一份（改动全丢）。
+        """
+        if doc is not None:
+            self.doc = doc
+            self.path = doc.path
+        else:
+            self.path = path or xj_env.save_path()
+            if not self.path:
+                raise ValueError("没找到游戏目录/存档，可用环境变量 XJ_GAME 指定")
+            self.doc = xj_model.Doc(self.path)
         self.header = self.doc.objects[0]["node"]
         self.contents = self.doc.objects[-1]["node"]
 
@@ -353,12 +362,112 @@ class SaveDoc(object):
                 out.append((kid, M.value_of(v2)))
         return out
 
+    # ------------------------------------------------------------ 角色属性（中文）
+    # 游戏把五维/潜能等放在 Game_Actor.@attr（类 Game_Actor_Attr），字段名是中文。
+    ATTR_FIELDS = ["@体质", "@法力", "@力量", "@耐力", "@敏捷", "@潜能",
+                   "@人气", "@贡献", "@体力", "@活力"]
+
+    def attr_obj(self, actor):
+        """角色对应的 Game_Actor_Attr 节点（没有就返回 None）。"""
+        a = _deref(ivar(actor, "@attr"))
+        if isinstance(a, M.ObjNode):
+            return a
+        return None
+
+    def attr_items(self, actor):
+        """返回 [(字段名, 当前值), ...]，只列存档里真实存在的。"""
+        out = []
+        obj = self.attr_obj(actor)
+        if obj is None:
+            return out
+        names = [k for k, _ in obj.ivars]
+        for want in self.ATTR_FIELDS:
+            if want in names:
+                out.append((want, M.value_of(_deref(ivar(obj, want)))))
+        for k, v in obj.ivars:                 # 再补上不认识的
+            if k not in self.ATTR_FIELDS and k not in ("@master", "@name"):
+                out.append((k, M.value_of(_deref(v))))
+        return out
+
+    def set_attr(self, actor, name, value):
+        obj = self.attr_obj(actor)
+        if obj is None:
+            raise KeyError("这个角色没有 @attr")
+        node = _deref(ivar(obj, name))
+        if node is None:
+            raise KeyError("属性 %s 不存在" % name)
+        self.doc.set_value(node, int(value))
+        return int(value)
+
+    def skills(self, actor):
+        """已学技能 id 列表。"""
+        arr = _deref(ivar(actor, "@skills"))
+        if not isinstance(arr, M.ArrayNode):
+            return []
+        return [M.value_of(_deref(x)) for x in arr.items]
+
+    def skill_names(self, actor):
+        """已学技能 [(id, 名称), ...]（名称来自 Data\\Skills.rvdata2）。"""
+        import xj_db
+        try:
+            nm = xj_db.name_map("Skills")
+        except Exception:
+            nm = {}
+        return [(i, nm.get(i, "?")) for i in self.skills(actor)]
+
+    def equips(self, actor):
+        """装备 [[槽位, 类别, id], ...]，类别 0=武器 1=防具。"""
+        arr = _deref(ivar(actor, "@equips"))
+        out = []
+        if isinstance(arr, M.ArrayNode):
+            for i, e in enumerate(arr.items):
+                e2 = _deref(e)
+                if isinstance(e2, M.ObjNode):
+                    out.append((i, M.value_of(_deref(ivar(e2, "@class"))),
+                                M.value_of(_deref(ivar(e2, "@item_id")))))
+        return out
+
+    # ------------------------------------------------------------ 队伍杂项
+    def steps(self):
+        return M.value_of(_deref(ivar(self.section("party"), "@steps")))
+
+    def set_steps(self, value):
+        node = _deref(ivar(self.section("party"), "@steps"))
+        if node is None:
+            raise KeyError("存档里没有 @steps")
+        self.doc.set_value(node, int(value))
+        return int(value)
+
+    def sys_get(self, name):
+        return M.value_of(_deref(ivar(self.section("system"), name)))
+
+    def sys_set(self, name, value):
+        node = _deref(ivar(self.section("system"), name))
+        if node is None:
+            raise KeyError("存档 :system 里没有 %s" % name)
+        self.doc.set_value(node, int(value))
+        return int(value)
+
+    def item_rows(self):
+        """队伍物品 [(id, 名称, 数量), ...]（名称来自 Data\\Items.rvdata2）。"""
+        import xj_db
+        try:
+            nm = xj_db.name_map("Items")
+        except Exception:
+            nm = {}
+        out = []
+        for kid, counts in self.items():
+            n = counts[0] if isinstance(counts, list) and counts else counts
+            out.append((kid, nm.get(kid, "?"), n))
+        return out
+
     # ------------------------------------------------------------ 保存
     def save(self, path=None, backup=True):
         return self.doc.save(path, backup=backup)
 
     def reload(self, path=None):
         self.doc = xj_model.Doc(path or self.path)
+        self.path = self.doc.path
         self.header = self.doc.objects[0]["node"]
         self.contents = self.doc.objects[-1]["node"]
         return self

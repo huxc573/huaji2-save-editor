@@ -45,3 +45,9 @@ tools/_*
 tools/xj_state.txt
 _tmp/
 *.bak.*
+
+# 数据表导出的 CSV（随时可重导，不入库；要发布就单独打附件）
+csv/
+
+# GUI 写出的异常日志
+error.log

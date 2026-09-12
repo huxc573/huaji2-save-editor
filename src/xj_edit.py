@@ -47,7 +47,7 @@ class PatchEngine(object):
             self._orig[key] = (node.start, node.end)
         start, end = self._orig[key]
         self._patches[key] = (start, end, new)
-        node.value = value
+        assign_value(node, value)
         return new
 
     # ------------------------------------------------------------ 整块替换
@@ -74,6 +74,31 @@ class PatchEngine(object):
 # --------------------------------------------------------------------------
 # 标量编码
 # --------------------------------------------------------------------------
+def assign_value(node, value):
+    """把新值写回节点的"内存表示"。
+
+    ⚠ 不是所有节点都叫 `.value`：字符串是 `.data`、符号是 `.name`/`.raw`、
+    浮点还要同步 `.raw`（序列化时直接用 raw）。以前一律写 `node.value`，
+    碰到改名字（StrNode）就报 `'StrNode' object has no attribute 'value'`。
+    """
+    if isinstance(node, M.StrNode):
+        node.data = value.encode('utf-8') if isinstance(value, str) else bytes(value)
+        return
+    if isinstance(node, M.SymbolNode):
+        raw = value.encode('utf-8') if isinstance(value, str) else bytes(value)
+        node.raw = raw
+        try:
+            node.name = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            node.name = raw.decode('latin-1')
+        return
+    if isinstance(node, M.FloatNode):
+        node.value = float(value)
+        node.raw = repr(float(value)).encode('ascii')
+        return
+    node.value = value
+
+
 def encode_scalar(node, value):
     """按节点的类型把 value 编码成 Marshal 字节。"""
     t = node.type
