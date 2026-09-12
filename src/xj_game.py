@@ -36,6 +36,7 @@ if HERE not in sys.path:
 import xj_aes  # noqa: E402
 import xj_marshal as M  # noqa: E402
 import xj_notes  # noqa: E402
+import xj_payload  # noqa: E402
 from xj_save import _deref, _as_str, ivar, hash_get, hash_put_pairs  # noqa: E402
 
 # 游戏里的上限（Config::Game + $jiance）
@@ -169,9 +170,9 @@ class GameEditor(object):
         """背包内容：[(槽号, 翻页, 页内格, id, 名称, 数量), ...]，空槽不列。
 
         page=None 表示整本背包（4 页 × 20 格），给了 page 就只看那一页。
+        名称按**物件自己的类**选表（背包里混装着道具/武器/防具）。
         """
         h = self.container(kind)
-        nm = self._name_map(kind)
         out = []
         for k, v in h.pairs:
             slot = M.value_of(_deref(k))
@@ -185,8 +186,9 @@ class GameEditor(object):
                 continue
             item = _deref(arr.items[0])
             iid = get_int(ivar(item, "@id"), -1) if item is not None else -1
+            nm = self.item_display_name(item, "?") if item is not None else "?"
             count = get_int(arr.items[1]) if len(arr.items) > 1 else 1
-            out.append((slot, p, idx, iid, nm.get(iid, "?"), count))
+            out.append((slot, p, idx, iid, nm, count))
         out.sort()
         return out
 
@@ -282,6 +284,16 @@ class GameEditor(object):
                                 {"id": iid, "count": cnt, "dup_of": seen[iid]}))
                 else:
                     seen[iid] = slot
+                # 孵化蛋/礼包这类“运行时才填内容”的东西：@attr 空的话一用就报
+                # `undefined method '[]' for nil:NilClass`
+                need_pay, _nm = self.item_needs_payload(key, iid)
+                if need_pay:
+                    pt, _pd = self.item_payload(item)
+                    if not pt:
+                        out.append((key, slot, nm,
+                                    "缺“运行时内容”（@attr 是空的）——"
+                                    "游戏里一用就报 NoMethodError",
+                                    True, {"id": iid, "payload": True}))
         return out
 
     def pack_fix(self, rows=None):
@@ -297,6 +309,18 @@ class GameEditor(object):
         for row in rows:
             kind, slot, name, why, _fix, extra = row
             if not isinstance(slot, int):
+                continue
+            if extra.get("payload"):
+                it = self._item_node(kind, slot)
+                if it is None:
+                    continue
+                before, _b = self.item_payload(it)
+                self._fix_payload(it, kind, extra.get("id", -1))
+                after, _a = self.item_payload(it)
+                if after and not before:
+                    self.doc.mark_structural()
+                    done.append((kind, slot, "%s 补上了运行时内容（%s）"
+                                 % (name, after)))
                 continue
             cnt = extra.get("count")
             if extra.get("dup_of") is not None:
@@ -431,6 +455,34 @@ class GameEditor(object):
         except Exception:
             return {}
 
+    #: 存档里的物件类名 → Data 表
+    CLASS_TO_DB = {"RPG::Item": "Items", "RPG::Weapon": "Weapons",
+                   "RPG::Armor": "Armors"}
+
+    def item_display_name(self, node, fallback=None):
+        """一个背包物件的显示名。
+
+        关键：**背包里混装三种对象**（道具/武器/防具，召唤兽装备也是武器防具），
+        所以不能拿容器的名字表去查 —— 得按对象自己的类选表：
+        `RPG::Weapon` → Weapons.rvdata2、`RPG::Armor` → Armors.rvdata2 ……
+        依次降级：类对应的表 → 对象自带的 @name → 三张表都试 → fallback。
+        """
+        n = _deref(node)
+        if n is None:
+            return fallback
+        iid = get_int(ivar(n, "@id"), -1)
+        cls = getattr(n, "cls", "") or ""
+        keys = []
+        if cls in self.CLASS_TO_DB:
+            keys.append(self.CLASS_TO_DB[cls])
+        keys += [k for k in ("Items", "Weapons", "Armors") if k not in keys]
+        for k in keys:
+            nm = self._name_map(k).get(iid)
+            if nm:
+                return nm
+        own = _as_str(ivar(n, "@name"))
+        return own or fallback
+
     def item_name(self, kind, item_id):
         return self._name_map(kind).get(item_id, "?")
 
@@ -471,9 +523,10 @@ class GameEditor(object):
             self.sync_security_item(iid)
         return True
 
-    def add_item(self, kind, slot, item_id, count=1):
-        """往空格子里加一件物品（结构性改动：从 Data 模板复制一份对象）。
+    def add_item(self, kind, slot, item_id, count=1, kid=None, clone_like=True):
+        """往空格子里加一件物品（结构性改动）。
 
+        优先克隆**存档里同款**（带运行时内容）；没有才用 Data 模板新建。
         只允许往**空槽**加：这样不会覆盖玩家已有的东西。
         """
         h = self.container(kind)
@@ -481,7 +534,8 @@ class GameEditor(object):
             arr = _deref(h.pairs[self._pair_index(h, slot)][1])
             if isinstance(arr, M.ArrayNode) and arr.items:
                 raise ValueError("第 %d 格已经有东西了" % slot)
-        node = self.make_item(kind, item_id)
+        like = self.find_like(kind, item_id) if clone_like else None
+        node = self.make_item(kind, item_id, kid=kid, like=like)
         arr = M.ArrayNode([node, int_node(count)])
         i = self._pair_index(h, slot)
         key = int_node(slot)
@@ -507,7 +561,8 @@ class GameEditor(object):
                 return (iid, cnt)
         return None
 
-    def set_item(self, kind, slot, item_id, count=None):
+    def set_item(self, kind, slot, item_id, count=None, kid=None,
+                 clone_like=True):
         """把某一格**换成**另一件物品（从 Data 模板新建对象，仿画迹1 的"写入槽位"）。
 
         count=None 表示沿用原来那一格的数量（原来是空的就是 1）。
@@ -518,23 +573,33 @@ class GameEditor(object):
             count = old[1] if old else 1
         count = max(0, min(int(count), MAX_ITEM))
         try:
-            self.make_item(kind, item_id)       # 先确认模板存在，别改到一半失败
+            self.make_item(kind, item_id, kid=kid,
+                           like=self.find_like(kind, item_id) if clone_like
+                           else None)      # 先确认能造出来，别改到一半失败
         except KeyError:
             raise
         if old is not None:
             self.clear_slot(kind, slot)         # 先腾空（置 nil，不删 key）
-        self.add_item(kind, slot, item_id, count)
+        self.add_item(kind, slot, item_id, count, kid=kid, clone_like=clone_like)
         return count
 
-    def make_item(self, kind, item_id):
-        """按 `Data\\<kind>.rvdata2` 里的模板造一个物品对象。
+    def make_item(self, kind, item_id, kid=None, like=None):
+        """造一个物品对象。
 
-        模板只有 19 个 ivar，存档里的物品还多了游戏自己加的 5 个
-        （`@result_note` / `@attr` / `@update` / `@new` / `@transaction_code`）——
-        这几个照存档里的同类物品补上，免得游戏读到 nil 出岔子。
+        优先 `like`：**存档里已经有的同一件东西**（连 `@attr` 里的运行时内容
+        一起克隆）——游戏自己发的孵化蛋/礼包里的内容就是现抽的，
+        从模板凭空造会缺东西（用起来直接 NoMethodError）。
+        没参照物时才用 Data 模板 + 补上游戏自加的 5 个 ivar，
+        并且对“运行时才填内容”的家族（孵化蛋/礼包/图纸…）现生成一份。
+
+        kid：孵化类物品的“孵出/开出什么”id；不给就随机（自己按游戏的范围抽）。
         """
         import xj_db
-        root, items = xj_db.load(kind)
+        if like is not None:
+            node = clone_node(like)
+            self._fix_payload(node, kind, item_id, kid)
+            return node
+        _root, items = xj_db.load(kind)
         tpl = None
         for i, n in items:
             if i == item_id:
@@ -548,7 +613,144 @@ class GameEditor(object):
         for k, v in extra:
             if k not in have:
                 node.ivars.append((k, v))
+        self._fix_payload(node, kind, item_id, kid)
         return node
+
+    def item_payload(self, node):
+        """读一个物件 `@attr` 里的运行时内容：`(type, data)`，没有则 (None, None)。"""
+        a = _deref(ivar(node, "@attr"))
+        d = _deref(hash_get(a, "data")) if a is not None else None
+        if not isinstance(d, M.HashNode):
+            return None, None
+        t = M.value_of(_deref(hash_get(d, "type")))
+        inner = _deref(hash_get(d, "data"))
+        return t, inner
+
+    def item_needs_payload(self, kind, item_id):
+        """这件东西是不是“游戏运行时才生成内容”（孵化蛋、各类礼包…）。"""
+        import xj_db
+        nm = xj_db.name_map(kind).get(item_id, "")
+        return xj_payload.needs_payload(nm), nm
+
+    def baby_note_map(self):
+        """`{备注里的 data 值: [召唤兽 id, ...]}`（从 Data\\Actors 的 @note 里拓）。"""
+        import re
+        import xj_db
+        out = {}
+        try:
+            _r, items = xj_db.load("Actors")
+        except Exception:
+            return out
+        for i, node in items:
+            note = xj_db.s(node, "@note") or ""
+            m = re.search(r"data\s*=\s*:([^\s|\r\n]+)", note)
+            if m:
+                out.setdefault(m.group(1), []).append(i)
+        return out
+
+    def payload_template(self, kind, item_id):
+        """从存档里任意一件**有内容**的同款物品上把 `@attr` 整份抄下来。"""
+        for key, _iv, _cn, _db in KINDS:
+            try:
+                h = self.container(key)
+            except KeyError:
+                continue
+            for _k, v in h.pairs:
+                arr = _deref(v)
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    continue
+                it = _deref(arr.items[0])
+                if it is None or get_int(ivar(it, "@id"), -1) != int(item_id):
+                    continue
+                t, _d = self.item_payload(it)
+                if t:
+                    return clone_node(ivar(it, "@attr"))
+        return None
+
+    def _fix_payload(self, node, kind, item_id, kid=None):
+        """给物品补上 `@attr`（游戏运行时才生成的那部分）。
+
+        优先级：现成的内容（不动）→ 存档里同款的内容（整份抄）→ 按游戏
+        脚本里的规则现生成（见 `xj_payload`）。
+        """
+        cur_t, _cur_d = self.item_payload(node)
+        if cur_t and kid is None:
+            return node            # 存档里本来就有内容
+        need, nm = self.item_needs_payload(kind, item_id)
+        if not need and kid is None:
+            return node
+        sib = self.payload_template(kind, item_id)
+        if sib is not None and kid is None:
+            if not set_ivar(node, "@attr", sib):
+                node.ivars.append(("@attr", sib))
+            return node
+        spec = xj_payload.build(nm, item_id, ctx=self.baby_note_map)
+        if spec is None:
+            return node
+        typ, data = spec
+        if kid is not None and "id" in data:
+            data["id"] = int(kid)
+        attr = M.HashNode([], default=None)
+        attr.pairs.append((self._sym("data"), self._payload_node(typ, data)))
+        if not set_ivar(node, "@attr", attr):
+            node.ivars.append(("@attr", attr))
+        return node
+
+    @staticmethod
+    def _sym(name):
+        return M.SymbolNode(name)
+
+    def _payload_node(self, typ, data):
+        """把 `(type, data)` 转成 `{:type => ..., :data => {...}}` 节点。"""
+        pairs = [(self._sym("type"), self._sym(typ)),
+                 (self._sym("data"), self._plain_node(data))]
+        return M.HashNode(pairs, default=None)
+
+    def _plain_node(self, value):
+        """Python 值 → Marshal 节点（只支持这几个基本类型，够用）。"""
+        if isinstance(value, xj_payload.Sym):
+            return self._sym(value.name)
+        if isinstance(value, bool):
+            return M.BoolNode(value)
+        if isinstance(value, int):
+            return int_node(value)
+        if isinstance(value, float):
+            return M.FloatNode(value)
+        if isinstance(value, bytes):
+            return str_node(value)
+        if isinstance(value, str):
+            return str_node(value)
+        if isinstance(value, dict):
+            return M.HashNode([(self._sym(k), self._plain_node(v))
+                               for k, v in value.items()], default=None)
+        if isinstance(value, (list, tuple)):
+            return M.ArrayNode([self._plain_node(x) for x in value])
+        return nil_node()
+
+    def _item_node(self, kind, slot):
+        """取某个格子的物品对象节点（空返回 None）。"""
+        h = self.container(kind)
+        i = self._pair_index(h, slot)
+        if i < 0:
+            return None
+        arr = _deref(h.pairs[i][1])
+        if not isinstance(arr, M.ArrayNode) or not arr.items:
+            return None
+        return _deref(arr.items[0])
+
+    def find_like(self, kind, item_id):
+        """在**同一个容器**里找一件同类的现成物件（用来克隆运行时内容）。"""
+        h = self.container(kind)
+        for _k, v in h.pairs:
+            arr = _deref(v)
+            if not isinstance(arr, M.ArrayNode) or not arr.items:
+                continue
+            it = _deref(arr.items[0])
+            if it is None:
+                continue
+            if get_int(ivar(it, "@id"), -1) == int(item_id):
+                return it
+        return None
 
     def _extra_ivars(self, kind):
         """存档物品比模板多的那几个 ivar，给个安全默认值。"""
@@ -921,7 +1123,10 @@ class GameEditor(object):
         for iid, nm, rec, act in self.security_rows():
             if rec is not None and rec != act:
                 rows.append(("物品计数校验：%s (id=%d)" % (nm, iid), act, rec,
-                             True, "背包里有 %d 个，游戏记录的是 %d 个" % (act, rec)))
+                             True,
+                             "游戏记录的 %d / 背包实际 %d —— 不一致时建议点"
+                             "「同步物品计数校验」（正常玩着玩着也可能不一致，"
+                             "游戏自己用掉道具时不一定同步）" % (rec, act)))
         return rows
 
     def fix_anti_cheat(self, clamp=True, clear_flag=True, resync=True):

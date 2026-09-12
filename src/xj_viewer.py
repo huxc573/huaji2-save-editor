@@ -61,7 +61,7 @@ import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.1"
+VERSION = "v0.4.2"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -583,6 +583,18 @@ class App(object):
                    command=self.bag_fix).pack(side="left", padx=6)
         ttk.Button(act, text="同步计数校验",
                    command=self.guard_resync).pack(side="left", padx=6)
+
+        pay = ttk.Frame(f)
+        pay.pack(fill="x")
+        self.var_bag_kid = tk.StringVar()
+        ttk.Label(pay, text="孵出/开出对象 id（孵化蛋类用，留空＝随机）："
+                  ).pack(side="left")
+        ttk.Entry(pay, textvariable=self.var_bag_kid, width=8).pack(side="left")
+        ttk.Label(pay, text="　（召唤兽 id，看 Data\\Actors；例如 57＝？）",
+                  foreground="#777").pack(side="left")
+        self.var_bag_pay = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.var_bag_pay, foreground="#a33",
+                  justify="left", wraplength=1150).pack(anchor="w")
 
         self.var_bag_note = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.var_bag_note, foreground="#555",
@@ -1611,6 +1623,35 @@ class App(object):
             self.tv_tpl.insert("", "end", iid="t%d" % iid, values=(iid, nm))
         self.var_tpl_note.set("共 %d 个%s" % (len(rows), "（已过滤）" if kw else ""))
 
+    def _bag_kid(self):
+        """“孵出/开出对象 id”输入框（空＝让工具按游戏规则随机）。"""
+        txt = (self.var_bag_kid.get() if hasattr(self, "var_bag_kid")
+               else "").strip()
+        if not txt:
+            return None
+        try:
+            return int(txt, 0)
+        except ValueError:
+            messagebox.showinfo("提示", "“孵出对象 id”要填整数（或留空）。",
+                                parent=self.root)
+            return None
+
+    def _warn_payload(self, kind, iid):
+        """这件东西是不是“运行时才有内容”：是就提醒一句，并显示在提示行。"""
+        try:
+            need, nm = self.g.item_needs_payload(kind, iid)
+        except Exception:
+            return True
+        if hasattr(self, "var_bag_pay"):
+            if need:
+                self.var_bag_pay.set(
+                    "⚠ %s 属于“游戏运行时才生成内容”的东西（孵化蛋/礼包/图纸…）："
+                    "工具会现生成一份内容；若存档里有同款，会直接克隆它的内容。"
+                    % nm)
+            else:
+                self.var_bag_pay.set("")
+        return need
+
     def _bag_slot(self, quiet=False):
         sel = self.tv_pack.selection()
         if not sel:
@@ -1653,6 +1694,7 @@ class App(object):
             return
         iid = int(sel[0][1:])
         kind = self._bag_kind()
+        self._warn_payload(kind, iid)
         try:
             n = int(self.var_bag_cnt.get() or "1", 0)
         except ValueError:
@@ -1673,7 +1715,7 @@ class App(object):
                 return
             slot = free[0]
         try:
-            self.g.set_item(kind, slot, iid, n)
+            self.g.set_item(kind, slot, iid, n, kid=self._bag_kid())
         except Exception as e:
             messagebox.showerror("写入失败", human(str(e)), parent=self.root)
             return
@@ -1869,12 +1911,19 @@ class App(object):
             name = self.g.item_name(db_key, iid)
         except Exception:
             name = "?"
+        if name == "?":
+            try:
+                name = self.g.item_display_name(
+                    self.g.find_like(kind, iid)) or "?"
+            except Exception:
+                pass
         if name == "?" and not messagebox.askyesno(
                 "确认", "Data\\%s.rvdata2 里没有 id=%d 这件东西。\n"
                         "还是往里写吗？" % (db_key, iid), parent=self.root):
             return
+        self._warn_payload(kind, iid)
         try:
-            self.g.add_item(kind, slot, iid, n)
+            self.g.add_item(kind, slot, iid, n, kid=self._bag_kid())
         except Exception as e:
             messagebox.showerror("添加失败", human(str(e)), parent=self.root)
             return

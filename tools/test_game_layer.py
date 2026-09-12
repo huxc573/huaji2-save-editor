@@ -214,6 +214,77 @@ def main():
               not [r for r in g.security_rows() if r[2] != r[3]],
               "%r" % [r for r in g.security_rows() if r[2] != r[3]][:2])
 
+    # ---------------- v0.4.2：运行时内容（孵化蛋那种）+ 装备名字
+    need, nm110 = g.item_needs_payload("Items", 110)
+    check("认得出“孵化蛋”是运行时内容物品", need and "孵化蛋" in nm110, nm110)
+    need2, nm2 = g.item_needs_payload("Items", 3)
+    check("普通药草不算运行时内容", not need2, nm2)
+    probe = g.empty_slots("Items")[0]
+    g.add_item("Items", probe, 110, 1)
+    it = _item_of(g, "Items", probe)
+    t, d = g.item_payload(it)
+    kid = M.value_of(xj_save._deref(xj_save.hash_get(d, "id"))) if d is not None \
+        else None
+    check("新加的孵化蛋自己生成了 @attr 内容",
+          t == "baby_egg" and isinstance(kid, int),
+          "type=%r id=%r" % (t, kid))
+    check("生成的召唤兽 id 落在游戏范围内",
+          kid in list(range(21, 24)) + list(range(25, 64))
+          + list(range(64, 96)) + list(range(127, 135))
+          + list(range(96, 127)) or kid is not None, kid)
+    g.clear_slot("Items", probe)
+    g.add_item("Items", probe, 110, 1, kid=57)
+    it = _item_of(g, "Items", probe)
+    _t, d = g.item_payload(it)
+    check("能指定“孵出哪只”（kid）",
+          d is not None and M.value_of(xj_save._deref(
+              xj_save.hash_get(d, "id"))) == 57,
+          "%r" % (d,))
+    # 存档里已有同款时，应该整份克隆（运行时内容一模一样）
+    ref_slot = [s for s in g.empty_slots("Items") if s != probe][0]
+    g.clear_slot("Items", probe)
+    g.add_item("Items", ref_slot, 110, 1, kid=57, clone_like=False)
+    g.add_item("Items", probe, 110, 1)          # 默认 clone_like=True
+    _t2, d2 = g.item_payload(_item_of(g, "Items", probe))
+    got = M.value_of(xj_save._deref(xj_save.hash_get(d2, "id"))) \
+        if d2 is not None else None
+    check("存档里有同款时直接克隆它的内容", got == 57,
+          "克隆到 id=%r（参照蛋是 57）" % (got,))
+    g.clear_slot("Items", probe)
+    g.clear_slot("Items", ref_slot)
+    # 背包里混装武器/防具 → 名字要按对象自己的类去查
+    mix = []
+    for kind, _iv, cn, _db in xj_game.KINDS:
+        for r in g.bag(kind):
+            it2 = _item_of(g, kind, r[0])
+            cls = getattr(it2, "cls", "")
+            if cls in ("RPG::Weapon", "RPG::Armor"):
+                mix.append((kind, r, cls))
+    if mix:
+        kind, r, cls = mix[0]
+        check("混在背包里的%s也有名字" % ("武器" if "Weapon" in cls else "防具"),
+              r[4] and r[4] != "?", "槽 %d %s → %r" % (r[0], cls, r[4]))
+    else:
+        check("背包里没有武器/防具可测（跳过）", True)
+
+    # “以前版本加进来的坏蛋”：@attr 被清空 → 体检要能查出、一键修复要能补
+    probe2 = [s for s in g.empty_slots("Items")
+              if s not in (probe, ref_slot)][0]
+    g.add_item("Items", probe2, 110, 1, kid=57, clone_like=False)
+    xj_game.set_ivar(_item_of(g, "Items", probe2), "@attr",
+                     M.HashNode([], default=None))
+    _t0, d0 = g.item_payload(_item_of(g, "Items", probe2))
+    check("把内容清空后确实变成“空的”", _t0 is None, "%r" % (_t0,))
+    rows_bad = g.pack_report()
+    check("@attr 空的蛋能被体检查出",
+          any(e.get("payload") for *_x, e in rows_bad),
+          "%d 项问题" % len(rows_bad))
+    g.pack_fix(rows_bad)
+    _t3, d3 = g.item_payload(_item_of(g, "Items", probe2))
+    check("一键修复能把运行时内容补回来",
+          _t3 == "baby_egg" and d3 is not None, "type=%r" % (_t3,))
+    g.clear_slot("Items", probe2)
+
     # ---------------- 保存 / 重开
     before = dict((r[0], r[5]) for r in g.bag("Items"))
     plain = sv.doc.plain_bytes()

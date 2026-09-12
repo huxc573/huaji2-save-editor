@@ -213,9 +213,14 @@ def main():
             now = dict((r[0], r[5]) for r in app.g.bag("Items"))
             check("界面改物品数量生效", now.get(slot) == old + 2,
                   "%d -> %s" % (old, now.get(slot)))
+            # 只看刚改的这件：存档里本来就可能有别的不一致（游戏自己用道具时
+            # 不一定会把 Change 一起更新），那一项不归这次操作管。
+            slot_ids = [r[3] for r in app.g.bag("Items") if r[0] == slot]
+            row0 = [r for r in app.g.security_rows()
+                    if slot_ids and r[0] == slot_ids[0]]
             check("改数量后计数校验同步",
-                  all(r[2] == r[3] for r in app.g.security_rows()),
-                  "%r" % [r for r in app.g.security_rows() if r[2] != r[3]][:2])
+                  not row0 or row0[0][2] == row0[0][3],
+                  "%r" % (row0[:1],))
         say("往空格加一件物品…")
         free = app.g.empty_slots("Items")[0]
         app.var_bag_id.set("1")
