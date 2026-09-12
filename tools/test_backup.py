@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""存档管理（备份/恢复/删除/撤销）回归测试 —— 全程在临时目录里跑。
+"""存档管理（备份 / 恢复选中 / 恢复最新 / 删除 / 删除非最新）回归测试。
+
+全程在临时目录里跑，一个真实文件都不碰。
 
 用法：python tools/test_backup.py
 """
@@ -35,6 +37,8 @@ def main():
           and os.path.dirname(d) == WORK, os.path.basename(d))
     check("目录名符合约定", os.path.basename(d) == B.DIR_NAMES[0],
           os.path.basename(d))
+    check("目录名就是 .huaji2-save-editor", B.DIR_NAME == ".huaji2-save-editor",
+          B.DIR_NAME)
 
     check("一开始没有备份", B.list_backups(save) == [])
 
@@ -56,37 +60,68 @@ def main():
           "%r" % [x["note"] for x in r])
     check("新的排在前面", r[0]["path"] == p2, os.path.basename(r[0]["path"]))
 
-    used, undo = B.restore(p1, save)
+    n_before = len(B.list_backups(save))
+    used = B.restore(p1, save)
     check("恢复成功", open(save, "rb").read() == b"A" * 100)
-    check("恢复前自动留了“恢复前”备份", undo and os.path.exists(undo),
-          os.path.basename(undo or ""))
-    check("能认出“恢复前”那份", B.last_undo(save)
-          and B.last_undo(save)["path"] == undo)
+    check("恢复不再额外多留一份备份", len(B.list_backups(save)) == n_before,
+          "%d -> %d" % (n_before, len(B.list_backups(save))))
+    check("restore 返回用的那份", used == p1, os.path.basename(used))
 
-    # 「恢复上一个」＝退回恢复之前
-    B.restore(undo, save, keep_current=False)
-    check("恢复上一个能退回", open(save, "rb").read() == b"B" * 120)
+    # 「恢复最新」＝回到最新那份备份（＝上一次修改之前）
+    r = B.newest(save)
+    check("newest 取到最新的一份", r and r["path"] == p2,
+          os.path.basename(r["path"]) if r else "None")
+    B.restore(r["path"], save)
+    check("恢复最新能换回上一次修改前", open(save, "rb").read() == b"B" * 120)
+
+    # 「删除非最新」只留一份
+    B.backup(save, B.KIND_MANUAL)
+    time.sleep(0.01)
+    last = B.backup(save, B.KIND_MANUAL)
+    n_all = len(B.list_backups(save))
+    kept, gone = B.keep_newest(save)
+    check("删除非最新：留下的就是最新那份", kept and kept["path"] == last,
+          os.path.basename(kept["path"]) if kept else "None")
+    check("删除非最新：其余都删了", gone == n_all - 1
+          and len(B.list_backups(save)) == 1,
+          "删了 %d，剩 %d" % (gone, len(B.list_backups(save))))
+    check("只剩一份时不再删", B.keep_newest(save)[1] == 0)
 
     # 频繁保存不会刷一堆自动备份
+    B.backup(save, B.KIND_AUTO)          # 先保证有一份“刚做的”自动备份
     n0 = len([x for x in B.list_backups(save) if x["kind"] == "auto"])
     B.auto_backup_once(save)
     n1 = len([x for x in B.list_backups(save) if x["kind"] == "auto"])
-    check("90 秒内不重复留自动备份", n1 == n0, "%d -> %d" % (n0, n1))
+    check("90 秒内不重复留自动备份", n1 == n0 and n0 >= 1, "%d -> %d" % (n0, n1))
 
-    # 删除
+    # 删除（重新造两份，免得受上一步「删除非最新」影响）
+    pa = B.backup(save, B.KIND_MANUAL)
+    time.sleep(0.01)
+    pb = B.backup(save, B.KIND_MANUAL)
+    check("同一秒连点两次也不会覆盖", pa != pb,
+          "%s / %s" % (os.path.basename(pa), os.path.basename(pb)))
     before = len(B.list_backups(save))
-    n = B.remove([p1, p2])
+    n = B.remove([pa, pb])
     after = len(B.list_backups(save))
     check("删除备份生效", n == 2 and after == before - 2,
           "删了 %d，剩 %d" % (n, after))
-    check("删掉的文件真的没了", not os.path.exists(p1) and not os.path.exists(p2))
+    check("删掉的文件真的没了", not os.path.exists(pa) and not os.path.exists(pb))
 
-    # 已经存在旧目录名时沿用旧目录
+    # 老目录名（huxji2-/huaji2-）里的备份也要读得到、删得掉
     shutil.rmtree(d, ignore_errors=True)
     old = os.path.join(WORK, B.DIR_NAMES[1])
     os.makedirs(old, exist_ok=True)
-    check("有旧目录名时沿用旧的", B.backup_dir(save) == old,
+    legacy = os.path.join(old, "save.2020-01-01_000000.rvdata2")
+    open(legacy, "wb").write(b"L" * 60)
+    rows = B.list_backups(save)
+    check("老目录里的备份也能列出来", any(x["path"] == legacy for x in rows),
+          "%d 份" % len(rows))
+    check("新备份仍然写进新目录",
+          os.path.basename(B.backup_dir(save)) == B.DIR_NAME,
           os.path.basename(B.backup_dir(save)))
+    check("老目录里的备份也能删", B.remove([legacy]) == 1
+          and not os.path.exists(legacy))
+
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
     return 1 if OK[1] else 0

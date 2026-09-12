@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""存档管理：备份 / 删除备份 / 恢复 / 撤销上一次恢复。
+"""存档管理：备份 / 删除备份 / 恢复选中 / 恢复最新。
 
 存档放在**游戏根目录**（和 `save.rvdata2` 同级）下的子目录里，默认叫
-`huxji2-save-editor`（用户指定；如果已经存在 `huaji2-save-editor` 就沿用那个）。
+`.huaji2-save-editor`（名字带点，资源管理器里默认是隐藏项）。
+老版本用过 `huxji2-save-editor` / `huaji2-save-editor`：那几个目录里的备份
+**照样列出来、照样能恢复/能删**，只是新备份不再往里写。
 
 命名规矩（都能排序、看得懂）：
 
     save.2026-09-13_014530.rvdata2            手动备份
-    save.2026-09-13_014530.auto.rvdata2       打开/保存前的自动备份
-    save.2026-09-13_014530.before-restore.rvdata2
-                                              恢复前自动留的那份（“恢复上一个”用它）
+    save.2026-09-13_014530.auto.rvdata2       保存前的自动备份
 
 只做文件层面的复制/删除，不解析存档内容 —— 万一存档坏了，这里也能救。
 """
@@ -18,35 +18,38 @@ import re
 import shutil
 import time
 
-#: 备份目录名（优先用第一个，找不到就用第二个）
-DIR_NAMES = ("huxji2-save-editor", "huaji2-save-editor")
+#: 当前使用的备份目录名（第 0 个），后面的是老版本用过、仍要能读到的
+DIR_NAME = ".huaji2-save-editor"
+DIR_NAMES = (DIR_NAME, "huxji2-save-editor", "huaji2-save-editor")
 
 STAMP_FMT = "%Y-%m-%d_%H%M%S"
-KIND_AUTO = "auto"                    # 自动（打开/保存前）
+KIND_AUTO = "auto"                    # 自动（保存前）
 KIND_MANUAL = "manual"                # 手动
-KIND_BEFORE_RESTORE = "before-restore"   # 恢复前
+KIND_BEFORE_RESTORE = "before-restore"   # 老版本留下的“恢复前”（只读，不再新写）
 
 SUFFIX = ".rvdata2"
 
 
 def backup_dir(save_path, create=True, prefer=None):
-    """备份目录 = 存档所在目录 / <DIR_NAMES>。
+    """备份目录 = 存档所在目录 / <DIR_NAME>（始终是当前这个名字）。
 
-    `prefer` 可以显式指定目录名（设置里用得上）。
+    `prefer` 可以显式指定目录名（测试与设置里用得上）。
     """
     root = os.path.dirname(os.path.abspath(save_path))
-    names = ([prefer] if prefer else []) + list(DIR_NAMES)
-    for n in names:
-        p = os.path.join(root, n)
-        if os.path.isdir(p):
-            return p
-    p = os.path.join(root, names[0])
+    p = os.path.join(root, prefer or DIR_NAME)
     if create:
         try:
             os.makedirs(p, exist_ok=True)
         except OSError:
             pass
     return p
+
+
+def dirs(save_path):
+    """实际存在、需要扫描的备份目录（新的在前，含老版本用过的目录）。"""
+    root = os.path.dirname(os.path.abspath(save_path))
+    return [os.path.join(root, n) for n in DIR_NAMES
+            if os.path.isdir(os.path.join(root, n))]
 
 
 def _stamp(t=None):
@@ -61,6 +64,7 @@ def parse_name(name):
     if not name.endswith(SUFFIX):
         return name, "", "other"
     body = name[:-len(SUFFIX)]
+    body = re.sub(r"-\d+$", "", body)   # 同一秒里连点两次留下的“-2”后缀
     m = re.match(r"^(?P<src>.+?)\.(?P<t>\d{4}-\d{2}-\d{2}_\d{6})"
                  r"(?:\.(?P<kind>[a-z\-]+))?$", body)
     if not m:
@@ -94,29 +98,37 @@ def backup(save_path, kind=KIND_MANUAL, note=""):
 
 
 def list_backups(save_path, prefer=None):
-    """列出备份：[{name, path, size, mtime, stamp, kind, src, note}, ...]，新的在前。"""
-    d = backup_dir(save_path, create=False, prefer=prefer)
+    """列出备份：[{name, path, dir, size, mtime, stamp, kind, src, note}, ...]，新的在前。
+
+    默认把新目录和老目录里的备份**一起**列出来（老备份不会丢）。
+    """
+    if prefer:
+        root = os.path.dirname(os.path.abspath(save_path))
+        ds = [os.path.join(root, prefer)]
+    else:
+        ds = dirs(save_path)
     out = []
-    if not os.path.isdir(d):
-        return out
     want = os.path.splitext(os.path.basename(save_path))[0]
-    for n in os.listdir(d):
-        p = os.path.join(d, n)
-        if not os.path.isfile(p) or not n.endswith(SUFFIX):
+    for d in ds:
+        if not os.path.isdir(d):
             continue
-        src, stamp, kind = parse_name(n)
-        st = os.stat(p)
-        note = ""
-        tf = p + ".txt"
-        if os.path.exists(tf):
-            try:
-                note = open(tf, encoding="utf-8").read().strip()[:120]
-            except OSError:
-                note = ""
-        out.append({"name": n, "path": p, "size": st.st_size,
-                    "mtime": st.st_mtime, "stamp": stamp, "kind": kind,
-                    "src": src, "note": note,
-                    "is_this_file": src == want})
+        for n in os.listdir(d):
+            p = os.path.join(d, n)
+            if not os.path.isfile(p) or not n.endswith(SUFFIX):
+                continue
+            src, stamp, kind = parse_name(n)
+            st = os.stat(p)
+            note = ""
+            tf = p + ".txt"
+            if os.path.exists(tf):
+                try:
+                    note = open(tf, encoding="utf-8").read().strip()[:120]
+                except OSError:
+                    note = ""
+            out.append({"name": n, "path": p, "dir": d, "size": st.st_size,
+                        "mtime": st.st_mtime, "stamp": stamp, "kind": kind,
+                        "src": src, "note": note,
+                        "is_this_file": src == want})
     out.sort(key=lambda r: (r["mtime"], r["name"]), reverse=True)
     return out
 
@@ -136,32 +148,36 @@ def remove(paths):
     return n
 
 
-def restore(backup_path, save_path, keep_current=True):
-    """把某个备份恢复成存档。
-
-    keep_current=True 时先把**现在的存档**存一份 `before-restore`，
-    方便「恢复上一个」一键退回。返回 (恢复用的文件, 撤销用的文件|None)。
-    """
+def restore(backup_path, save_path):
+    """把某个备份恢复成存档（不再额外留“恢复前”那份）。返回用的备份路径。"""
     if not os.path.exists(backup_path):
         raise IOError("找不到备份：%s" % backup_path)
-    undo = None
-    if keep_current and os.path.exists(save_path):
-        undo = backup(save_path, kind=KIND_BEFORE_RESTORE,
-                      note="恢复 %s 之前的存档" % os.path.basename(backup_path))
     shutil.copyfile(backup_path, save_path)
-    return backup_path, undo
+    return backup_path
 
 
-def last_undo(save_path, prefer=None):
-    """最近一次“恢复前”留下的备份（给「恢复上一个」用）。"""
-    for r in list_backups(save_path, prefer=prefer):
-        if r["kind"] == KIND_BEFORE_RESTORE:
-            return r
-    return None
+def newest(save_path, prefer=None, this_file=True):
+    """最新的一份备份（默认优先“同一存档名”的那份）——「恢复最新」用它。"""
+    rows = list_backups(save_path, prefer=prefer)
+    if this_file:
+        for r in rows:
+            if r["is_this_file"]:
+                return r
+    return rows[0] if rows else None
+
+
+def keep_newest(save_path, prefer=None):
+    """只留最新的一份、其余全删（「删除非最新」）。返回 (留下的, 删掉的份数)。"""
+    rows = list_backups(save_path, prefer=prefer)
+    if len(rows) < 2:
+        return (rows[0] if rows else None), 0
+    keep = newest(save_path, prefer=prefer)
+    gone = [r["path"] for r in rows if r["path"] != keep["path"]]
+    return keep, remove(gone)
 
 
 def auto_backup_once(path, prefer=None, min_gap=90):
-    """打开/保存存档前自动留一份，太频繁就跳过（同一份文件 90 秒内只留一次）。"""
+    """保存存档前自动留一份，太频繁就跳过（同一份文件 90 秒内只留一次）。"""
     try:
         if not os.path.exists(path):
             return None

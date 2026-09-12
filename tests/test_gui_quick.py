@@ -542,7 +542,7 @@ def main():
             say("（没有 Battle.bt2 样本，跳过）")
 
         # ---------------- v0.4.4：存档管理（放最后，免得它重载存档打断前面的状态）
-        say("存档管理页（备份 / 恢复 / 恢复上一个 / 删除）…")
+        say("存档管理页（备份 / 恢复选中 / 恢复最新 / 删除 / 删除非最新）…")
         dlg_mark = len(dialogs)      # 本段会故意把存档改坏，产生的弹框段末清掉
         check("存档管理页建得起来",
               hasattr(app, "tab_saves") and hasattr(app, "tv_saves"),
@@ -568,14 +568,15 @@ def main():
         check("界面「恢复选中」恢复成功",
               open(p, "rb").read() == before,
               "%d 字节（备份 %d）" % (os.path.getsize(p), len(before)))
-        check("恢复时会先把当前存档留一份（恢复前）",
-              any(r["kind"] == "before-restore" for r in app.save_rows),
+        check("恢复不再额外多留一份备份",
+              not any(r["kind"] == "before-restore" for r in app.save_rows),
               "%r" % [r["kind"] for r in app.save_rows][:4])
-        app.saves_undo()
+        with open(p, "wb") as f:                 # 再改坏一次，用「恢复最新」换回来
+            f.write(b"broken2" + before[:200])
+        app.saves_restore_newest()
         root.update()
-        check("界面「恢复上一个」能退回去",
-              open(p, "rb").read().startswith(b"broken"),
-              open(p, "rb").read()[:8])
+        check("界面「恢复最新」能换回上一次修改前",
+              open(p, "rb").read() == before, "%d 字节" % os.path.getsize(p))
         with open(p, "wb") as f:                 # 收回原样
             f.write(before)
         app.load(p, quiet=True)
@@ -586,9 +587,19 @@ def main():
         root.update()
         check("界面「删除选中」生效", len(app.save_rows) == n_before_del - 1,
               "%d -> %d" % (n_before_del, len(app.save_rows)))
+        app.saves_backup()
+        root.update()
+        app.saves_backup()
+        root.update()
+        n_before_clean = len(app.save_rows)
+        app.saves_delete_old()
+        root.update()
+        check("界面「删除非最新」只留一份",
+              n_before_clean >= 2 and len(app.save_rows) == 1,
+              "%d -> %d" % (n_before_clean, len(app.save_rows)))
         check("备份目录就在存档旁边",
               os.path.isdir(os.path.join(os.path.dirname(p),
-                                         "huxji2-save-editor")),
+                                         ".huaji2-save-editor")),
               os.path.dirname(p))
         del dialogs[dlg_mark:]       # 本段自造的弹框（含故意的“打开失败”）不算数
 

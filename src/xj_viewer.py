@@ -62,7 +62,7 @@ import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.4"
+VERSION = "v0.4.5"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -493,9 +493,9 @@ class App(object):
 
     # -------------------------------------------------- 1.5 存档管理
     def _tab_saves(self):
-        """存档管理：备份 / 删除备份 / 恢复 / 恢复上一个（撤销）。
+        """存档管理：备份 / 删除备份 / 恢复选中 / 恢复最新 / 删除非最新。
 
-        备份放在**存档旁边**的子目录里（默认 huxji2-save-editor），只做文件复制，
+        备份放在**存档旁边**的子目录里（默认 .huaji2-save-editor），只做文件复制，
         不解析内容 —— 万一存档被改坏了，这里也能救回来。
         """
         tk, ttk = self.tk, self.ttk
@@ -507,8 +507,9 @@ class App(object):
         ttk.Label(f, textvariable=self.var_saves_info, justify="left",
                   font=("Microsoft YaHei UI", 10),
                   wraplength=1150).pack(anchor="w")
-        ttk.Label(f, text="备份目录就在存档旁边；“恢复”会先把当前存档自动存一份，"
-                          "所以点错了也能「恢复上一个」退回来。",
+        ttk.Label(f, text="备份目录就在存档旁边（.huaji2-save-editor）；"
+                          "「恢复最新」＝把上一次修改之前的存档换回来；"
+                          "「删除非最新」只留最新的一份。",
                   foreground="#777").pack(anchor="w", pady=(2, 6))
 
         bar = ttk.Frame(f)
@@ -517,10 +518,12 @@ class App(object):
                    command=self.saves_backup).pack(side="left")
         ttk.Button(bar, text="恢复选中",
                    command=self.saves_restore).pack(side="left", padx=6)
-        ttk.Button(bar, text="恢复上一个",
-                   command=self.saves_undo).pack(side="left", padx=6)
+        ttk.Button(bar, text="恢复最新",
+                   command=self.saves_restore_newest).pack(side="left", padx=6)
         ttk.Button(bar, text="删除选中",
                    command=self.saves_delete).pack(side="left", padx=6)
+        ttk.Button(bar, text="删除非最新",
+                   command=self.saves_delete_old).pack(side="left", padx=6)
         ttk.Button(bar, text="刷新",
                    command=self.saves_refresh).pack(side="left", padx=6)
         ttk.Button(bar, text="打开备份目录",
@@ -608,45 +611,48 @@ class App(object):
         if not self.confirm(
                 "确认恢复",
                 "要用这份备份覆盖当前存档吗？\n\n  %s\n  %s\n\n"
-                "（当前存档会自动先存一份“恢复前”，可以「恢复上一个」退回来）"
+                "（备份都是完整的存档副本，恢复后直接重新载入）"
                 % (r["stamp"], r["name"])):
             return
         try:
-            _used, undo = xj_backup.restore(r["path"], self.doc.path)
+            xj_backup.restore(r["path"], self.doc.path)
         except Exception as e:
             messagebox.showerror("恢复失败", zh_error(e), parent=self.root)
             return
         self.load(self.doc.path)          # 重新载入，界面跟着变
         self.saves_refresh()
-        self.set_status("已恢复 %s（撤销用的备份：%s）"
-                        % (r["name"], os.path.basename(undo) if undo else "无"))
+        self.set_status("已恢复 %s" % r["name"])
         messagebox.showinfo("恢复完成",
-                            "已用\n  %s\n覆盖当前存档，并重新载入。\n\n"
-                            "点错了就按「恢复上一个」。" % r["name"],
+                            "已用\n  %s\n覆盖当前存档，并重新载入。" % r["name"],
                             parent=self.root)
 
-    def saves_undo(self):
-        """恢复上一个＝撤销上一次「恢复」。"""
+    def saves_restore_newest(self):
+        """恢复最新＝把**上一次修改之前**的存档换回来（最新的一份备份）。"""
         if not self.doc:
             return
-        r = xj_backup.last_undo(self.doc.path)
+        self.saves_refresh()
+        r = self.save_rows[0] if self.save_rows else None
+        for x in self.save_rows:          # 优先同一存档名的备份
+            if x["is_this_file"]:
+                r = x
+                break
         if r is None:
-            messagebox.showinfo("提示", "没有可退回的“恢复前”备份。",
-                                parent=self.root)
+            messagebox.showinfo("提示", "备份目录里还没有备份。", parent=self.root)
             return
         if not self.confirm(
-                "恢复上一个",
-                "退回上一次“恢复”之前的存档？\n\n  %s\n  %s"
-                % (r["stamp"], r["name"])):
+                "恢复最新",
+                "把存档换回**上一次修改之前**的状态吗？\n\n"
+                "  用的备份：%s\n  %s\n\n"
+                "（这份是目前最新的一份备份）" % (r["stamp"], r["name"])):
             return
         try:
-            xj_backup.restore(r["path"], self.doc.path, keep_current=False)
+            xj_backup.restore(r["path"], self.doc.path)
         except Exception as e:
             messagebox.showerror("恢复失败", zh_error(e), parent=self.root)
             return
         self.load(self.doc.path)
         self.saves_refresh()
-        self.set_status("已退回：%s" % r["name"])
+        self.set_status("已恢复到最新备份：%s" % r["name"])
 
     def saves_delete(self):
         rows = self._save_sel()
@@ -660,6 +666,31 @@ class App(object):
         n = xj_backup.remove([r["path"] for r in rows])
         self.saves_refresh()
         self.set_status("已删除 %d 份备份" % n)
+
+    def saves_delete_old(self):
+        """删除非最新＝只留最新的一份备份，其余全删。"""
+        if not self.doc:
+            return
+        self.saves_refresh()
+        rows = self.save_rows
+        if len(rows) < 2:
+            messagebox.showinfo("提示", "只有 %d 份备份，不用清理。" % len(rows),
+                                parent=self.root)
+            return
+        keep = rows[0]
+        for x in rows:
+            if x["is_this_file"]:
+                keep = x
+                break
+        if not self.confirm(
+                "删除非最新",
+                "只留最新的一份，其余 %d 份都删掉？（不可撤销）\n\n"
+                "  保留：%s\n  %s" % (len(rows) - 1, keep["stamp"], keep["name"])):
+            return
+        kept, n = xj_backup.keep_newest(self.doc.path)
+        self.saves_refresh()
+        self.set_status("已删除 %d 份旧备份，保留 %s"
+                        % (n, os.path.basename(kept["path"]) if kept else "无"))
 
     def saves_open_dir(self):
         d = self.saves_dir()
