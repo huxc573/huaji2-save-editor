@@ -3,7 +3,7 @@
 > 《画迹2：缘起凡尘》[尝鲜版] 的存档编辑器 —— 解密 → 解析 → 改 → 加密写回，
 > 连游戏自带的**防作弊校验**一起修好。
 >
-> 作者 **[@huxc573](https://github.com/huxc573)** · 开源协议 **MIT** · 当前版本 **v0.4.6**
+> 作者 **[@huxc573](https://github.com/huxc573)** · 开源协议 **MIT** · 当前版本 **v0.4.7**
 
 `huaji1-save-editor` 的迭代作品（画迹1 的编辑器见 `!Tools\Github\huaji1-save-editor`）。
 本作换了保护壳：`Data\*.rvdata2` 和存档都被 `System\main.dll` 加密，
@@ -77,7 +77,7 @@ python tools\build.py
 python tools\build.py --dll-dir     :: 宿主放进 dist\dll\ 子目录
 ```
 
-打包产物在 `dist\`：`画迹2存档工具v0.4.6.exe` + `XJCodec32.exe`（**必须挨着 exe**，
+打包产物在 `dist\`：`画迹2存档工具v0.4.7.exe` + `XJCodec32.exe`（**必须挨着 exe**，
 或放 `dll\` 子目录）+ `使用说明.txt` / `CHANGELOG.md`。`XJ_SELFTEST=1` 跑一次会写
 `selftest_result.txt` 自检报告。
 
@@ -98,7 +98,30 @@ python tools\decrypt_all.py      :: 把各文件解密到 tools\_plain\
 ```
 
 ---
+## ⚠️ 战斗里崩 `RGSSError: disposed sprite`（v0.4.7）
 
+这是**游戏的作弊惩罚**在战斗里翻了车，不是存档数据坏了。脚本 29485-29495 行：
+
+```ruby
+if $game_system and $game_system.cheated
+  v = Graphics.frame_count - $game_system.cheated
+  if v > 60*60*25-123
+    msgbox "存档异常！#{GET_HARD_DISK_CHARACTER.call}"; exit
+  elsif v > 60*60*20-123 and !$timer.has?('cheating_circle')
+    $timer.every(2, proc{|i| ... $game_player.sprite.zoom_x = rand(0.8..1.0); ... })
+    $timer.every(300, proc{|i| s = $game_player.sprite; ... unless s.disposed? })
+  end
+end
+```
+
+`@cheated` 一旦被记下（周期检查发现超限，或物品计数校验对不上），20 分钟后开始
+“惩罚”；而它去碰的 `$game_player.sprite` 在**战斗中已经被 dispose** → 报错。
+
+处理：工具里「概览」→ **体检 → 一键按规则修复 → 清除作弊标记 → 同步物品计数校验**，
+然后**在游戏里重新读一次档**（惩罚计时器只在内存里）。
+v0.4.7 起 Ctrl+S **保存前会自动体检**，有问题会弹窗并问你要不要顺手修好。
+
+---
 ## � 新增召唤兽 / 小孩怎么来（v0.4.6）
 
 **结论：小孩（小精灵 #181、小毛头 #182、小魔头 #183、小仙灵 #184、小仙女 #185、

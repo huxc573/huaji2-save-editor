@@ -429,11 +429,35 @@ def main():
         check("新召唤兽自带技能（神兽 = 全学）",
               len(app.babies_ed().skills(newb)) > 0,
               "%d 个" % len(app.babies_ed().skills(newb)))
+        check("技能表带描述列",
+              tuple(app.tv_baby_skills["columns"]) == ("id", "name", "desc"),
+              "%r" % (app.tv_baby_skills["columns"],))
+        rows_sk = [app.tv_baby_skills.item(i, "values")
+                   for i in app.tv_baby_skills.get_children()]
+        check("技能行里有描述",
+              bool(rows_sk) and all(r[2] for r in rows_sk),
+              "%r" % (rows_sk[:1],))
+        check("描述提示条有内容", len(app.var_skill_desc.get()) > 5,
+              app.var_skill_desc.get()[:46])
         app.tv_babies.selection_set("bb%d" % app.baby_rows[-1][0])
         app.on_baby_select()
         root.update()
         check("选中新那只后名字显示出来",
               app.var_baby_name.get() == "小精灵", app.var_baby_name.get())
+        # 改字段「应用」后，选中的应该还是原来那一行（以前会跳回第一行）
+        app.tv_baby.selection_set("b_level")
+        app.baby_pick()
+        old_lv2 = int(app.var_baby_val.get())
+        app.var_baby_val.set(str(old_lv2 + 1))
+        app.apply_baby()
+        root.update()
+        check("「应用」后选中的还是那一行",
+              app.tv_baby.selection() == ("b_level",)
+              and app.var_baby_key.get() == "level",
+              "%r / %r" % (app.tv_baby.selection(), app.var_baby_key.get()))
+        check("「应用」真的改了值",
+              app.g.baby_value(app._baby(), "level") == old_lv2 + 1,
+              "%s -> %s" % (old_lv2, app.g.baby_value(app._baby(), "level")))
         say("改技能…")
         app.babies_ed().clear_skills(app._baby())
         app.load_baby()

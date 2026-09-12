@@ -79,7 +79,7 @@ class _IV(object):
         return xj_save._deref(xj_save.ivar(obj, name))
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.6"
+VERSION = "v0.4.7"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -1089,20 +1089,27 @@ class App(object):
         self.cb_skill = ttk.Combobox(skbar, textvariable=self.var_skill_pick,
                                      state="readonly", width=26)
         self.cb_skill.pack(side="left")
+        self.cb_skill.bind("<<ComboboxSelected>>",
+                           lambda e: self.show_skill_desc())
         ttk.Button(skbar, text="学会", command=self.baby_skill_add).pack(side="left",
                                                                        padx=4)
         ttk.Button(skbar, text="忘掉选中",
                    command=self.baby_skill_del).pack(side="left")
         ttk.Button(skbar, text="清空", command=self.baby_skill_clear).pack(
             side="left", padx=4)
-        self.tv_baby_skills = ttk.Treeview(skf, columns=("id", "name"),
+        self.var_skill_desc = tk.StringVar(value="")
+        ttk.Label(skf, textvariable=self.var_skill_desc, foreground="#555",
+                  justify="left", wraplength=560).pack(anchor="w", pady=(4, 0))
+        self.tv_baby_skills = ttk.Treeview(skf, columns=("id", "name", "desc"),
                                            show="headings", height=6,
                                            selectmode="browse")
-        self.tv_baby_skills.heading("id", text="技能 id")
-        self.tv_baby_skills.heading("name", text="名字")
-        self.tv_baby_skills.column("id", width=70, anchor="w")
-        self.tv_baby_skills.column("name", width=220, anchor="w")
+        for c, t, w in (("id", "技能 id", 62), ("name", "名字", 140),
+                        ("desc", "描述", 340)):
+            self.tv_baby_skills.heading(c, text=t)
+            self.tv_baby_skills.column(c, width=w, anchor="w")
         self.tv_baby_skills.pack(fill="both", expand=True, pady=(6, 0))
+        self.tv_baby_skills.bind("<<TreeviewSelect>>",
+                                 lambda e: self.show_skill_desc())
 
         self.txt_baby = tk.Text(f, height=3, wrap="word",
                                 font=("Microsoft YaHei UI", 10))
@@ -1230,10 +1237,12 @@ class App(object):
         sk = self.g.baby_skills(b)
         tpl_id = _IV.ival(b, "@actor_id")
         idx = [k for k, x in self.baby_rows if x is b]
-        names = self._skill_names()
+        meta = self._skills_meta()
         for sid in bd.skills(b):
+            nm, desc = meta.get(sid, ("?", ""))
             self.tv_baby_skills.insert("", "end", iid="sk%d" % sid,
-                                       values=(sid, names.get(sid, "?")))
+                                       values=(sid, nm, desc))
+        self.show_skill_desc()
         self.var_baby_name.set(bd.display_name(b))
         ok = bd.name_ok(bd.display_name(b))
         self.var_baby_name_ok.set("√ 名字在游戏名字表里" if ok
@@ -1252,17 +1261,49 @@ class App(object):
         ]))
         kids = self.tv_baby.get_children()
         if kids:
-            self.tv_baby.selection_set(kids[0])
+            # 保持原来选中的那一行（不然「应用」完会跳回第一行）
+            key = self.var_baby_key.get()
+            keep = ("b_%s" % key) if key else ""
+            iid = keep if keep and self.tv_baby.exists(keep) else kids[0]
+            self.tv_baby.selection_set(iid)
             self.baby_pick()
 
     # -------------------------------------------------- 4.6 召唤兽：新增/删除/名字/技能
-    def _skill_names(self):
-        if getattr(self, "_skill_name_cache", None) is None:
+    def _skills_meta(self):
+        """{技能 id: (名字, 描述)}（Data\\Skills 表，带缓存）。"""
+        if getattr(self, "_skill_meta", None) is None:
+            meta = {}
             try:
-                self._skill_name_cache = xj_db.name_map("Skills")
+                _r, items = xj_db.load("Skills")
+                for i, node in items:
+                    desc = xj_db.s(node, "@description") or ""
+                    desc = desc.replace("\\n", " ").replace("\n", " ").strip()
+                    meta[i] = (xj_db.s(node, "@name") or "", desc)
             except Exception:
-                self._skill_name_cache = {}
-        return self._skill_name_cache
+                meta = {}
+            self._skill_meta = meta
+        return self._skill_meta
+
+    def _skill_names(self):
+        return dict((i, nm) for i, (nm, _d) in self._skills_meta().items())
+
+    def show_skill_desc(self):
+        """显示选中的技能描述（下拉里选的，或技能表里选中的）。"""
+        meta = self._skills_meta()
+        sid = None
+        sel = self.tv_baby_skills.selection()
+        if sel:
+            try:
+                sid = int(sel[0][2:])
+            except ValueError:
+                sid = None
+        if sid is None:
+            sid = self._skill_pick_id()
+        if sid is None or sid not in meta:
+            self.var_skill_desc.set("")
+            return
+        nm, desc = meta[sid]
+        self.var_skill_desc.set("技能 #%d %s：%s" % (sid, nm, desc or "（没有说明）"))
 
     def fill_skill_templates(self):
         nm = self._skill_names()
@@ -1354,9 +1395,6 @@ class App(object):
         var_god = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="只看神兽（含小孩）",
                         variable=var_god).pack(side="left", padx=6)
-        var_child = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="只看小孩 181-187",
-                        variable=var_child).pack(side="left")
         var_mut = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="变异（普通召唤兽资质区间 ×0.66）",
                         variable=var_mut).pack(side="left", padx=6)
@@ -1384,8 +1422,6 @@ class App(object):
             for c in all_c:
                 if var_god.get() and c["type"] != "神兽":
                     continue
-                if var_child.get() and not (181 <= c["id"] <= 187):
-                    continue
                 if kw and kw not in c["name"] and kw != str(c["id"]) \
                         and kw not in c["pool"]:
                     continue
@@ -1398,15 +1434,15 @@ class App(object):
                                   "%s/%s/%s/%s/%s/%s" % (c["atk"], c["def"], c["hp"],
                                                          c["mp"], c["agi"], c["eva"]),
                                   c["grow"], life))
-            info.set("共 %d 种可选。小孩（181-187）在「神兽资质3」池："
-                     "资质 2400/2400/7500/4800/2100/2100、成长 1.8、永生，"
-                     "但正常玩法**没有任何道具**能开出来。" % len(rows))
+            info.set("共 %d 种可选。神兽（含小孩）资质取定值；"
+                     "普通召唤兽资质带随机（勾了“变异”则区间 ×0.66）。"
+                     % len(rows))
             self._add_rows = rows
             kids = tv.get_children()
             if kids:
                 tv.selection_set(kids[0])
 
-        for w in (var_kw, var_god, var_child):
+        for w in (var_kw, var_god):
             if hasattr(w, "trace_add"):
                 w.trace_add("write", refill)
             else:
@@ -1419,7 +1455,8 @@ class App(object):
         def do_add():
             sel = tv.selection()
             if not sel:
-                rrefresh_panels(sel[0][1:])
+                return
+            cid = int(sel[0][1:])
             try:
                 self.babies_ed().add(a, cid, mutation=bool(var_mut.get()))
             except Exception as e:
@@ -1427,20 +1464,25 @@ class App(object):
                 return
             self.mark_dirty()
             win.destroy()
-            self.fill_baby_list()
-            self.load()
+            self.refresh_panels()
+            kids = self.tv_babies.get_children()
+            if kids:
+                self.tv_babies.selection_set(kids[-1])
+                self.on_baby_select()
             self.set_status("已新增召唤兽：%s（id=%d）" % (bd.name_of(cid), cid))
 
         ttk.Button(btns, text="加这只", command=do_add).pack(side="left")
         ttk.Button(btns, text="取消", command=win.destroy).pack(side="left", padx=6)
-        ttk.Button(btns, text="只加小孩（小精灵）",
-                   command=lambda: self._quick_add(a, 181)).pack(side="left",
-                                                                 padx=(20, 0))
-        for txt, cid in (("小毛头", 182), ("小魔头", 183), ("小仙灵", 184),
-                         ("小仙女", 185), ("小丫丫", 186), ("善财童子", 187)):
-            ttk.Button(btns, text=txt,
-                       command=lambda c=cid: self._quick_add(a, c)).pack(
-                side="left", padx=2)
+
+        # 让窗口在主窗口上居中（不然会跑到屏幕左上角）
+        w_ = win
+        w_.update_idletasks()
+        pw, ph = self.root.winfo_width(), self.root.winfo_height()
+        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+        ww, wh = w_.winfo_width(), w_.winfo_height()
+        if pw > 1 and ph > 1:
+            w_.geometry("+%d+%d" % (max(0, px + (pw - ww) // 2),
+                                    max(0, py + (ph - wh) // 3)))
         self.set_status("新增召唤兽：选一只 → 「加这只」")
 
     def _quick_add(self, actor, cid):
@@ -1825,6 +1867,8 @@ class App(object):
         if not self.doc or not self.doc.dirty:
             messagebox.showinfo("保存", "没有改动。", parent=self.root)
             return
+        if not self._pre_save_guard():
+            return
         # 保存前先在“存档管理”的目录里留一份（同一份文件 90 秒内只留一次）
         auto = xj_backup.auto_backup_once(self.doc.path)
         try:
@@ -1845,6 +1889,57 @@ class App(object):
                if auto else "原文件已备份为 %s.bak.<时间>" % os.path.basename(p)),
             parent=self.root)
         self.set_status("已保存")
+
+    def _pre_save_guard(self):
+        """存盘前体检：有超限项 / 作弊标记就说清楚，并问要不要顺手修好。
+
+        为什么必须提醒：游戏的周期检查一旦把 `@cheated` 记下来，20 分钟后就会
+        开始“惩罚”（脚本 29485-29495 行：画面转圈、缩放），而那段代码在**战斗中**
+        会去碰已经 dispose 的 `$game_player.sprite` → `RGSSError: disposed sprite`。
+        """
+        if not self.g:
+            return True
+        try:
+            rows = self.g.anti_cheat_report()
+        except Exception:
+            return True
+        over = [r for r in rows if r[3]]
+        if not over:
+            return True
+        detail = "\n".join("  · %s：当前 %s（上限 %s）" % (r[0], r[1], r[2])
+                           for r in over[:8])
+        if self.confirm(
+                "存档里有 %d 项超限 / 作弊标记" % len(over),
+                "游戏会在 20 分钟后开始“惩罚”（画面转圈、缩放），\n"
+                "战斗中会直接报 RGSSError（disposed sprite）崩掉。\n\n"
+                "%s\n\n"
+                "点「是」＝ 现在按规则修好（数值修复 + 清作弊标记 + 同步物品计数）再保存\n"
+                "点「否」＝ 先不修，再问一次要不要照样保存" % detail):
+            done = self.guard_autofix(quiet=True)
+            self.refresh_panels()
+            self.set_status("保存前已顺手修好：%s" % "、".join(done or ["（无需处理）"]))
+            return True
+        return self.confirm("照样保存？",
+                            "带着超限项 / 作弊标记保存？（进战斗可能会崩）")
+
+    def guard_autofix(self, quiet=False):
+        """一键：按规则修数值 + 清作弊标记 + 同步物品计数校验。"""
+        done = []
+        if not self.g:
+            return done
+        for fn, what in ((self.g.fix_anti_cheat, "数值按规则修复"),
+                         (self.g.clear_cheat_flag, "清除作弊标记"),
+                         (self.g.resync_security, "同步物品计数校验")):
+            try:
+                r = fn()
+                if r:
+                    done.append(what)
+            except Exception as e:
+                if not quiet:
+                    self.err(e)
+        if done:
+            self.mark_dirty()
+        return done
 
     def refresh_panels(self):
         """把所有面板刷一遍。每步单独兜底，返回出错的步骤名列表。

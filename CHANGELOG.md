@@ -1,5 +1,53 @@
 # 更新日志
 
+## v0.4.7 — 2026-09-13
+
+**主题：把“进战斗就崩（`disposed sprite`）”的真相说清楚 —— 那是游戏的作弊惩罚，
+不是数据坏了；顺手修 4 处体验问题。**
+
+### 💥 `Script '0000' line 29491: RGSSError occurred. disposed sprite`
+
+脚本 29485-29495 行长这样：
+
+```ruby
+if $game_system and $game_system.cheated
+  v = Graphics.frame_count - $game_system.cheated
+  if v > 60*60*25-123
+    msgbox "存档异常！#{GET_HARD_DISK_CHARACTER.call}"; exit
+  elsif v > 60*60*20-123 and !$timer.has?('cheating_circle')
+    $timer.every(2, proc{|i| ... $game_player.sprite.zoom_x = rand(0.8..1.0); ... })
+    $timer.every(300, proc{|i| s = $game_player.sprite; ... unless s.disposed? })
+  end
+end
+```
+
+`@cheated` 一旦被记下（周期检查发现超限，或物品计数校验对不上），20 分钟后
+开始“惩罚”（画面转圈/缩放）；而它去碰的 `$game_player.sprite` 在**战斗中已经被
+dispose** → 就是你看到的 `disposed sprite`。
+
+**工具已加保存前体检**：
+
+* Ctrl+S 前若还有超限项/作弊标记，会弹窗说清楚并问要不要**顺手修好**
+  （数值按规则修复 + 清作弊标记 + 同步物品计数校验），再保存；
+* 也可以自己在「概览」页点：**体检 → 一键按规则修复 → 清除作弊标记 → 同步物品计数校验**。
+
+⚠ 已经进过惩罚状态的存档，清掉标记后**要在游戏里重新读一下档**（惩罚计时器在
+内存里，不跟着存档走）。
+
+### 🪟 另外 4 处
+
+* **新增召唤兽窗口居中**（以前会跑到屏幕左上角）；
+* 新增召唤兽窗口去掉了「只看小孩 181-187」勾选和那一排小孩按钮
+  （小孩本来就在列表里，按池搜索即可）；
+* 修好「加这只」按钮（上一版被误改坏，点了会 NameError）；
+* **召唤兽技能列表加了「描述」列**，下面还有一行“技能 #id 名字：描述”
+  （选下拉、点技能行都会更新）；
+* **改字段「应用」后不再跳回第一行**（保持原来选中的那个字段）。
+
+### ✅ 测试
+
+* `tests/test_gui_quick.py` 99 → **103 项**（技能描述列、应用后不跳行）。
+
 ## v0.4.6 — 2026-09-13
 
 **主题：召唤兽功能补全（照画迹1 的编辑器）＋「新增召唤兽」——小孩终于能自己加了。**
