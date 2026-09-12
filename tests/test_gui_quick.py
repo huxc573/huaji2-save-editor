@@ -18,6 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
+import xj_marshal   # noqa: E402
+import xj_save      # noqa: E402
+
 LOG = os.path.join(ROOT, "tools", "_gui_quick.txt")
 WORK = os.path.join(ROOT, "tools", "_gui")
 OK = [0, 0]
@@ -120,7 +123,9 @@ def main():
         kill_timers(root)
         root.update()
         say("窗口创建完成（%d 个页签）" % app.nb.index("end"))
-        check("9 个页签都建好", app.nb.index("end") == 9)
+        check("10 个页签都建好", app.nb.index("end") == 10,
+              "%d 个：%s" % (app.nb.index("end"),
+                              [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]))
 
         say("加载存档副本…")
         app.load(copy, quiet=True)
@@ -317,6 +322,55 @@ def main():
         root.update()
         check("机器码能改回本机", app.g.machine_ids() == [str(now_m)],
               "%r" % (app.g.machine_ids(),))
+        say("机器码页（照画迹1：读本机 / 读存档 / 改）…")
+        check("机器码页建得起来", hasattr(app, "tab_machine")
+              and hasattr(app, "txt_machine"),
+              app.nb.tab(app.tab_machine, "text"))
+        app.machine_fill_local()
+        root.update()
+        check("「读取本机机器码」能用", app.var_machine_id.get() == str(now_m),
+              app.var_machine_id.get())
+        app.machine_fill_saved()
+        root.update()
+        check("「读存档里第一个」能用",
+              app.var_machine_id.get() in app.g.machine_ids(),
+              "%s / %s" % (app.var_machine_id.get(), app.g.machine_ids()))
+        app.var_machine_id.set(str(now_m))
+        app.machine_use_local()
+        root.update()
+        check("「用本机机器码替换」后本机在档",
+              app.g.machine_ids() == [str(now_m)],
+              "%r" % (app.g.machine_ids(),))
+        check("操作记录里有东西", "读取本机" in app.txt_machine.get("1.0", "end"),
+              app.txt_machine.get("1.0", "end").splitlines()[:1])
+        say("背包“内容”列 + 重抽内容…")
+        egg_slot = None
+        for r in app.g.bag("Items"):
+            need, _nm = app.g.item_needs_payload("Items", r[3])
+            if need and "孵化蛋" in (r[4] or ""):
+                egg_slot = r[0]
+                break
+        if egg_slot is None:
+            egg_slot = app.g.empty_slots("Items")[0]
+            app.g.add_item("Items", egg_slot, 110, 1, clone_like=False)
+            app.mark_dirty()
+        app.var_bag_page.set(egg_slot // 20)
+        app.fill_party()
+        root.update()
+        app.tv_pack.selection_set("s%d" % egg_slot)     # 刷完再选（刷新会清选中）
+        vals = app.tv_pack.item("s%d" % egg_slot, "values")
+        check("背包出现“内容”列且蛋类有内容摘要",
+              len(vals) == 6 and ("蛋→" in str(vals[5]) or vals[5] == ""),
+              "%r" % (vals,))
+        app.var_bag_kid.set("21")
+        app.bag_reroll()
+        root.update()
+        _t, d = app.g.item_payload(app.g._item_node("Items", egg_slot))
+        check("「重抽/指定内容」生效（指定 21）",
+              d is not None and xj_marshal.value_of(
+                  xj_save._deref(xj_save.hash_get(d, "id"))) == 21,
+              app.g.payload_summary(app.g._item_node("Items", egg_slot)))
+        app.var_bag_kid.set("")
 
         # ---------------- 召唤兽
         check("召唤兽页列出角色", len(app.cb_baby_actor["values"]) >= 1,

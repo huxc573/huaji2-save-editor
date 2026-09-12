@@ -56,7 +56,8 @@ internal static class XJCodec32
         SetDllDirectoryW(Path.GetDirectoryName(dll));
         IntPtr h = LoadLibraryExW(dll, IntPtr.Zero, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (h == IntPtr.Zero)
-            throw new IOException("LoadLibrary 失败, win32err=" + Marshal.GetLastWin32Error());
+            throw new IOException("加载 main.dll 失败（Win32 错误码 = "
+                + Marshal.GetLastWin32Error() + "）：" + dll);
         ApplyState(h);
         return h;
     }
@@ -243,7 +244,7 @@ internal static class XJCodec32
     private static IntPtr Export(IntPtr h, string name)
     {
         IntPtr p = GetProcAddress(h, name);
-        if (p == IntPtr.Zero) throw new IOException("main.dll 没有导出 " + name);
+        if (p == IntPtr.Zero) throw new IOException("main.dll 里没有这个导出函数：" + name);
         return p;
     }
 

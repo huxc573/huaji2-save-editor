@@ -285,6 +285,28 @@ def main():
           _t3 == "baby_egg" and d3 is not None, "type=%r" % (_t3,))
     g.clear_slot("Items", probe2)
 
+    # ---------------- v0.4.3：重抽 / 指定内容 + 内容摘要
+    probe3 = [s for s in g.empty_slots("Items")
+              if s not in (probe, probe2, ref_slot)][0]
+    g.add_item("Items", probe3, 110, 1, kid=57, clone_like=False)
+    it3 = _item_of(g, "Items", probe3)
+    check("内容摘要能写出来（蛋→召唤兽）",
+          "蛋→" in g.payload_summary(it3), g.payload_summary(it3))
+    g.set_payload("Items", probe3, kid=21)
+    _t4, d4 = g.item_payload(_item_of(g, "Items", probe3))
+    check("重抽/指定内容生效（kid=21）",
+          M.value_of(xj_save._deref(xj_save.hash_get(d4, "id"))) == 21,
+          "%r" % (d4,))
+    g.set_payload("Items", probe3)          # 不给 kid = 按游戏范围随机
+    _t5, d5 = g.item_payload(_item_of(g, "Items", probe3))
+    check("不给 kid 时随机重抽", _t5 == "baby_egg" and d5 is not None, "%r" % (d5,))
+    try:
+        g.set_payload("Items", 999, kid=1)
+        check("对空格子重抽会报错", False)
+    except Exception as e:
+        check("对空格子重抽会报错", "空" in str(e), "%s" % type(e).__name__)
+    g.clear_slot("Items", probe3)
+
     # ---------------- 保存 / 重开
     before = dict((r[0], r[5]) for r in g.bag("Items"))
     plain = sv.doc.plain_bytes()

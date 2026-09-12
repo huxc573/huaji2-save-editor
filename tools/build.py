@@ -35,7 +35,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 EXE_NAME = "画迹2存档工具v" + APP_VERSION
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")
@@ -85,19 +85,67 @@ def prepare(host_exe, use_dll_dir=False):
     os.makedirs(DIST, exist_ok=True)
     target_dir = os.path.join(DIST, "dll") if use_dll_dir else DIST
     os.makedirs(target_dir, exist_ok=True)
+    gen_changelog()
     items = [(host_exe, HOST_NAME),
              (os.path.join(ROOT, "使用说明.txt"), "使用说明.txt"),
-             (os.path.join(ROOT, "README.md"), "README.md")]
+             (os.path.join(ROOT, "README.md"), "README.md"),
+             (os.path.join(ROOT, "CHANGELOG.md"), "CHANGELOG.md")]
     for src, name in items:
         if not os.path.exists(src):
             log("  ! 缺少 %s，跳过" % src)
             continue
-        shutil.copyfile(src, os.path.join(target_dir, name))
+        dst = os.path.join(target_dir, name)
+        if _same_file(src, dst):
+            log("已是最新：%s%s" % ("" if not use_dll_dir else "dll/", name))
+            continue
+        try:
+            shutil.copyfile(src, dst)
+        except PermissionError:
+            log("  ! %s 正被占用（可能程序还开着），跳过" % name)
+            continue
         log("已放入发行目录：%s%s" % ("" if not use_dll_dir else "dll/", name))
     if use_dll_dir:
         log("（宿主放在 dll/ 子目录：xj_codec 会依次找 exe 目录、dll/、bin/…）")
     sweep_old_exes(EXE_NAME + ".exe")
     return target_dir
+
+
+def _same_file(a, b):
+    """两个文件内容是否一样（省得为了同一份内容去覆盖被占用的文件）。"""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(65536), fb.read(65536)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def gen_changelog():
+    """把 CHANGELOG.md **写死进源码**（生成 src/xj_changelog.py）。
+
+    以前 exe 里的“更新日志”是去读一个外部文件，打包成 onefile 后
+    运行时目录是临时解包目录，读不到就成了空白 —— 现在直接把文本编进 exe。
+    """
+    src = os.path.join(ROOT, "CHANGELOG.md")
+    out = os.path.join(SRC, "xj_changelog.py")
+    if not os.path.exists(src):
+        log("  ! 没有 CHANGELOG.md，跳过内置更新日志")
+        return
+    text = open(src, encoding="utf-8").read()
+    body = ('# -*- coding: utf-8 -*-\n'
+            '"""内置的更新日志（由 tools/build.py 自动生成，别手改）。\n\n'
+            '源码见仓库根目录的 CHANGELOG.md。\n"""\n'
+            'VERSION = "%s"\n\n'
+            'TEXT = %r\n' % (APP_VERSION, text))
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(body)
+    log("已生成内置更新日志：src/xj_changelog.py（%d 字）" % len(text))
 
 
 def sweep_old_exes(keep):

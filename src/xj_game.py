@@ -667,19 +667,20 @@ class GameEditor(object):
                     return clone_node(ivar(it, "@attr"))
         return None
 
-    def _fix_payload(self, node, kind, item_id, kid=None):
+    def _fix_payload(self, node, kind, item_id, kid=None, force=False):
         """给物品补上 `@attr`（游戏运行时才生成的那部分）。
 
         优先级：现成的内容（不动）→ 存档里同款的内容（整份抄）→ 按游戏
         脚本里的规则现生成（见 `xj_payload`）。
+        force=True 时不看“同款”，直接按规则重抽一份（“重抽内容”按钮用）。
         """
         cur_t, _cur_d = self.item_payload(node)
-        if cur_t and kid is None:
+        if cur_t and kid is None and not force:
             return node            # 存档里本来就有内容
         need, nm = self.item_needs_payload(kind, item_id)
         if not need and kid is None:
             return node
-        sib = self.payload_template(kind, item_id)
+        sib = None if force else self.payload_template(kind, item_id)
         if sib is not None and kid is None:
             if not set_ivar(node, "@attr", sib):
                 node.ivars.append(("@attr", sib))
@@ -695,6 +696,64 @@ class GameEditor(object):
         if not set_ivar(node, "@attr", attr):
             node.ivars.append(("@attr", attr))
         return node
+
+    def set_payload(self, kind, slot, kid=None, force=True):
+        """给某一格的东西重新生成/指定“运行时内容”（孵化蛋、要诀之类的）。
+
+        kid：孵化类物品要孵出哪只（不给就按游戏范围随机抽一个）。
+        """
+        it = self._item_node(kind, slot)
+        if it is None:
+            raise KeyError("第 %d 格是空的" % slot)
+        iid = get_int(ivar(it, "@id"), -1)
+        need, nm = self.item_needs_payload(kind, iid)
+        if not need:
+            raise ValueError("%s 不需要运行时内容" % (nm or ("id=%d" % iid)))
+        self._fix_payload(it, kind, iid, kid=kid, force=force)
+        self.doc.mark_structural()
+        return self.item_payload(it)
+
+    def payload_summary(self, node):
+        """一句话描述物件的运行时内容（背包列表“内容”列用），空代表没有。"""
+        t, d = self.item_payload(node)
+        if not t:
+            return ""
+        kid = M.value_of(_deref(hash_get(d, "id"))) if d is not None else None
+        if t == "baby_egg":
+            acts = self._name_map("Actors")
+            return "蛋→%s(%s)" % (acts.get(kid, "?"), kid)
+        if t == "skill_book":
+            sk = self._name_map("Skills")
+            return "技能书→%s(%s)" % (sk.get(kid, "?"), kid)
+        if t == "formation":
+            key = M.value_of(_deref(hash_get(d, "key"))) if d is not None else None
+            return "阵型→%s" % (key or "?")
+        if t == "guide_book":
+            return "指南书→%s" % self._plain_text(d)
+        if t in ("iron", "god_eye_bead", "stone"):
+            return "%s→等级%s" % (t, M.value_of(_deref(hash_get(d, "lv")))
+                                    if d is not None else "?")
+        return "%s→%s" % (t, self._plain_text(d))
+
+    @staticmethod
+    def _plain_text(node):
+        """把一小捻节点渲染成一行字（只给界面显示用）。"""
+        n = _deref(node)
+        if n is None or isinstance(n, M.NilNode):
+            return "nil"
+        if isinstance(n, M.HashNode):
+            return "{" + ", ".join("%s:%s" % (GameEditor._plain_text(k),
+                                                GameEditor._plain_text(v))
+                                    for k, v in n.pairs) + "}"
+        if isinstance(n, M.ArrayNode):
+            return "[" + ", ".join(GameEditor._plain_text(x) for x in n.items) \
+                + "]"
+        if isinstance(n, M.SymbolNode):
+            return str(n.name)
+        v = M.value_of(n)
+        if isinstance(v, bytes):
+            return v.decode("utf-8", "replace")
+        return str(v)
 
     @staticmethod
     def _sym(name):

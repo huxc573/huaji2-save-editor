@@ -61,7 +61,7 @@ import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.2"
+VERSION = "v0.4.3"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -81,7 +81,7 @@ def _read_text(path, limit=200000):
         return "（读不到 %s）" % path
 
 
-CHANGELOG = _read_text(os.path.join(os.path.dirname(HERE), "CHANGELOG.md"))
+CHANGELOG = "（正在载入…）"      # 真正的内容在 _load_changelog() 定义之后赋值
 
 # 注意：正文里有 `%`（浮动:20%）和 `@`，所以**只有表头**参与 %-格式化，
 # 正文原样拼接 —— 否则会报 "not enough arguments for format string"。
@@ -169,7 +169,107 @@ def human(text):
             return text.decode("utf-8")
         except UnicodeDecodeError:
             return text.decode("gbk", "replace")
-    return str(text)
+    return zh_text(str(text))
+
+
+# 英文异常消息 → 中文说法（字符串层面，专门给“直接弹 str(e)”的那些提示用）
+ZH_PATTERNS = (
+    ("object is not subscriptable",
+     "存档结构不对：往空值上取了下标（多半是某件物品缺运行时的 @attr 之类的字段）"),
+    ("object has no attribute",
+     "存档里缺字段（可能不是本作存档，或者被改坏了）"),
+    ("list index out of range", "序号/位置越界（存档里的格子或数组不够长）"),
+    ("string index out of range", "字符串越界"),
+    ("tuple index out of range", "序号越界"),
+    ("invalid literal for int()", "要填数字的地方填了别的东西"),
+    ("invalid literal for float()", "要填小数的地方填了别的东西"),
+    ("unsupported operand type", "数值运算类型不对（某个字段不是数字）"),
+    ("division by zero", "除数为 0"),
+    ("not enough values to unpack", "数量对不上（预期的项数和存档里的不一样）"),
+    ("unhashable type", "这个值不能当字典的键用"),
+    ("'NoneType' object is not iterable", "存档里该有东西的地方是空的"),
+    ("No such file or directory", "找不到文件"),
+    ("Access is denied", "没有权限访问这个文件"),
+    ("The process cannot access the file", "文件被占用（先关掉游戏/另一个工具窗口）"),
+    ("cannot convert Array into String",
+     "存档里这一段被改坏了（数组当成字符串用了）——先恢复 .bak 备份再改"),
+)
+
+
+def zh_text(s):
+    """把常见英文异常消息换成中文说法（原文附在后面，方便对照）。"""
+    for en, zh in ZH_PATTERNS:
+        if en in s:
+            return "%s（原文：%s）" % (zh, s[:160])
+    return s
+
+
+# Python / Windows 的异常消息大多是英文的，直接弹给用户看很难懂。
+# 这里按异常类型翻译一句中文，再把原文（技术细节）附在后面。
+ZH_ERRORS = (
+    (KeyError, "存档里没有对应的东西（字段/格子/物品 id 可能不对）"),
+    (IndexError, "存档里的序号/位置越界了"),
+    (ValueError, "数值或格式不合法"),
+    (TypeError, "存档结构和预期不一样（可能不是本作存档）"),
+    (AttributeError, "存档里缺字段（可能不是本作存档，或者改坏了）"),
+    (PermissionError, "文件被占用或没有权限 —— 先关掉游戏 / 另一个工具窗口再试"),
+    (FileNotFoundError, "找不到文件"),
+    (IsADirectoryError, "那是个文件夹，不是文件"),
+    (UnicodeDecodeError, "文字编码不对"),
+    (MemoryError, "内存不够"),
+    (OSError, "文件读写失败"),
+)
+
+
+def zh_error(e, prefix=""):
+    """异常 → 中文提示（弹框用）。技术细节原样附在后面，方便对照 error.log。"""
+    txt = ""
+    if isinstance(e, BaseException):
+        for cls, zh in ZH_ERRORS:
+            if isinstance(e, cls):
+                txt = zh
+                break
+        name = type(e).__name__
+        detail = human(str(e)).strip()
+    else:
+        name = "错误"
+        detail = human(str(e)).strip()
+    if detail.startswith("'"):
+        detail = detail.strip("'\"")     # KeyError('...') 会带引号
+    out = (prefix + "\n\n" if prefix else "")
+    out += txt or "操作失败"
+    if detail and detail != txt:
+        out += "\n\n技术细节（%s）：%s" % (name, detail)
+    return out
+
+
+def _load_changelog():
+    """更新日志：打包成 exe 时用**内置**那份（写死的，不依赖任何外部文件）；
+    源码运行时直接看仓库里的 CHANGELOG.md。
+    """
+    frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        try:
+            import xj_changelog
+            if getattr(xj_changelog, "TEXT", ""):
+                return xj_changelog.TEXT
+        except Exception:
+            pass
+    for p in (os.path.join(os.path.dirname(HERE), "CHANGELOG.md"),
+              os.path.join(xj_codec.app_dir(), "CHANGELOG.md")):
+        t = _read_text(p)
+        if t and not t.startswith("（读不到"):
+            return t
+    try:
+        import xj_changelog
+        if getattr(xj_changelog, "TEXT", ""):
+            return xj_changelog.TEXT
+    except Exception:
+        pass
+    return "（没有内置更新日志，也没找到 CHANGELOG.md）"
+
+
+CHANGELOG = _load_changelog()
 
 
 class App(object):
@@ -249,6 +349,7 @@ class App(object):
         self._tab_party()
         self._tab_baby()
         self._tab_switch()
+        self._tab_machine()
         self._tab_db()
         self._tab_help()
         self._tab_log()
@@ -317,29 +418,76 @@ class App(object):
         ttk.Button(gbar, text="同步物品计数校验",
                    command=self.guard_resync).pack(side="left", padx=6)
 
-        # ---- 机器码（存档绑定；换机器玩时要用）
-        m = ttk.LabelFrame(f, text="机器码 / 存档绑定", padding=10)
-        m.pack(fill="x", pady=6)
+        # ---- 机器码：单独一页（照画迹1 的布局）
+        mq = ttk.Frame(h)
+        mq.pack(fill="x", pady=(6, 0))
+        self.var_machine_quick = tk.StringVar(value="机器码：—　（详细在「机器码」页）")
+        ttk.Label(mq, textvariable=self.var_machine_quick,
+                  foreground="#555").pack(anchor="w")
+
+    # -------------------------------------------------- 6.5 机器码（存档绑定）
+    def _tab_machine(self):
+        """照画迹1 的机器码页：看本机机器码、看存档记录的、改完写回去。"""
+        tk, ttk = self.tk, self.ttk
+        f = ttk.Frame(self.nb, padding=10)
+        self.tab_machine = f
+        self.nb.add(f, text="机器码")
+
+        ttk.Label(f, text="机器码（存档绑定）",
+                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(f, text="游戏用 System\\main.dll 的 get_hard_disk_character() 取本机机器码，"
+                          "存在存档的 $game_system.config[:hard_disk_code]（一个数组）。\n"
+                          "游戏启动时会 include? 比对，不在里面就 msgbox「存档异常」然后退出 ——\n"
+                          "所以存档换到别的电脑上打不开；把新机器的机器码「加入」进去就行了。",
+                  foreground="#555", justify="left").pack(anchor="w", pady=(4, 10))
+
+        box = ttk.LabelFrame(f, text="当前情况", padding=10)
+        box.pack(fill="x")
         self.var_machine = tk.StringVar(value="机器码：—")
-        ttk.Label(m, textvariable=self.var_machine, justify="left",
-                  foreground="#333", wraplength=1100).pack(anchor="w")
+        ttk.Label(box, textvariable=self.var_machine, justify="left",
+                  font=("Microsoft YaHei UI", 10), wraplength=1100
+                  ).pack(anchor="w")
+        self.var_machine_list = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self.var_machine_list, foreground="#555",
+                  justify="left", wraplength=1100).pack(anchor="w")
+
+        eb = ttk.LabelFrame(f, text="修改", padding=10)
+        eb.pack(fill="x", pady=10)
+        bar1 = ttk.Frame(eb)
+        bar1.pack(fill="x")
+        ttk.Label(bar1, text="机器码：").pack(side="left")
         self.var_machine_id = tk.StringVar()
-        mbar = ttk.Frame(m)
-        mbar.pack(fill="x", pady=4)
-        ttk.Label(mbar, text="要写入/去掉的机器码：").pack(side="left")
-        ttk.Entry(mbar, textvariable=self.var_machine_id, width=18
+        ttk.Entry(bar1, textvariable=self.var_machine_id, width=22
                   ).pack(side="left")
-        ttk.Button(mbar, text="读取本机机器码",
-                   command=self.machine_show).pack(side="left", padx=6)
-        ttk.Button(mbar, text="用本机机器码填上",
+        ttk.Button(bar1, text="读取本机机器码",
                    command=self.machine_fill_local).pack(side="left", padx=6)
-        ttk.Button(mbar, text="加入存档（追加，推荐）",
-                   command=self.machine_add).pack(side="left", padx=6)
-        ttk.Button(mbar, text="直接替换成这个（只留一个）",
+        ttk.Button(bar1, text="读存档里第一个",
+                   command=self.machine_fill_saved).pack(side="left", padx=6)
+        ttk.Button(bar1, text="刷新",
+                   command=self.machine_show).pack(side="left", padx=6)
+
+        bar2 = ttk.Frame(eb)
+        bar2.pack(fill="x", pady=8)
+        ttk.Button(bar2, text="加入存档（追加，推荐）",
+                   command=self.machine_add).pack(side="left")
+        ttk.Button(bar2, text="替换成这个（只留一个）",
                    command=self.machine_set).pack(side="left", padx=6)
-        ttk.Label(m, text="游戏启动时会比对存档里的机器码，不匹配就弹「存档异常」。"
-                          "把新机器的机器码「加入」进去就能带着存档换机器玩。",
+        ttk.Button(bar2, text="用本机机器码替换",
+                   command=self.machine_use_local).pack(side="left", padx=6)
+        ttk.Button(bar2, text="清空存档记录",
+                   command=self.machine_clear).pack(side="left", padx=6)
+        ttk.Label(eb, text="改完记得 Ctrl+S 保存。只改存档是安全的：游戏只对 Game.exe 和\n"
+                           "System\\main.dll 做 md5 校验，不管存档。",
                   foreground="#777", justify="left").pack(anchor="w")
+
+        log = ttk.LabelFrame(f, text="操作记录", padding=10)
+        log.pack(fill="both", expand=True)
+        self.txt_machine = tk.Text(log, height=10, wrap="word",
+                                   font=("Microsoft YaHei UI", 10))
+        vs = ttk.Scrollbar(log, orient="vertical", command=self.txt_machine.yview)
+        self.txt_machine.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        self.txt_machine.pack(fill="both", expand=True)
 
     # -------------------------------------------------- 2 全部解析数据
     def _tab_tree(self):
@@ -514,11 +662,13 @@ class App(object):
         # ---- 左：格子列表
         left = ttk.Frame(body)
         ttk.Label(left, text="背包格子").pack(anchor="w")
-        cols = ("slot", "idx", "id", "name", "count")
+        ttk.Label(left, text="背包格子（“内容”列是孵化蛋/礼包那种运行时内容）"
+                  ).pack(anchor="w")
+        cols = ("slot", "idx", "id", "name", "count", "content")
         self.tv_pack = ttk.Treeview(left, columns=cols, show="headings", height=14)
-        for c, w, t in (("slot", 60, "槽号"), ("idx", 50, "格"),
-                        ("id", 70, "物品ID"), ("name", 240, "名称"),
-                        ("count", 60, "数量")):
+        for c, w, t in (("slot", 55, "槽号"), ("idx", 45, "格"),
+                        ("id", 60, "物品ID"), ("name", 190, "名称"),
+                        ("count", 50, "数量"), ("content", 210, "内容")):
             self.tv_pack.heading(c, text=t)
             self.tv_pack.column(c, width=w, anchor="w")
         vs = ttk.Scrollbar(left, orient="vertical", command=self.tv_pack.yview)
@@ -590,7 +740,9 @@ class App(object):
         ttk.Label(pay, text="孵出/开出对象 id（孵化蛋类用，留空＝随机）："
                   ).pack(side="left")
         ttk.Entry(pay, textvariable=self.var_bag_kid, width=8).pack(side="left")
-        ttk.Label(pay, text="　（召唤兽 id，看 Data\\Actors；例如 57＝？）",
+        ttk.Button(pay, text="给选中的格子重抽内容",
+                   command=self.bag_reroll).pack(side="left", padx=6)
+        ttk.Label(pay, text="　（召唤兽 id 看 Data\\Actors；留空就是按游戏范围随机）",
                   foreground="#777").pack(side="left")
         self.var_bag_pay = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.var_bag_pay, foreground="#a33",
@@ -900,8 +1052,8 @@ class App(object):
             pass
         try:
             messagebox.showerror(
-                "出错", "%s: %s\n\n（详细信息已写入 error.log）"
-                % (getattr(exc, "__name__", exc), val), parent=self.root)
+                "出错", zh_error(val, "这个操作出问题了（界面里的其它功能还能用）：")
+                + "\n\n（完整堆栈已写入 error.log）", parent=self.root)
         except Exception:
             pass
         self.set_status("出错：%s（详见 error.log）" % val)
@@ -917,7 +1069,7 @@ class App(object):
         self.set_status(s)
 
     def err(self, e):
-        self.set_status("出错：%s" % e)
+        self.set_status("出错：%s" % human(str(e)).replace("\n", " ")[:120])
 
     def mark_dirty(self):
         self.root.title(TITLE + "  * 有未保存的修改")
@@ -1583,11 +1735,16 @@ class App(object):
             slot = self.g.slot_key(page, i)
             r = rows.get(slot)
             if r:
+                try:
+                    cnt_txt = self.g.payload_summary(
+                        self.g._item_node(kind, slot))
+                except Exception:
+                    cnt_txt = ""
                 self.tv_pack.insert("", "end", iid="s%d" % slot,
-                                    values=(slot, i, r[3], r[4], r[5]))
+                                    values=(slot, i, r[3], r[4], r[5], cnt_txt))
             else:
                 self.tv_pack.insert("", "end", iid="s%d" % slot,
-                                    values=(slot, i, "（空）", "", ""))
+                                    values=(slot, i, "（空）", "", "", ""))
         bad = [r for r in self.g.security_rows() if r[2] != r[3]]
         try:
             self.bag_bad = self.g.pack_report(kinds=(kind,))
@@ -1725,6 +1882,25 @@ class App(object):
         self.set_status("槽 %d 已换成 id=%d ×%d（计数校验已同步；保存时会整档重写）"
                         % (slot, iid, n))
 
+    def bag_reroll(self):
+        """给选中的格子重抽/指定“运行时内容”（孵化蛋孵出哪只、要诀开出什么技能）。"""
+        slot = self._bag_slot()
+        if slot is None:
+            return
+        kind = self._bag_kind()
+        kid = self._bag_kid()
+        try:
+            t, d = self.g.set_payload(kind, slot, kid=kid, force=True)
+        except Exception as e:
+            messagebox.showerror("重抽内容", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_party()
+        self.tv_pack.selection_set("s%d" % slot)
+        it = self.g._item_node(kind, slot)
+        self.set_status("槽 %d 的内容已重新生成：%s"
+                        % (slot, self.g.payload_summary(it)))
+
     def bag_all(self, count=99):
         """把本页已有格子的数量批量设成 count。"""
         slot = self._bag_slot(quiet=True)
@@ -1801,20 +1977,53 @@ class App(object):
                 "本机机器码：%s　%s\n存档记录的机器码：%s"
                 % (now, "✓ 在存档记录里" if ok else "✗ 不在存档记录里（换机器玩会弹「存档异常」）",
                    "、".join(ids) or "（空）"))
+        if hasattr(self, "var_machine_list"):
+            self.var_machine_list.set(
+                "存档里一共 %d 个：%s"
+                % (len(ids), "、".join("%d) %s" % (i + 1, x)
+                             for i, x in enumerate(ids)) or "（一个也没有）"))
+        if hasattr(self, "var_machine_quick"):
+            self.var_machine_quick.set(
+                "机器码：本机 %s / 存档 %s　（在「机器码」页里改）"
+                % (now or "读不到", "、".join(ids) or "空"))
         if not quiet:
             self.set_status("机器码：本机 %s / 存档 %s"
                             % (now or "?", "、".join(ids) or "空"))
 
+    def machine_log(self, text):
+        """机器码页的“操作记录”。"""
+        if not hasattr(self, "txt_machine"):
+            return
+        try:
+            self.txt_machine.insert("end", "[%s] %s\n"
+                                    % (time.strftime("%H:%M:%S"), text))
+            self.txt_machine.see("end")
+        except Exception:
+            pass
+
     def machine_fill_local(self):
-        """只读一次本机机器码填进输入框（不写入存档）。"""
+        """读本机机器码填进输入框（不写存档）。"""
         if not self.g:
             return
         now, err, _ids, _ok = self.g.machine_status()
         if err:
-            messagebox.showerror("取机器码", human(err), parent=self.root)
+            messagebox.showerror("取机器码", zh_error(err), parent=self.root)
             return
         self.var_machine_id.set(now)
+        self.machine_log("读取本机机器码：%s" % now)
         self.machine_show(quiet=True)
+
+    def machine_fill_saved(self):
+        """把存档里第一个机器码填进输入框（方便“以旧换新”地改）。"""
+        if not self.g:
+            return
+        ids = self.g.machine_ids()
+        if not ids:
+            messagebox.showinfo("提示", "存档里没记录机器码。", parent=self.root)
+            return
+        self.var_machine_id.set(ids[0])
+        self.machine_log("读存档记录：%s" % ids[0])
+        self.set_status("已把存档里的第一个机器码填到输入框：%s" % ids[0])
 
     def _machine_apply(self, replace=False):
         mid = self.var_machine_id.get().strip()
@@ -1822,25 +2031,72 @@ class App(object):
             messagebox.showinfo("提示", "先填一个机器码（可以点「读取本机机器码」）。",
                                 parent=self.root)
             return
+        before = self.g.machine_ids() if self.g else []
         try:
             if replace:
                 ids = self.g.set_machine_ids([mid])
             else:
                 ids = self.g.add_machine_id(mid)
         except Exception as e:
-            messagebox.showerror("写入失败", human(str(e)), parent=self.root)
+            messagebox.showerror("写入失败", zh_error(e), parent=self.root)
             return
         self.mark_dirty()
         self.machine_show(quiet=True)
         if self.g:
             self.guard_check()
-        self.set_status("存档机器码现在有：%s" % "、".join(ids))
+        self.machine_log("%s：%s → %s"
+                         % ("替换" if replace else "追加",
+                            "、".join(before) or "（空）", "、".join(ids)))
+        self.set_status("存档机器码现在有：%s（记得保存）" % "、".join(ids))
 
     def machine_add(self):
         self._machine_apply(False)
 
     def machine_set(self):
         self._machine_apply(True)
+
+    def machine_use_local(self):
+        """取本机机器码，直接替换存档记录（换机器玩最直接的做法）。"""
+        if not self.g:
+            return
+        now, err, ids, ok = self.g.machine_status()
+        if err:
+            messagebox.showerror("取机器码", zh_error(err), parent=self.root)
+            return
+        if ok:
+            messagebox.showinfo("机器码",
+                                "本机机器码 %s 已经在存档记录里了，不用改。" % now,
+                                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "确认",
+                "把存档里的机器码\n  %s\n换成本机机器码\n  %s\n吗？\n\n"
+                "（换机器玩建议改成「追加」，这样两台机器都能进）"
+                % ("、".join(ids) or "（空）", now), parent=self.root):
+            return
+        self.var_machine_id.set(now)
+        self._machine_apply(True)
+
+    def machine_clear(self):
+        """清空存档里的机器码记录（游戏会在下次启动时重新写入）。"""
+        if not self.g:
+            return
+        ids = self.g.machine_ids()
+        if not ids:
+            messagebox.showinfo("提示", "存档里本来就没有机器码记录。",
+                                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "确认", "清空存档里的机器码记录（%s）？\n\n"
+                "注意：清空后如果本机机器码也不在里面，游戏会弹「存档异常」。"
+                % "、".join(ids), parent=self.root):
+            return
+        self.g.set_machine_ids([])
+        self.mark_dirty()
+        self.machine_show(quiet=True)
+        if self.g:
+            self.guard_check()
+        self.machine_log("清空了机器码记录（原来：%s）" % "、".join(ids))
 
     # ------------------------------------------------ 背包操作
     def _bag_sel(self):
