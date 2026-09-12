@@ -50,6 +50,7 @@ _setup_tcl_env()
 import tkinter as tk                              # noqa: E402
 from tkinter import filedialog, messagebox, ttk  # noqa: E402
 
+import xj_backup  # noqa: E402
 import xj_codec   # noqa: E402
 import xj_db      # noqa: E402
 import xj_env     # noqa: E402
@@ -61,7 +62,7 @@ import xj_notes   # noqa: E402
 import xj_save    # noqa: E402
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.3"
+VERSION = "v0.4.4"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -344,6 +345,7 @@ class App(object):
         self.nb = self.ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True, padx=6, pady=4)
         self._tab_quick()
+        self._tab_saves()
         self._tab_tree()
         self._tab_actor()
         self._tab_party()
@@ -488,6 +490,187 @@ class App(object):
         self.txt_machine.configure(yscrollcommand=vs.set)
         vs.pack(side="right", fill="y")
         self.txt_machine.pack(fill="both", expand=True)
+
+    # -------------------------------------------------- 1.5 存档管理
+    def _tab_saves(self):
+        """存档管理：备份 / 删除备份 / 恢复 / 恢复上一个（撤销）。
+
+        备份放在**存档旁边**的子目录里（默认 huxji2-save-editor），只做文件复制，
+        不解析内容 —— 万一存档被改坏了，这里也能救回来。
+        """
+        tk, ttk = self.tk, self.ttk
+        f = ttk.Frame(self.nb, padding=8)
+        self.tab_saves = f
+        self.nb.add(f, text="存档管理")
+
+        self.var_saves_info = tk.StringVar(value="存档管理：—")
+        ttk.Label(f, textvariable=self.var_saves_info, justify="left",
+                  font=("Microsoft YaHei UI", 10),
+                  wraplength=1150).pack(anchor="w")
+        ttk.Label(f, text="备份目录就在存档旁边；“恢复”会先把当前存档自动存一份，"
+                          "所以点错了也能「恢复上一个」退回来。",
+                  foreground="#777").pack(anchor="w", pady=(2, 6))
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="立即备份",
+                   command=self.saves_backup).pack(side="left")
+        ttk.Button(bar, text="恢复选中",
+                   command=self.saves_restore).pack(side="left", padx=6)
+        ttk.Button(bar, text="恢复上一个",
+                   command=self.saves_undo).pack(side="left", padx=6)
+        ttk.Button(bar, text="删除选中",
+                   command=self.saves_delete).pack(side="left", padx=6)
+        ttk.Button(bar, text="刷新",
+                   command=self.saves_refresh).pack(side="left", padx=6)
+        ttk.Button(bar, text="打开备份目录",
+                   command=self.saves_open_dir).pack(side="left", padx=6)
+
+        cols = ("time", "kind", "size", "name", "note")
+        self.tv_saves = ttk.Treeview(f, columns=cols, show="headings", height=16,
+                                     selectmode="extended")
+        for c, w, t in (("time", 170, "时间"), ("kind", 110, "类型"),
+                        ("size", 90, "大小"), ("name", 330, "文件"),
+                        ("note", 380, "备注")):
+            self.tv_saves.heading(c, text=t)
+            self.tv_saves.column(c, width=w, anchor="w")
+        vs = ttk.Scrollbar(f, orient="vertical", command=self.tv_saves.yview)
+        self.tv_saves.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        self.tv_saves.pack(fill="both", expand=True, pady=6)
+        self.tv_saves.bind("<Double-1>", lambda e: self.saves_restore())
+        self.save_rows = []
+
+    def saves_dir(self):
+        if not self.doc:
+            return None
+        return xj_backup.backup_dir(self.doc.path, create=False)
+
+    def saves_refresh(self):
+        self.tv_saves.delete(*self.tv_saves.get_children())
+        self.save_rows = []
+        if not self.doc:
+            self.var_saves_info.set("存档管理：还没打开存档")
+            return
+        rows = xj_backup.list_backups(self.doc.path)
+        self.save_rows = rows
+        kind_cn = {"auto": "自动", "manual": "手动",
+                   "before-restore": "恢复前", "other": "其它"}
+        for i, r in enumerate(rows):
+            self.tv_saves.insert("", "end", iid="b%d" % i,
+                                 values=(r["stamp"].replace("_", " "),
+                                         kind_cn.get(r["kind"], r["kind"]),
+                                         "%.1f KB" % (r["size"] / 1024.0),
+                                         r["name"], r["note"]))
+        d = xj_backup.backup_dir(self.doc.path)
+        self.var_saves_info.set(
+            "当前存档：%s\n备份目录：%s（共 %d 份，合计 %.1f MB）"
+            % (self.doc.path, d, len(rows),
+               sum(r["size"] for r in rows) / 1048576.0))
+
+    def saves_backup(self):
+        if not self.doc:
+            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+            return
+        try:
+            p = xj_backup.backup(self.doc.path, xj_backup.KIND_MANUAL)
+        except Exception as e:
+            messagebox.showerror("备份失败", zh_error(e), parent=self.root)
+            return
+        self.saves_refresh()
+        self.set_status("已备份到 %s" % os.path.basename(p))
+        messagebox.showinfo("备份完成", "已备份：\n%s" % p, parent=self.root)
+
+    def _save_sel(self, quiet=False):
+        sel = self.tv_saves.selection()
+        if not sel:
+            if not quiet:
+                messagebox.showinfo("提示", "先在列表里选中一份备份。",
+                                    parent=self.root)
+            return []
+        out = []
+        for iid in sel:
+            i = int(iid[1:])
+            if 0 <= i < len(self.save_rows):
+                out.append(self.save_rows[i])
+        return out
+
+    def saves_restore(self):
+        if not self.doc:
+            return
+        rows = self._save_sel()
+        if not rows:
+            return
+        if len(rows) > 1:
+            messagebox.showinfo("提示", "恢复一次只能选一份。", parent=self.root)
+            return
+        r = rows[0]
+        if not self.confirm(
+                "确认恢复",
+                "要用这份备份覆盖当前存档吗？\n\n  %s\n  %s\n\n"
+                "（当前存档会自动先存一份“恢复前”，可以「恢复上一个」退回来）"
+                % (r["stamp"], r["name"])):
+            return
+        try:
+            _used, undo = xj_backup.restore(r["path"], self.doc.path)
+        except Exception as e:
+            messagebox.showerror("恢复失败", zh_error(e), parent=self.root)
+            return
+        self.load(self.doc.path)          # 重新载入，界面跟着变
+        self.saves_refresh()
+        self.set_status("已恢复 %s（撤销用的备份：%s）"
+                        % (r["name"], os.path.basename(undo) if undo else "无"))
+        messagebox.showinfo("恢复完成",
+                            "已用\n  %s\n覆盖当前存档，并重新载入。\n\n"
+                            "点错了就按「恢复上一个」。" % r["name"],
+                            parent=self.root)
+
+    def saves_undo(self):
+        """恢复上一个＝撤销上一次「恢复」。"""
+        if not self.doc:
+            return
+        r = xj_backup.last_undo(self.doc.path)
+        if r is None:
+            messagebox.showinfo("提示", "没有可退回的“恢复前”备份。",
+                                parent=self.root)
+            return
+        if not self.confirm(
+                "恢复上一个",
+                "退回上一次“恢复”之前的存档？\n\n  %s\n  %s"
+                % (r["stamp"], r["name"])):
+            return
+        try:
+            xj_backup.restore(r["path"], self.doc.path, keep_current=False)
+        except Exception as e:
+            messagebox.showerror("恢复失败", zh_error(e), parent=self.root)
+            return
+        self.load(self.doc.path)
+        self.saves_refresh()
+        self.set_status("已退回：%s" % r["name"])
+
+    def saves_delete(self):
+        rows = self._save_sel()
+        if not rows:
+            return
+        if not self.confirm(
+                "确认删除",
+                "删掉这 %d 份备份？（不可撤销）\n\n%s"
+                % (len(rows), "\n".join("  " + r["name"] for r in rows[:8]))):
+            return
+        n = xj_backup.remove([r["path"] for r in rows])
+        self.saves_refresh()
+        self.set_status("已删除 %d 份备份" % n)
+
+    def saves_open_dir(self):
+        d = self.saves_dir()
+        if not d or not os.path.isdir(d):
+            messagebox.showinfo("提示", "备份目录还没建（先点一次「立即备份」）。",
+                                parent=self.root)
+            return
+        try:
+            os.startfile(d)          # noqa: S606  （Windows 专用）
+        except Exception:
+            self.set_status("备份目录：%s" % d)
 
     # -------------------------------------------------- 2 全部解析数据
     def _tab_tree(self):
@@ -1071,6 +1254,17 @@ class App(object):
     def err(self, e):
         self.set_status("出错：%s" % human(str(e)).replace("\n", " ")[:120])
 
+    def confirm(self, title, text):
+        """问一句“要不要”。
+
+        走一层包装：测试里把 messagebox 换成了“只记录”的假对象，
+        没有 askyesno 时就当“确认”（不然一调就 AttributeError）。
+        """
+        fn = getattr(messagebox, "askyesno", None)
+        if fn is None:
+            return True
+        return bool(fn(title, text, parent=self.root))
+
     def mark_dirty(self):
         self.root.title(TITLE + "  * 有未保存的修改")
 
@@ -1176,10 +1370,12 @@ class App(object):
         if not self.doc or not self.doc.dirty:
             messagebox.showinfo("保存", "没有改动。", parent=self.root)
             return
+        # 保存前先在“存档管理”的目录里留一份（同一份文件 90 秒内只留一次）
+        auto = xj_backup.auto_backup_once(self.doc.path)
         try:
             p = self.doc.save()
         except Exception as e:
-            messagebox.showerror("保存失败", human(str(e)), parent=self.root)
+            messagebox.showerror("保存失败", zh_error(e), parent=self.root)
             return
         try:
             self.sv = xj_save.SaveDoc(doc=self.doc)
@@ -1188,9 +1384,12 @@ class App(object):
         self.sync_editor()
         self.clear_dirty()
         self.refresh_panels()
-        messagebox.showinfo("保存", "已写回：\n%s\n\n原文件已备份为 %s.bak.<时间>"
-                            % (p, os.path.basename(p)), parent=self.root)
-        self.set_status("已保存（备份已生成）")
+        messagebox.showinfo(
+            "保存", "已写回：\n%s\n\n%s"
+            % (p, ("存档管理里也留了一份：%s" % os.path.basename(auto))
+               if auto else "原文件已备份为 %s.bak.<时间>" % os.path.basename(p)),
+            parent=self.root)
+        self.set_status("已保存")
 
     def refresh_panels(self):
         """把所有面板刷一遍。每步单独兜底，返回出错的步骤名列表。
@@ -1203,6 +1402,7 @@ class App(object):
                          ("召唤兽", self.fill_babies),
                          ("开关/变量", self.fill_switches),
                          ("机器码", lambda: self.machine_show(quiet=True)),
+                         ("存档管理", self.saves_refresh),
                          ("环境信息", self.refresh_env)):
             try:
                 fn()
@@ -2068,11 +2268,11 @@ class App(object):
                                 "本机机器码 %s 已经在存档记录里了，不用改。" % now,
                                 parent=self.root)
             return
-        if not messagebox.askyesno(
+        if not self.confirm(
                 "确认",
                 "把存档里的机器码\n  %s\n换成本机机器码\n  %s\n吗？\n\n"
                 "（换机器玩建议改成「追加」，这样两台机器都能进）"
-                % ("、".join(ids) or "（空）", now), parent=self.root):
+                % ("、".join(ids) or "（空）", now)):
             return
         self.var_machine_id.set(now)
         self._machine_apply(True)
@@ -2086,10 +2286,10 @@ class App(object):
             messagebox.showinfo("提示", "存档里本来就没有机器码记录。",
                                 parent=self.root)
             return
-        if not messagebox.askyesno(
+        if not self.confirm(
                 "确认", "清空存档里的机器码记录（%s）？\n\n"
                 "注意：清空后如果本机机器码也不在里面，游戏会弹「存档异常」。"
-                % "、".join(ids), parent=self.root):
+                % "、".join(ids)):
             return
         self.g.set_machine_ids([])
         self.mark_dirty()

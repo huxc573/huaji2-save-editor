@@ -307,6 +307,62 @@ def main():
         check("对空格子重抽会报错", "空" in str(e), "%s" % type(e).__name__)
     g.clear_slot("Items", probe3)
 
+    # ---------------- v0.4.4：@attr 的“外层键必须是字符串”，否则游戏读不到
+    #  游戏脚本：$item_obj.data[:data][:id]；而 item.data 读的是 @attr["data"]
+    #  （**字符串**键）—— 早期工具写成了符号键 :data，于是：
+    #    * 工具自己的“内容”列读不出来（游戏写的是字符串键）
+    #    * 游戏用蛋时 item.data 为 nil → NoMethodError: undefined method '[]'
+    probe4 = [s for s in g.empty_slots("Items")
+              if s not in (probe, probe2, probe3, ref_slot)][0]
+    g.add_item("Items", probe4, 110, 1, kid=57, clone_like=False)
+    it4 = _item_of(g, "Items", probe4)
+    attr = xj_save._deref(xj_save.ivar(it4, "@attr"))
+    key = xj_save._deref(attr.pairs[0][0])
+    check("写出去的 @attr 外层键是**字符串**（和游戏一致）",
+          isinstance(key, M.StrNode), type(key).__name__)
+    got = M.value_of(key)
+    if isinstance(got, bytes):
+        got = got.decode("utf-8", "replace")
+    check("外层键就是 \"data\"", got == "data", repr(got))
+    # 模拟游戏那句 $item_obj.data[:data][:id]
+    #   item.data        → @attr["data"]      = {:type=>..., :data=>{:id=>...}}
+    #   item.data[:data] → {:id=>...}
+    inner = xj_save.hash_get(xj_save.hash_get(attr, "data"), "data")
+    d1 = M.value_of(xj_save._deref(xj_save.hash_get(inner, "id"))) \
+        if inner is not None else None
+    check("按游戏的方式读得到 id=57（这句以前会 nil 报错）", d1 == 57,
+          "读到 %r" % (d1,))
+    g.clear_slot("Items", probe4)
+
+    # ---------------- 老版本工具写成了**符号键**：体检要挑出来、修复要改成字符串键
+    probe5 = [s for s in g.empty_slots("Items")
+              if s not in (probe, probe2, probe3, probe4, ref_slot)][0]
+    g.add_item("Items", probe5, 110, 1, kid=57, clone_like=False)
+    it5 = _item_of(g, "Items", probe5)
+    # 手动把键换回符号（模拟 v0.4.2/0.4.3 写出来的老数据）
+    payload = xj_save.hash_get(xj_save._deref(xj_save.ivar(it5, "@attr")), "data")
+    xj_game.set_ivar(it5, "@attr",
+                     M.HashNode([(M.SymbolNode("data"), payload)],
+                                default=None))
+    check("符号键现在能被“读”出来（兼容）",
+          g.item_payload(it5)[0] == "baby_egg", g.payload_summary(it5))
+    check("但体检知道游戏读不到（键类型不对）", not g.payload_key_ok(it5))
+    rows5 = g.pack_report()
+    check("体检会把“键类型不对”列出来",
+          any(r[1] == probe5 and "键" in r[3] for r in rows5),
+          "%r" % [(r[1], r[3]) for r in rows5 if r[1] == probe5])
+    g.pack_fix(rows5)
+    attr5 = xj_save._deref(xj_save.ivar(_item_of(g, "Items", probe5), "@attr"))
+    check("修复后键变成字符串（游戏能读了）",
+          g.payload_key_ok(_item_of(g, "Items", probe5)),
+          type(xj_save._deref(attr5.pairs[0][0])).__name__)
+    _t6, d6 = g.item_payload(_item_of(g, "Items", probe5))
+    check("修复时内容没丢（还是 id=57）",
+          d6 is not None and M.value_of(xj_save._deref(
+              xj_save.hash_get(d6, "id"))) == 57,
+          "type=%r" % (_t6,))
+    g.clear_slot("Items", probe5)
+
     # ---------------- 保存 / 重开
     before = dict((r[0], r[5]) for r in g.bag("Items"))
     plain = sv.doc.plain_bytes()

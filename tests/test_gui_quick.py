@@ -123,7 +123,7 @@ def main():
         kill_timers(root)
         root.update()
         say("窗口创建完成（%d 个页签）" % app.nb.index("end"))
-        check("10 个页签都建好", app.nb.index("end") == 10,
+        check("11 个页签都建好", app.nb.index("end") == 11,
               "%d 个：%s" % (app.nb.index("end"),
                               [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]))
 
@@ -372,6 +372,7 @@ def main():
               app.g.payload_summary(app.g._item_node("Items", egg_slot)))
         app.var_bag_kid.set("")
 
+
         # ---------------- 召唤兽
         check("召唤兽页列出角色", len(app.cb_baby_actor["values"]) >= 1,
               "%r" % (app.cb_baby_actor["values"],))
@@ -539,6 +540,57 @@ def main():
             check("数据树仍可用", len(app.tree.get_children("")) >= 1)
         else:
             say("（没有 Battle.bt2 样本，跳过）")
+
+        # ---------------- v0.4.4：存档管理（放最后，免得它重载存档打断前面的状态）
+        say("存档管理页（备份 / 恢复 / 恢复上一个 / 删除）…")
+        dlg_mark = len(dialogs)      # 本段会故意把存档改坏，产生的弹框段末清掉
+        check("存档管理页建得起来",
+              hasattr(app, "tab_saves") and hasattr(app, "tv_saves"),
+              app.nb.tab(app.tab_saves, "text"))
+        app.saves_refresh()
+        root.update()
+        n0 = len(app.save_rows)
+        app.saves_backup()
+        root.update()
+        p = app.doc.path if app.doc else copy   # 恢复/撤销都拿文件本身比对
+        check("界面「立即备份」生成一份", len(app.save_rows) == n0 + 1,
+              "%d -> %d" % (n0, len(app.save_rows)))
+        check("列表里有文件名和时间",
+              bool(app.tv_saves.item("b0", "values")[3])
+              and bool(app.tv_saves.item("b0", "values")[0]),
+              "%r" % (app.tv_saves.item("b0", "values")[:2],))
+        before = open(p, "rb").read()
+        with open(p, "wb") as f:                 # 先把存档“改坏”
+            f.write(b"broken" + before[:200])
+        app.tv_saves.selection_set("b0")
+        app.saves_restore()
+        root.update()
+        check("界面「恢复选中」恢复成功",
+              open(p, "rb").read() == before,
+              "%d 字节（备份 %d）" % (os.path.getsize(p), len(before)))
+        check("恢复时会先把当前存档留一份（恢复前）",
+              any(r["kind"] == "before-restore" for r in app.save_rows),
+              "%r" % [r["kind"] for r in app.save_rows][:4])
+        app.saves_undo()
+        root.update()
+        check("界面「恢复上一个」能退回去",
+              open(p, "rb").read().startswith(b"broken"),
+              open(p, "rb").read()[:8])
+        with open(p, "wb") as f:                 # 收回原样
+            f.write(before)
+        app.load(p, quiet=True)
+        root.update()
+        n_before_del = len(app.save_rows)
+        app.tv_saves.selection_set("b0")
+        app.saves_delete()
+        root.update()
+        check("界面「删除选中」生效", len(app.save_rows) == n_before_del - 1,
+              "%d -> %d" % (n_before_del, len(app.save_rows)))
+        check("备份目录就在存档旁边",
+              os.path.isdir(os.path.join(os.path.dirname(p),
+                                         "huxji2-save-editor")),
+              os.path.dirname(p))
+        del dialogs[dlg_mark:]       # 本段自造的弹框（含故意的“打开失败”）不算数
 
         check("全程没弹出错误框", not [d for d in dialogs if d[0] == "error"],
               "%r" % (dialogs[:2],))

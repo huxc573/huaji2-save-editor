@@ -89,12 +89,22 @@ def ivar(obj, name, default=None):
 
 
 def hash_get(h, key, default=None):
+    """取 Hash 里的一对。
+
+    注意：**同一个 Hash 里可能混着字符串键和符号键**！
+    例如物品的 `@attr`，游戏写的是 `@attr["data"]`（**字符串**键），
+    而工具早期写的是 `:data`（符号键）—— 读的时候两边都要认，
+    否则就会出现“游戏写的内容工具读不出来”。
+    """
     h = _deref(h)
     if not isinstance(h, M.HashNode):
         return default
     for k, v in h.pairs:
-        kv = M.value_of(k)
-        if kv == key or (isinstance(kv, bytes) and kv == key):
+        # 键本身也可能是 I 包装（`I"data"{E=true}`），必须先解引用再取值
+        kv = M.value_of(_deref(k))
+        if isinstance(kv, bytes):
+            kv = kv.decode("utf-8", "replace")
+        if kv == key:
             return v
     return default
 

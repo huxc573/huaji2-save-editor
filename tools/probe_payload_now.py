@@ -64,8 +64,19 @@ def main():
                     continue
                 it = g._item_node(kind, slot)
                 t, d = g.item_payload(it)
-                print("  [%-3s] 槽 %-3s %-12s ×%-3s type=%-16s data=%s"
-                      % (cn, slot, nm, cnt, t, render(d) if d is not None
+                kk = ""
+                try:
+                    a = xj_save._deref(xj_save.ivar(it, "@attr"))
+                    if a is not None and a.pairs:
+                        kd = xj_save._deref(a.pairs[0][0])
+                        kk = "键=%s%s" % (type(kd).__name__,
+                                         "（游戏读不到！）"
+                                         if not g.payload_key_ok(it) else "")
+                except Exception:
+                    pass
+                print("  [%-3s] 槽 %-3s %-12s ×%-3s type=%-16s %s data=%s"
+                      % (cn, slot, nm, cnt, t, kk,
+                         render(d) if d is not None
                          else "（空，游戏里会少提示/报错）"))
                 if t and d is not None:
                     kid = M.value_of(xj_save._deref(xj_save.hash_get(d, "id")))

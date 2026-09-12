@@ -46,7 +46,8 @@ def kill_timers(root):
         pass
 
 
-TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_tree", "全部解析数据"),
+TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_saves", "存档管理"),
+        ("tab_tree", "全部解析数据"),
         ("tab_actor", "角色 / 属性"), ("tab_party", "背包 / 物品"),
         ("tab_baby", "召唤兽"), ("tab_switch", "开关 / 变量"),
         ("tab_machine", "机器码"),

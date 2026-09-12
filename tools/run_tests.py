@@ -26,6 +26,7 @@ TESTS = [
     ("roundtrip", ["tools/test_roundtrip.py"]),
     ("semantic", ["tools/test_semantic_equal.py"]),
     ("game_layer", ["tools/test_game_layer.py"]),
+    ("backup", ["tools/test_backup.py"]),
     ("gui", ["tests/test_gui.py"]),
     ("gui_quick", ["tests/test_gui_quick.py"]),
     ("db_csv", ["tools/test_db_csv.py"]),

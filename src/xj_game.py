@@ -294,6 +294,11 @@ class GameEditor(object):
                                     "缺“运行时内容”（@attr 是空的）——"
                                     "游戏里一用就报 NoMethodError",
                                     True, {"id": iid, "payload": True}))
+                    elif not self.payload_key_ok(item):
+                        out.append((key, slot, nm,
+                                    "运行时内容的键写成了符号（老版本工具的写法）"
+                                    "——游戏只认字符串键 \"data\"，所以游戏里读不到",
+                                    True, {"id": iid, "payload": True}))
         return out
 
     def pack_fix(self, rows=None):
@@ -667,6 +672,22 @@ class GameEditor(object):
                     return clone_node(ivar(it, "@attr"))
         return None
 
+    def payload_key_ok(self, node):
+        """`@attr` 的外层键是不是**字符串** "data"（游戏只认这个）。
+
+        老版本工具误写成了符号键 `:data`：工具自己能读（兼容两种），
+        但游戏 `item.data` 读的是字符串键 → 读不到 → 用的时候直接报
+        `undefined method '[]' for nil:NilClass`。
+        """
+        a = _deref(ivar(node, "@attr"))
+        if not isinstance(a, M.HashNode) or not a.pairs:
+            return False
+        for k, _v in a.pairs:
+            kk = _deref(k)
+            if isinstance(kk, M.StrNode):
+                return True
+        return False
+
     def _fix_payload(self, node, kind, item_id, kid=None, force=False):
         """给物品补上 `@attr`（游戏运行时才生成的那部分）。
 
@@ -674,9 +695,19 @@ class GameEditor(object):
         脚本里的规则现生成（见 `xj_payload`）。
         force=True 时不看“同款”，直接按规则重抽一份（“重抽内容”按钮用）。
         """
-        cur_t, _cur_d = self.item_payload(node)
+        cur_t, cur_d = self.item_payload(node)
         if cur_t and kid is None and not force:
-            return node            # 存档里本来就有内容
+            if self.payload_key_ok(node):
+                return node            # 存档里本来就有内容，而且键类型对
+            # 内容在，但键是符号（老版本工具的写法）→ 重写成字符串键，内容一个不动
+            inner = M.HashNode([(self._sym("type"), self._sym(cur_t)),
+                                (self._sym("data"),
+                                 cur_d if cur_d is not None else nil_node())],
+                               default=None)
+            attr = M.HashNode([(self._str_key("data"), inner)], default=None)
+            if not set_ivar(node, "@attr", attr):
+                node.ivars.append(("@attr", attr))
+            return node
         need, nm = self.item_needs_payload(kind, item_id)
         if not need and kid is None:
             return node
@@ -692,10 +723,19 @@ class GameEditor(object):
         if kid is not None and "id" in data:
             data["id"] = int(kid)
         attr = M.HashNode([], default=None)
-        attr.pairs.append((self._sym("data"), self._payload_node(typ, data)))
+        # ⚠ 这里的**外层键必须是字符串 "data"**：游戏写的就是 `@attr["data"]`，
+        # 读的时候是 `item.data[:data][:id]`。早期工具写成了符号键 :data，
+        # 于是“内容列”读不出来、游戏用蛋时 `item.data` 为 nil 直接报
+        # NoMethodError: undefined method '[]' for nil:NilClass。
+        attr.pairs.append((self._str_key("data"), self._payload_node(typ, data)))
         if not set_ivar(node, "@attr", attr):
             node.ivars.append(("@attr", attr))
         return node
+
+    @staticmethod
+    def _str_key(text):
+        """字符串键（不加 I/E 包装，和游戏写的一样）。"""
+        return M.StrNode(text.encode("utf-8"))
 
     def set_payload(self, kind, slot, kid=None, force=True):
         """给某一格的东西重新生成/指定“运行时内容”（孵化蛋、要诀之类的）。
