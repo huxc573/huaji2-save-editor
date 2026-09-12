@@ -1,0 +1,46 @@
+画迹2 存档工具 v0.1 —— 使用说明
+================================
+
+【这是什么】
+  针对 RPG Maker VX Ace 游戏《画迹2：缘起凡尘》（尝鲜版）的存档工具。
+  用游戏自带的 System\main.dll 加解密，再解析 Ruby Marshal 明文来浏览/修改。
+
+【v0.1 的实话：还不能直接改游戏存档】
+  已经搞清：引擎、存档位置、加解密接口、密文形态（8 字节头块 + ECB 分组）。
+  但是：main.dll 里那份分组密码的"密钥状态"，在游戏进程外调用时
+        与游戏写文件时不一致 —— 所以直接在外部解密 save.rvdata2
+        会得到 0 字节。
+
+  本版能做的：
+    ✔ 打开"已经解密好的明文"存档（*.rvdata2 / *.rxdata / *.bin）浏览与修改
+    ✔ 加解密自检（自己加密 -> 自己解密，逐字节一致）
+    ✔ 环境诊断、出错时给出明确原因
+  本版不能做的：
+    ✘ 直接打开游戏原档 save.rvdata2（v0.2 计划解决，见 docs\待解决问题.md）
+
+【怎么用】
+  1) 需要 Python 3.10+（64 位）。不需要装任何 pip 包。
+  2) 如果没带 XJCodec32.exe（或改动过源码），先编译一次：
+       python tools\build_host.py
+  3) 开界面：
+       python src\xj_viewer.py
+  4) 命令行体检 / 加解密：
+       python src\xj_codec.py info
+       python src\xj_codec.py selftest
+       python src\xj_codec.py encrypt 明文.bin 输出.bin
+       python src\xj_codec.py decrypt 输出.bin 还原.bin
+
+  找不到游戏目录时，先设环境变量：
+       set XJ_GAME=D:\...\【画迹2：缘起凡尘】 [尝鲜版]
+       （PowerShell: $env:XJ_GAME="..."）
+
+【重要提醒】
+  * 改存档前请自己先复制一份 save.rvdata2。
+    工具写回时也会自动把原文件备份成 save.rvdata2.bak.<时间> 之后再写。
+  * 改存档的时候请**先退出游戏**，否则文件被占用会写失败。
+  * 不要把本工具用于破坏公平性的用途。
+
+【出问题了看哪里】
+  docs\存档格式.md     —— 已经确认的格式结论
+  docs\逆向过程.md     —— 怎么得出这些结论的，以及踩过的坑
+  docs\待解决问题.md   —— v0.2 要解决什么、怎么继续挖

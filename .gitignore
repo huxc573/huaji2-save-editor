@@ -1,0 +1,41 @@
+# 忽略规则
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 探针产出的中间文件（体积大、可重跑生成，不入库）
+probes/_*
+probes/_w*/
+probes/_sandbox/
+probes/xjprobe32.exe
+probes/xjhost32*.exe
+probes/*.exe
+# main.dll 的 init_key 会在当前目录写同名占位文件，别提交
+probes/0
+probes/1
+probes/qqeat
+probes/xjy.11
+
+# 编译产物
+tools/build/
+dist/
+build/
+*.spec
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# 提交信息草稿
+_commit_msg.txt
+
+# 本地检查输出
+_*.txt
+_check*.txt
