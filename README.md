@@ -87,6 +87,10 @@ python tools\build.py --dll-dir     :: 宿主放进 dist\dll\ 子目录
 或放 `dll\` 子目录）+ `使用说明.txt` / `CHANGELOG.md`。`XJ_SELFTEST=1` 跑一次会写
 `selftest_result.txt` 自检报告。
 
+> GitHub Release 附件名只能用 ASCII（中文文件名会被平台自动改名），所以发布版附件叫
+> `Huaji2SaveTool_v0.5.0.exe` + `USAGE.txt`（内容与 `dist\画迹2存档工具v0.5.0.exe` /
+> `使用说明.txt` 相同）。
+
 界面会自动定位游戏目录和存档；找不到就设环境变量：
 
 ```bat
