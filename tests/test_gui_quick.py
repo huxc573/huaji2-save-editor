@@ -132,7 +132,7 @@ def main():
         kill_timers(root)
         root.update()
         say("窗口创建完成（%d 个页签）" % app.nb.index("end"))
-        check("11 个页签都建好", app.nb.index("end") == 11,
+        check("10 个页签都建好（开关/变量页已移到快捷修改）", app.nb.index("end") == 10,
               "%d 个：%s" % (app.nb.index("end"),
                               [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]))
 
@@ -156,7 +156,7 @@ def main():
               "步数=%s" % app.var_steps.get())
         check("防作弊校验提示正常", "正常" in app.var_lock.get(),
               app.var_lock.get())
-        check("概览文本已填充", "存银" in app.txt_info.get("1.0", "end"))
+        check("概览文本已填充", "金钱" in app.txt_info.get("1.0", "end"))
         check("概览页有作弊/超限提示条", "作弊" in app.var_cheat.get()
               or "超限" in app.var_cheat.get() or "正常" in app.var_cheat.get(),
               app.var_cheat.get()[:60])
@@ -182,8 +182,24 @@ def main():
         check("界面改金钱 @value 生效", app.sv.gold() == 7654321,
               "%r" % app.sv.gold())
         check("界面改金钱 校验同步", app.sv.check_locks() == [])
+        check("界面改金钱 游戏记账同步", app.g.security_gold() == 7654321,
+              "%r" % app.g.security_gold())
         check("标签同步刷新", app.var_gold.get() == "7654321")
         check("已标记为脏（保存按钮会亮）", app.doc.dirty is True)
+
+        # 超过 30,000,000 → 自动压到 25,000,000（上限 5/6），记账同步
+        say("改金钱超过上限…")
+        app.var_gold.set("999999999")
+        app.apply_quick()
+        root.update()
+        check("金钱超限自动压到 25000000（5/6）", app.sv.gold() == 25000000,
+              app.sv.gold())
+        check("输入框显示钳制后的值", app.var_gold.get() == "25000000")
+        check("钳制后 Lock+记账仍同步",
+              app.sv.check_locks() == [] and app.g.security_gold() == 25000000)
+        app.var_gold.set("7654321")
+        app.apply_quick()
+        root.update()
 
         # ---------------- 角色 / 属性
         kids = app.tv_actor.get_children()
@@ -230,7 +246,7 @@ def main():
         filled = [r for r in app.tv_pack.get_children()
                   if app.tv_pack.item(r, "values")[2] != "（空）"]
         check("背包里看到东西了", len(filled) >= 1, "%d 格有货" % len(filled))
-        check("队伍信息已填充", "存银" in app.var_party.get(),
+        check("队伍信息已填充", "金钱" in app.var_party.get(),
               app.var_party.get())
         if filled:
             say("改背包数量…")

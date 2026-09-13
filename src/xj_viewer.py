@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""《画迹2：缘起凡尘》存档工具 v0.4 —— tkinter 界面（界面参照画迹1 的编辑器）。
+"""《画迹2：缘起凡尘》存档工具 —— tkinter 界面（界面参照画迹1 的编辑器）。
 
 页签（顺序与画迹1 对齐）：
-  1. 概览 / 快捷修改      存银/步数/次数 + 防作弊体检（一键按游戏规则修复 + 清作弊标记）
+  1. 概览 / 快捷修改      金钱/步数/次数 + 防作弊检测并修复（Lock/记账/标记一次修齐）
   2. 全部解析数据         全局搜索 + 树形浏览（懒加载）+ 右侧详情 + 右键菜单（中文注释）
   3. 角色 / 属性          等级/HP/MP/名字/经验 + 中文五维（Game_Actor_Attr）+ 技能装备
   4. 背包 / 物品          4 页 × 20 格：改数量 / 清空 / 添加（自动同步物品计数校验）
@@ -79,7 +79,7 @@ class _IV(object):
         return xj_save._deref(xj_save.ivar(obj, name))
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.5.0"
+VERSION = "v0.5.1"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -140,19 +140,23 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
   角色的五维/潜能是中文实例变量，放在 Game_Actor.@attr（类 Game_Actor_Attr）：
       @体质 @法力 @力量 @耐力 @敏捷 @潜能 @人气 @贡献 @体力 @活力
 
-四、防作弊（重要，游戏查三重）
-  1) Lock 校验和：存银（游戏里就叫这个名，就是金钱）等关键数值被 Lock 包着：
+四、防作弊（重要，游戏查三层）
+  1) Lock 校验和：金钱等关键数值被 Lock 包着：
         @master = @value * 91 + 45 + seed / 800   （seed = $game_system.seeds[:shield]）
      游戏读的时候会验算，不一致就 msgbox '游戏异常！' 然后 exit。
-     本工具改存银时自动重算 @master。
+     本工具改金钱时自动重算 @master。
   2) 周期检查（$jiance）：游戏每 300 帧（约 5 秒）查一次
-        角色等级 > 60 / 出战召唤兽等级 > 65 / 存银 > 30,000,000 /
+        角色等级 > 60 / 出战召唤兽等级 > 65 / 金钱 > 30,000,000 /
         仓库页号 > 3 / 五维总点数 > 等级*10+500
      超了就置 @cheated = 当前帧号；之后游戏会弹「存档异常！」并退出。
-     ⇒ 用「概览 / 快捷修改」页的「体检 → 一键按规则修复 → 清除作弊标记」。
-  3) 物品计数校验（Change）：$game_system.security[:items] 记着
-     "这件物品累计获得过几个"（逐位数字 AES-ECB 加密，密钥 admin_1941344749）。
-     本工具改背包数量/加物品时会自动一起改对；也能手动「同步物品计数校验」。
+     金钱填超过 30,000,000 时工具自动压到 25,000,000（上限的 5/6，留余量）。
+  3) 记账校验（Change）：$game_system.security 里有五类账，游戏每次数值变动
+     都拿账和实际值比对，对不上立刻往 @keyword 写 'NE!' 并判作弊：
+        :gold 金钱 / :items 物品累计获得数 / :variables 变量
+        :renqi 角色人气 / :gongxian 角色贡献
+     （数值逐位 AES-ECB 加密，密钥 admin_1941344749，可以是负数）
+     本工具改金钱/背包时会自动同步对应账；「防作弊检测并修复」会把五类账
+     全部对齐，并清掉 @cheated 和整个 @keyword（VNE/NE!/修改器关键字）。
 
 五、Data 目录下的 .rvdata2
   **全都被加密**（与存档同一套 main.dll 加密，密钥 761205）。本工具直接解密＋解析，
@@ -165,9 +169,10 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
   Map / System / Scripts / Tilesets / Animations 不转（用处不大）。
 
 六、常用位置（第 2 页可以搜字段名直接跳过去）
-  :party    @gold 存银（Lock） @actors 出战成员 @items 背包 @steps 步数
+  :party    @gold 金钱（Lock） @actors 出战成员 @items 背包 @steps 步数
             @warehouse_page 仓库页号
-  :system   @security[:items] 物品计数校验 @cheated 作弊标记 @seeds 防作弊种子
+  :system   @security 五类记账(:gold/:items/:variables/:renqi/:gongxian)
+            @cheated 作弊标记 @keyword 作弊记录(VNE/NE!) @seeds 防作弊种子
   :actors   @data[角色id] → @name @level @hp @mp @exp 经验 @attr(中文五维)
             @babies 召唤兽（等级/气血/魔法/六项资质/忠诚/寿命/成长/五维）
   :switches @data[编号]      :variables @data[编号]
@@ -188,6 +193,19 @@ def human(text):
         except UnicodeDecodeError:
             return text.decode("gbk", "replace")
     return zh_text(str(text))
+
+
+def parse_num(text):
+    """输入框数字解析：能吃 '123'、'0x10'，也能吃游戏存出来的浮点 '200.0'。
+
+    游戏有些字段是 Float（如角色的 @活力），fill 到输入框再原样点「应用」时，
+    直接 int('200.0', 0) 会抛 ValueError —— 先按整数试，失败再按小数。
+    """
+    t = text.strip()
+    try:
+        return int(t, 0)
+    except ValueError:
+        return float(t)
 
 
 # 英文异常消息 → 中文说法（字符串层面，专门给“直接弹 str(e)”的那些提示用）
@@ -367,7 +385,10 @@ class App(object):
         self._tab_actor()
         self._tab_party()
         self._tab_baby()
-        self._tab_switch()
+        # 开关/变量页只有 3 个 switch，没什么实际用，开关挪到快捷修改页做勾选框；
+        # 但 _tab_switch 仍要调一次（只创建 tv_sw/tv_va widget 不挂到 Notebook），
+        # 否则外部直接用到 self.tv_sw 的地方会报 AttributeError
+        self._tab_switch(add_to_notebook=False)
         self._tab_machine()
         self._tab_db()
         self._tab_help()
@@ -380,9 +401,44 @@ class App(object):
         self.tab_quick = f
         self.nb.add(f, text="概览 / 快捷修改")
 
-        inf = ttk.Frame(f)
-        inf.pack(fill="x")
-        self.txt_info = tk.Text(inf, height=12, wrap="none", font=("Consolas", 10))
+        # ---- 两大功能块左右分布（PanedWindow，中间可拖，两边等大 weight=1）
+        body = ttk.Panedwindow(f, orient="horizontal")
+        body.pack(fill="both", expand=True)
+
+        # ========== 左：快捷修改 ==========
+        g = ttk.LabelFrame(body, text="快捷修改（先点「应用」，再点上面的「保存修改」）",
+                           padding=10)
+        body.add(g, weight=1)
+        self.var_gold = tk.StringVar()
+        self.var_steps = tk.StringVar()
+        self.var_savecnt = tk.StringVar()
+        self.var_battlecnt = tk.StringVar()
+        for r, (label, var) in enumerate(
+                [("金钱", self.var_gold), ("步数", self.var_steps),
+                 ("存档次数", self.var_savecnt), ("战斗次数", self.var_battlecnt)]):
+            ttk.Label(g, text=label + "：", width=9, anchor="w").grid(
+                row=r, column=0, sticky="w", padx=(4, 4), pady=3)
+            ttk.Entry(g, textvariable=var, width=18).grid(
+                row=r, column=1, sticky="w")
+        # v0.5.0 灰字提示：金钱说明（精简，加 wraplength 自动换行）
+        ttk.Label(g, text="金钱上限 3000 万；超限自动压到 2500 万（上限 5/6）\n"
+                          "改钱会同步重算 Lock 校验和 + 游戏内金钱记账，不会被判定作弊",
+                  foreground="#888", justify="left", wraplength=420).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        bar = ttk.Frame(g)
+        bar.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(bar, text="应用", command=self.apply_quick).pack(side="left")
+        ttk.Button(bar, text="防作弊检测并修复",
+                   command=self.detect_and_fix_cheats).pack(side="left", padx=8)
+        self.var_lock = tk.StringVar(value="防作弊检测：—")
+        ttk.Label(g, textvariable=self.var_lock, foreground="#c00"
+                  ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # 存档概况（= 概览内容，放在快捷修改 LabelFrame 里 var_lock 行之后）
+        inf = ttk.Frame(g)
+        inf.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=6)
+        g.rowconfigure(7, weight=1)
+        g.columnconfigure(1, weight=1)
+        self.txt_info = tk.Text(inf, height=10, wrap="none", font=("Consolas", 10))
         vs = ttk.Scrollbar(inf, orient="vertical", command=self.txt_info.yview)
         hs = ttk.Scrollbar(inf, orient="horizontal", command=self.txt_info.xview)
         self.txt_info.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
@@ -390,56 +446,30 @@ class App(object):
         hs.pack(side="bottom", fill="x")
         self.txt_info.pack(fill="both", expand=True)
 
-        g = ttk.LabelFrame(f, text="快捷修改（先点「应用」，再点上面的「保存修改」）",
-                           padding=10)
-        g.pack(fill="x", pady=8)
-        self.var_gold = tk.StringVar()
-        self.var_steps = tk.StringVar()
-        self.var_savecnt = tk.StringVar()
-        self.var_battlecnt = tk.StringVar()
-        pairs = [(("存银", self.var_gold), ("步数", self.var_steps)),
-                 (("存档次数", self.var_savecnt), ("战斗次数", self.var_battlecnt))]
-        for r, (p1, p2) in enumerate(pairs):
-            for c, (label, var) in enumerate((p1, p2)):
-                ttk.Label(g, text=label, width=9).grid(
-                    row=r, column=c * 3, sticky="w", padx=(0 if c else 4, 0), pady=3)
-                ttk.Entry(g, textvariable=var, width=18).grid(
-                    row=r, column=c * 3 + 1, sticky="w")
-        ttk.Label(g, text="存银上限 30,000,000（Lock 包装，改值会同步重算 @master）",
-                  foreground="#888").grid(row=0, column=2, columnspan=4,
-                                          sticky="w", padx=10)
-        bar = ttk.Frame(g)
-        bar.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
-        ttk.Button(bar, text="应用", command=self.apply_quick).pack(side="left")
-        ttk.Button(bar, text="校验码修复（Lock 校验和）",
-                   command=self.fix_locks).pack(side="left", padx=8)
-        self.var_lock = tk.StringVar(value="防作弊校验：—")
-        ttk.Label(g, textvariable=self.var_lock).grid(
-            row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
-
-        # ---- 防作弊体检（v0.4：游戏每 300 帧会自己查一遍）
-        h = ttk.LabelFrame(f, text="防作弊体检（游戏自己的检查规则）", padding=10)
-        h.pack(fill="both", expand=True, pady=8)
-        ttk.Label(h, text="游戏每 300 帧检查一次：角色等级 ≤ 60、出战召唤兽等级 ≤ 65、"
-                          "存银 ≤ 30,000,000、仓库页号 ≤ 3、五维总点数 ≤ 等级*10+500；"
-                          "物品计数校验（Change）对不上也照样算作弊。\n"
-                          "越界就把存档标记成「作弊」（@cheated）：20 分钟后画面转圈/缩放，"
-                          "25 分钟后弹「存档异常」直接退出，战斗中还会崩 "
-                          "RGSSError: disposed sprite。\n"
-                          "⚠ 上面那个「校验码修复」修的是存银/步数那套 Lock 校验和，"
-                          "跟这里的作弊标记是两码事 —— 清标记要用下面的按钮。",
-                  foreground="#555", justify="left").pack(anchor="w")
+        # ========== 右：防作弊体检 ==========
+        h = ttk.LabelFrame(body, text="防作弊体检（游戏自己的检查规则）", padding=10)
+        body.add(h, weight=1)
+        # v0.5.0 灰字提示：体检说明（精简，加 wraplength 自动换行）
+        ttk.Label(h, text=
+                  "游戏每 300 帧检查：等级、召唤兽、金钱(≤3000万)、仓库、五维点数；\n"
+                  "另有五类记账(金钱/物品/变量/人气/贡献)、Lock 校验和随时比对；\n"
+                  "越界/不符 → 存档标记作弊(@cheated + @keyword VNE/NE!)，\n"
+                  "20 分钟后画面转圈、25 分钟后退出；鼠标悬浮条目看具体说明。",
+                  foreground="#555", justify="left", wraplength=420).pack(anchor="w")
         self.var_cheat = tk.StringVar(value="")
         ttk.Label(h, textvariable=self.var_cheat, foreground="#c00",
-                  justify="left", wraplength=1180).pack(anchor="w", pady=(4, 0))
+                  justify="left").pack(anchor="w", pady=(4, 0))
         gv = ttk.Frame(h)
         gv.pack(fill="both", expand=True, pady=6)
-        self.tv_guard = ttk.Treeview(gv, columns=("a", "b", "c", "d"),
+        self.tv_guard = ttk.Treeview(gv, columns=("a", "b", "c"),
                                      show="headings", height=9)
-        for c, w, t in (("a", 240, "项目"), ("b", 130, "当前值"),
-                        ("c", 130, "上限/记录值"), ("d", 420, "说明")):
+        for c, w, t in (("a", 200, "项目"), ("b", 110, "当前值"),
+                        ("c", 110, "上限/记录值")):
             self.tv_guard.heading(c, text=t)
             self.tv_guard.column(c, width=w, anchor="w")
+        self._guard_notes = {}
+        self.tv_guard.bind("<Motion>", self._guard_tip_motion)
+        self.tv_guard.bind("<Leave>", lambda e: self._tip_hide())
         vs = ttk.Scrollbar(gv, orient="vertical", command=self.tv_guard.yview)
         self.tv_guard.configure(yscrollcommand=vs.set)
         vs.pack(side="right", fill="y")
@@ -456,13 +486,8 @@ class App(object):
                    command=self.guard_resync).pack(side="left", padx=6)
         ttk.Button(gbar, text="清理所有存档（含 AutoSave）",
                    command=self.guard_fix_all).pack(side="left", padx=(18, 6))
-
-        # ---- 机器码：单独一页（照画迹1 的布局）
-        mq = ttk.Frame(h)
-        mq.pack(fill="x", pady=(6, 0))
-        self.var_machine_quick = tk.StringVar(value="机器码：—　（详细在「机器码」页）")
-        ttk.Label(mq, textvariable=self.var_machine_quick,
-                  foreground="#555").pack(anchor="w")
+        # 初始把 PanedWindow 分隔条放到 50%（等窗口实际尺寸出来后再设）
+        self.root.after(150, lambda: body.sashpos(0, body.winfo_width() // 2))
 
     # -------------------------------------------------- 6.5 机器码（存档绑定）
     def _tab_machine(self):
@@ -845,11 +870,10 @@ class App(object):
         body.pack(fill="both", expand=True, pady=4)
 
         left = ttk.Frame(body)
-        self.tree = ttk.Treeview(left, columns=("type", "value", "note"),
+        self.tree = ttk.Treeview(left, columns=("type", "value"),
                                  show="tree headings")
         self.tree.heading("#0", text="路径 / 字段")
-        for c, w, t in (("type", 60, "类型"), ("value", 400, "值"),
-                        ("note", 190, "说明")):
+        for c, w, t in (("type", 60, "类型"), ("value", 600, "值")):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w")
         self.tree.column("#0", width=360)
@@ -863,6 +887,8 @@ class App(object):
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Button-3>", self.tree_menu)
         self.tree.bind("<Double-1>", lambda e: self.tree_edit_value())
+        self.tree.bind("<Motion>", self._tree_tip_motion)
+        self.tree.bind("<Leave>", lambda e: self._tip_hide())
         body.add(left, weight=3)
 
         right = ttk.Frame(body)
@@ -985,8 +1011,8 @@ class App(object):
 
         # ---- 左：格子列表
         left = ttk.Frame(body)
-        ttk.Label(left, text="背包格子").pack(anchor="w")
-        ttk.Label(left, text="背包格子（“内容”列是孵化蛋/礼包那种运行时内容）"
+        ttk.Label(left, text="背包格子（“内容”列是孵化蛋/礼包那种运行时内容；"
+                             "鼠标停在物品上可看完整说明）"
                   ).pack(anchor="w")
         cols = ("slot", "idx", "id", "name", "count", "content")
         self.tv_pack = ttk.Treeview(left, columns=cols, show="headings", height=14)
@@ -1001,6 +1027,8 @@ class App(object):
         self.tv_pack.pack(fill="both", expand=True)
         self.tv_pack.bind("<<TreeviewSelect>>", lambda e: self.bag_pick())
         self.tv_pack.bind("<Double-1>", lambda e: self.bag_edit())
+        self.tv_pack.bind("<Motion>", self._bag_tip_motion, add="")
+        self.tv_pack.bind("<Leave>", self._tip_hide, add="")
         body.add(left, weight=3)
 
         # ---- 右：物品模板（从 Data 表读，画迹1 也有这一栏）
@@ -1026,6 +1054,8 @@ class App(object):
         vs2.pack(side="right", fill="y")
         self.tv_tpl.pack(fill="both", expand=True)
         self.tv_tpl.bind("<Double-1>", lambda e: self.bag_use_template())
+        self.tv_tpl.bind("<Motion>", self._tpl_tip_motion, add="")
+        self.tv_tpl.bind("<Leave>", self._tip_hide, add="")
         self.var_tpl_note = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.var_tpl_note, foreground="#555",
                   wraplength=300, justify="left").pack(anchor="w", pady=2)
@@ -1148,10 +1178,9 @@ class App(object):
         mid.pack(fill="both", expand=True, pady=(6, 0))
         left = ttk.Frame(mid)
         left.pack(side="left", fill="both", expand=True)
-        cols2 = ("k", "v", "note")
+        cols2 = ("k", "v")
         self.tv_baby = ttk.Treeview(left, columns=cols2, show="headings", height=12)
-        for c, w, t in (("k", 190, "字段"), ("v", 110, "当前值"),
-                        ("note", 300, "说明")):
+        for c, w, t in (("k", 190, "字段"), ("v", 300, "当前值")):
             self.tv_baby.heading(c, text=t)
             self.tv_baby.column(c, width=w, anchor="w")
         vs_baby = ttk.Scrollbar(left, orient="vertical", command=self.tv_baby.yview)
@@ -1333,7 +1362,7 @@ class App(object):
             if key == "life":
                 v = self._life_text(v)
             self.tv_baby.insert("", "end", iid="b_%s" % key,
-                                values=(label, "" if v is None else v, key))
+                                values=(label, "" if v is None else v))
         sk = self.g.baby_skills(b)
         tpl_id = _IV.ival(b, "@actor_id")
         idx = [k for k, x in self.baby_rows if x is b]
@@ -1685,8 +1714,10 @@ class App(object):
         if not sel:
             return
         vals = self.tv_baby.item(sel[0], "values")
-        self.var_baby_key.set(vals[2])
-        self.var_baby_val.set(vals[1])
+        iid = sel[0]
+        key = iid[2:] if iid.startswith("b_") else iid
+        self.var_baby_key.set(key)
+        self.var_baby_val.set(vals[1] if len(vals) > 1 else "")
 
     def apply_baby(self):
         b = self._baby()
@@ -1720,12 +1751,13 @@ class App(object):
             self.load_baby()
             self.set_status("召唤兽预设：%s" % "、".join(did))
 
-    # -------------------------------------------------- 5 开关 / 变量
-    def _tab_switch(self):
+    # -------------------------------------------------- 5 开关 / 变量（已隐藏页签）
+    def _tab_switch(self, add_to_notebook=True):
         tk, ttk = self.tk, self.ttk
         f = ttk.Frame(self.nb, padding=8)
         self.tab_switch = f
-        self.nb.add(f, text="开关 / 变量")
+        if add_to_notebook:
+            self.nb.add(f, text="开关 / 变量")
 
         lf = ttk.Frame(f)
         lf.pack(side="left", fill="both", expand=True, padx=(0, 8))
@@ -1882,6 +1914,109 @@ class App(object):
         if fn is None:
             return True
         return bool(fn(title, text, parent=self.root))
+
+    # ------------------------------------------------------------ 悬浮说明
+    def _tip_hide(self, event=None):
+        w = getattr(self, "_tip_win", None)
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._tip_win = None
+        self._tip_key = None
+
+    def _bind_tip(self, widget, text):
+        """给任意 widget 绑一个简单的鼠标悬浮 tooltip。"""
+        def on_enter(_e):
+            try:
+                self._tip_show(text, widget.winfo_rootx() + 4,
+                               widget.winfo_rooty() + widget.winfo_height() + 2)
+            except Exception:
+                pass
+        def on_leave(_e):
+            self._tip_hide()
+        widget.bind("<Enter>", on_enter, add="")
+        widget.bind("<Leave>", on_leave, add="")
+
+    def _tip_show(self, text, x, y):
+        self._tip_hide()
+        if not text:
+            return
+        tw = self.tk.Toplevel(self.root)
+        tw.wm_overrideredirect(True)
+        try:
+            tw.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        lbl = self.tk.Label(tw, text=text, justify="left", wraplength=420,
+                            background="#fffde7", relief="solid", borderwidth=1,
+                            font=("Microsoft YaHei UI", 9), padx=6, pady=4)
+        lbl.pack()
+        tw.wm_geometry("+%d+%d" % (x + 12, y + 12))
+        self._tip_win = tw
+
+    def _bag_tip_motion(self, event):
+        """鼠标在背包格子上移动 → 浮窗显示物品完整说明（Data 表 @description）。"""
+        if not getattr(self, "g", None):
+            return
+        row = self.tv_pack.identify_row(event.y)
+        key = ("pack", self._bag_kind(), self.var_bag_page.get(), row)
+        if key == getattr(self, "_tip_key", None):
+            return
+        self._tip_key = key
+        if not row:
+            self._tip_hide()
+            return
+        vals = list(self.tv_pack.item(row, "values")) + [""] * 6
+        slot_txt, _idx, id_txt, name, cnt, content = vals[:6]
+        if not id_txt or id_txt == "（空）":
+            self._tip_hide()
+            return
+        try:
+            slot = int(slot_txt)
+        except (TypeError, ValueError):
+            self._tip_hide()
+            return
+        desc = ""
+        try:
+            node = self.g._item_node(self._bag_kind(), slot)
+            if node is not None:
+                desc = self.g.item_description(node)
+        except Exception:
+            desc = ""
+        parts = ["#%s  %s ×%s" % (id_txt, name, cnt)]
+        if desc:
+            parts.append(desc)
+        if content:
+            parts.append("运行时内容：%s" % content)
+        self._tip_show("\n".join(parts), event.x_root, event.y_root)
+
+    def _tpl_tip_motion(self, event):
+        """鼠标在物品模板列表上移动 → 浮窗显示模板完整说明。"""
+        if not getattr(self, "g", None):
+            return
+        row = self.tv_tpl.identify_row(event.y)
+        key = ("tpl", self._bag_kind(), self.var_tpl_kw.get(), row)
+        if key == getattr(self, "_tip_key", None):
+            return
+        self._tip_key = key
+        if not row:
+            self._tip_hide()
+            return
+        try:
+            iid = int(row[1:])
+        except ValueError:
+            self._tip_hide()
+            return
+        nm, desc = "", ""
+        pair = self.g._desc_map(self._bag_kind()).get(iid)
+        if pair:
+            nm, desc = pair
+        parts = ["#%d  %s" % (iid, nm)]
+        if desc:
+            parts.append(desc)
+        self._tip_show("\n".join(parts), event.x_root, event.y_root)
 
     def mark_dirty(self):
         self.root.title(TITLE + "  * 有未保存的修改")
@@ -2073,7 +2208,7 @@ class App(object):
         for step, fn in (("概览", self.fill_info), ("数据树", self.fill_tree),
                          ("角色", self.fill_actors), ("背包", self.fill_party),
                          ("召唤兽", self.fill_babies),
-                         ("开关/变量", self.fill_switches),
+                         ("开关/变量", self.fill_switches),   # 页签已隐藏，仅刷新内容
                          ("机器码", lambda: self.machine_show(quiet=True)),
                          ("存档管理", self.saves_refresh),
                          ("环境信息", self.refresh_env)):
@@ -2141,14 +2276,14 @@ class App(object):
                                             "只有「全部解析数据」页可用）")
             return
         L = self.sv.summary_lines()
-        L += ["", "存银 = %s（上限 %d）　步数 = %s"
+        L += ["", "金钱 = %s（上限 %d）　步数 = %s"
               % (self.sv.gold(), xj_game.MAX_GOLD, self.sv.steps()),
               "存档次数 = %s　战斗次数 = %s"
               % (self.sv.sys_get("@save_count"), self.sv.sys_get("@battle_count")),
               "开关/变量 = %d / %d" % self.sv.counts()]
         bad = self.sv.check_locks()
-        L.append("防作弊校验 = %s" % ("全部正常" if not bad
-                                      else "不一致 %d 处" % len(bad)))
+        L.append("Lock 校验和 = %s" % ("全部正常" if not bad
+                                        else "不一致 %d 处" % len(bad)))
         self.txt_info.delete("1.0", "end")
         self.txt_info.insert("1.0", "\n".join(L))
         self.var_gold.set(str(self.sv.gold()))
@@ -2157,9 +2292,10 @@ class App(object):
                           (self.var_battlecnt, "@battle_count")):
             v = self.sv.sys_get(name)
             var.set("" if v is None else str(v))
-        self.var_lock.set("防作弊校验：%s"
-                          % ("正常" if not bad
-                             else "不一致 %d 处，点右边按钮修复" % len(bad)))
+        self.var_lock.set("防作弊检测：%s"
+                          % ("Lock 校验和正常" if not bad
+                             else "Lock 不一致 %d 处，点「防作弊检测并修复」"
+                             % len(bad)))
         if self.g:
             ch = M.value_of(xj_save._deref(
                 xj_save.ivar(self.sv.section("system"), "@cheated")))
@@ -2177,15 +2313,29 @@ class App(object):
         if not self.sv:
             messagebox.showinfo("提示", "这个文件不是本作存档。", parent=self.root)
             return
+        clamped_msg = None
         try:
             if self.var_gold.get().strip():
-                self.sv.set_gold(int(self.var_gold.get(), 0))
+                want = parse_num(self.var_gold.get())
+                if self.g:
+                    # 统一入口：钳到安全值 + Lock @master + 游戏金钱账一起同步
+                    got, clamped = self.g.set_gold(want)
+                    if clamped:
+                        clamped_msg = (
+                            "金钱 %d 超过上限 %d，已自动改为 %d（上限的 5/6，"
+                            "留安全余量，游戏里怎么花钱赚钱都不会被判定作弊）"
+                            % (want, xj_game.MAX_GOLD, got))
+                        self.var_gold.set(str(got))
+                else:
+                    self.sv.set_gold(want)
             if self.var_steps.get().strip():
-                self.sv.set_steps(int(self.var_steps.get(), 0))
+                self.sv.set_steps(parse_num(self.var_steps.get()))
             if self.var_savecnt.get().strip():
-                self.sv.sys_set("@save_count", int(self.var_savecnt.get(), 0))
+                self.sv.sys_set("@save_count",
+                                parse_num(self.var_savecnt.get()))
             if self.var_battlecnt.get().strip():
-                self.sv.sys_set("@battle_count", int(self.var_battlecnt.get(), 0))
+                self.sv.sys_set("@battle_count",
+                                parse_num(self.var_battlecnt.get()))
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
@@ -2194,19 +2344,71 @@ class App(object):
         self.fill_info()
         self.fill_party()
         self.set_status("已应用（记得点「保存修改」）")
+        if clamped_msg:
+            messagebox.showinfo("金钱超限已自动调整", clamped_msg,
+                                parent=self.root)
 
-    def fix_locks(self):
-        if not self.sv:
+    def detect_and_fix_cheats(self):
+        """「防作弊检测并修复」：游戏的全部作弊触发点一次查完、一次修好。
+
+        检查/修复范围：
+          ① Lock 校验和（金钱等数值的 @master）；
+          ② $jiance 周期规则（金钱≤3000万，超限压到 2500 万；等级/召唤兽/
+             仓库页/五维）；
+          ③ 五类 Change 记账（金钱/物品/变量/人气/贡献）对齐实际值；
+          ④ @cheated 置回 Ruby false、@keyword 清空（VNE/NE!/修改器关键字）；
+          ⑤ 机器码绑定（换机器时追加本机码）。
+        """
+        if not self.g:
             return
-        bad = self.sv.check_locks()
-        n = self.sv.repair_locks()
-        if n:
-            self.doc.dirty = True
+        try:
+            rows = self.g.anti_cheat_report()
+        except Exception as e:
+            self.err(e)
+            return
+        bad = [r for r in rows if r[3]]
+        if not bad:
+            self.fill_info()
+            messagebox.showinfo(
+                "防作弊检测并修复",
+                "共检查 %d 项，未发现异常 ✔\n"
+                "（Lock 校验和、金钱等上限、五类记账、作弊标记 @cheated/@keyword、"
+                "机器码）" % len(rows), parent=self.root)
+            return
+        listing = "\n".join("  · %s：当前 %s，应为 %s" % (r[0], r[1], r[2])
+                            for r in bad[:15])
+        if len(bad) > 15:
+            listing += "\n  · …（其余 %d 项）" % (len(bad) - 15)
+        if not self.confirm(
+                "检测到 %d 项作弊风险" % len(bad),
+                "发现这些会被游戏判定作弊的问题：\n\n%s\n\n"
+                "现在全部修复？\n"
+                "（金钱超限会压到 %d；Lock、五类记账会重算对齐；"
+                "@cheated/@keyword 会清掉；修复前会自动备份）"
+                % (listing, xj_game.SAFE_GOLD)):
+            return
+        try:
+            # 修之前先在“存档管理”目录留一份磁盘原件（90 秒去重）
+            try:
+                xj_backup.auto_backup_once(self.doc.path)
+            except Exception:
+                pass
+            done = self.g.fix_anti_cheat()
+        except Exception as e:
+            messagebox.showerror("修复失败", human(str(e)), parent=self.root)
+            return
+        if done:
             self.mark_dirty()
-        self.fill_info()
-        messagebox.showinfo("防作弊校验",
-                            "检查到不一致 %d 处，已修复 %d 处。\n（记得点「保存修改」）"
-                            % (len(bad), n), parent=self.root)
+        self.refresh_panels()
+        messagebox.showinfo(
+            "防作弊检测并修复",
+            "共检查 %d 项、修复 %d 项：\n  " % (len(rows), len(done))
+            + ("\n  ".join(done) if done else "（无需修改）")
+            + "\n\n记得点「保存修改」写回存档。", parent=self.root)
+
+    # 旧名保留（历史版本按钮/测试入口），等价于新的综合检测修复
+    def fix_locks(self):
+        self.detect_and_fix_cheats()
 
     # ================================================== 防作弊体检
     def guard_check(self):
@@ -2219,23 +2421,28 @@ class App(object):
         except Exception as e:
             self.err(e)
             return
-        for name, cur, limit, bad, why in rows:
-            self.tv_guard.insert("", "end", values=(
-                name, cur, limit, ("❌ " + why) if bad else why))
+        for i, (name, cur, limit, bad, why) in enumerate(rows):
+            iid = "g%d" % i
+            self._guard_notes[iid] = ("❌ " + why) if bad else why
+            self.tv_guard.insert("", "end", iid=iid,
+                                 values=(name, cur, limit))
         n_bad = len([r for r in rows if r[3]])
         over = [r for r in rows if r[3]]
-        flag = [r for r in over if "作弊标记" in r[0]]
-        others = [r for r in over if "作弊标记" not in r[0]]
+        flag = [r for r in over
+                if ("作弊标记" in r[0] or "作弊记录" in r[0])]
+        others = [r for r in over
+                  if ("作弊标记" not in r[0] and "作弊记录" not in r[0])]
         tips = []
         if flag:
-            tips.append("⚠ 存档带着作弊标记 @cheated：游戏 20 分钟后开始“惩罚”"
-                        "（画面转圈/缩放），25 分钟后弹「存档异常」并退出，"
-                        "战斗中还会报 disposed sprite 崩掉 → 点「清除作弊标记」")
+            tips.append("⚠ 存档带着作弊标记 @cheated / @keyword 记录：游戏 20 分钟后"
+                        "开始“惩罚”（画面转圈/缩放），25 分钟后弹「存档异常」并退出，"
+                        "战斗中还会报 disposed sprite 崩掉 → 点「防作弊检测并修复」")
         if others:
-            tips.append("⚠ 还有 %d 项超限：%s → 点「一键按规则修复」"
+            tips.append("⚠ 还有 %d 项异常（超限/记账不符/校验和）：%s → "
+                        "点「防作弊检测并修复」或「一键按规则修复」"
                         % (len(others), "、".join(r[0] for r in others)[:130]))
         if not tips:
-            tips.append("✔ 体检 %d 项全部正常" % len(rows))
+            tips.append("✔ 体检 %d 项全部正常（含 Lock 校验和与五类记账）" % len(rows))
         try:
             self.var_cheat.set("\n".join(tips))
         except Exception:
@@ -2362,7 +2569,7 @@ class App(object):
         except Exception:
             return False
         over = [r for r in rows if r[3]]
-        flag = [r for r in over if "作弊标记" in r[0]]
+        flag = [r for r in over if ("作弊标记" in r[0] or "作弊记录" in r[0])]
         if not flag:
             return False
         if self.confirm(
@@ -2387,24 +2594,52 @@ class App(object):
         """
         return xj_nodes.children_of(node)
 
+    def _tree_tip_motion(self, event):
+        """数据树节点悬浮 → 显示说明（浮窗）。"""
+        iid = self.tree.identify_row(event.y)
+        note = self._tree_notes.get(iid) if iid else None
+        if not note or note.endswith(":?") or note == "…":
+            self._tip_hide()
+            return
+        # 只在不同 iid 时刷新 tooltip，防闪烁
+        if getattr(self, "_tip_key", None) == ("tree", iid):
+            return
+        self._tip_key = ("tree", iid)
+        self._tip_show(note, self.tree.winfo_rootx() + event.x + 10,
+                       self.tree.winfo_rooty() + event.y + 10)
+
+    def _guard_tip_motion(self, event):
+        """防作弊体检条目悬浮 → 浮窗显示该条的具体说明。"""
+        iid = self.tv_guard.identify_row(event.y)
+        note = self._guard_notes.get(iid) if iid else None
+        if not note:
+            self._tip_hide()
+            return
+        if getattr(self, "_tip_key", None) == ("guard", iid):
+            return
+        self._tip_key = ("guard", iid)
+        self._tip_show(note, self.tv_guard.winfo_rootx() + event.x + 10,
+                       self.tv_guard.winfo_rooty() + event.y + 10)
+
     def _add_stub(self, iid):
         node = self.nodes.get(iid)
         if node is None or not self._kids(node):
             return
         self.tree.insert(iid, "end", iid="%s:?" % iid, text="…（展开以加载）",
-                         values=("", "", ""))
+                         values=("", ""))
 
     def fill_tree(self):
         self.tree.delete(*self.tree.get_children())
         self.nodes.clear()
         self.loaded.clear()
+        self._tree_notes = {}
         if not self.doc:
             return
         for i, node in enumerate(self.doc.top_level()):
             iid = "r%d" % i
             self.tree.insert("", "end", iid=iid,
                              text="#%d %s" % (i, xj_model.describe(node)),
-                             values=("", "", ""), open=False)
+                             values=("", ""), open=False)
             self.nodes[iid] = node
             self._add_stub(iid)
 
@@ -2429,18 +2664,18 @@ class App(object):
         for n, row in enumerate(kids[:limit]):
             label, kid, note = row[0], row[1], row[2]
             iid2 = "%s|%d" % (iid, n)
-            # 说明列：优先中文注释，没有就给节点类型（至少不是空白）
             if not note:
                 note = xj_nodes.type_label(kid)
+            self._tree_notes[iid2] = note
             self.tree.insert(iid, "end", iid=iid2, text=label,
                              values=(xj_nodes.type_label(kid),
-                                     short(xj_nodes.brief(kid, 60)), note))
+                                     short(xj_nodes.brief(kid, 60))))
             self.nodes[iid2] = kid
             self._add_stub(iid2)
         if len(kids) > limit:
             self.tree.insert(iid, "end", iid="%s|more" % iid,
                              text="…（共 %d 项，只显示前 %d 项，用搜索定位）"
-                                  % (len(kids), limit), values=("", "", ""))
+                                  % (len(kids), limit), values=("", ""))
 
     def _collapse(self, iid):
         for c in self.tree.get_children(iid):
@@ -2648,14 +2883,18 @@ class App(object):
                 if raw == "":
                     continue
                 if k == "@exp":
-                    self.g.set_exp(a, int(raw, 0))
+                    self.g.set_exp(a, parse_num(raw))
+                elif k == "@level":
+                    self.g.set_actor_level(a, parse_num(raw))
                 else:
                     self.sv.set_actor_field(a, k, raw)
             for k, var in self.attr_vars.items():
                 raw = var.get().strip()
                 if raw == "":
                     continue
-                self.sv.set_attr(a, k, int(raw, 0))
+                # @活力 等浮点字段原样回写也不能炸（parse_num 吃 '200.0'，
+                # set_attr 按节点原类型写回）
+                self.sv.set_attr(a, k, parse_num(raw))
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
@@ -2671,7 +2910,7 @@ class App(object):
             return
         try:
             if what == "maxlv":
-                self.sv.set_actor_field(a, "@level", xj_game.MAX_LEVEL_ACTOR)
+                self.g.set_actor_level(a, xj_game.MAX_LEVEL_ACTOR)
             elif what == "exp":
                 self.g.add_exp(a, 10000)
             elif what == "heal":
@@ -2693,12 +2932,13 @@ class App(object):
     # ================================================== 4 队伍 / 物品
     def fill_party(self):
         """刷背包页（当前页 20 格 + 物品计数校验状态）。"""
+        self._tip_hide()
         self.tv_pack.delete(*self.tv_pack.get_children())
         if not self.sv or self.g is None:
             return
         page = self.var_bag_page.get()
         kind = self.var_bag_kind.get()
-        self.var_party.set("存银 = %s　步数 = %s　出战成员 = %s　"
+        self.var_party.set("金钱 = %s　步数 = %s　出战成员 = %s　"
                            "仓库页号 = %s"
                            % (self.sv.gold(), self.sv.steps(),
                               self.sv.party_member_ids(),
@@ -2738,6 +2978,7 @@ class App(object):
         """右侧模板列表：可搜索、双击写进当前选中的格子（仿画迹1）。"""
         if not hasattr(self, "tv_tpl"):
             return
+        self._tip_hide()
         self.tv_tpl.delete(*self.tv_tpl.get_children())
         if not self.sv or self.g is None:
             return
@@ -3471,7 +3712,7 @@ def selftest_lines(app):
         L.append("SaveDoc: 未建立（不是本作存档？）")
     else:
         g = app.g
-        L.append("存银 = %s" % sv.gold())
+        L.append("金钱 = %s" % sv.gold())
         L.append("角色数 = %d" % len(sv.actors()))
         L.append("背包 = %d 件 / 空槽 %d 个"
                  % (len(g.bag("Items")), len(g.empty_slots("Items"))))

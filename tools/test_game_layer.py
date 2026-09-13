@@ -144,12 +144,14 @@ def main():
     check("体检能标出超限项", any(r[3] for r in rep),
           "、".join(r[0] for r in rep if r[3])[:60] or "（没有超限项）")
 
-    # 故意越界：存银拉满到上限之上
-    sv.set_gold(xj_game.MAX_GOLD + 1)
+    # 故意越界：金钱拉满到上限之上（走底层 sv.set_gold，模拟外部直接改值，
+    # 只动 Lock 不动游戏记账 —— 这正是旧版工具留下的坑）
     sv.set_gold(xj_game.MAX_GOLD + 1)
     rep2 = g.anti_cheat_report()
-    check("存银超限能被检出",
-          any(r[0] == "存银" and r[3] for r in rep2))
+    check("金钱超限能被检出",
+          any(r[0] == "金钱" and r[3] for r in rep2))
+    check("金钱记账不一致能被检出",
+          any(r[0].startswith("金钱记账") and r[3] for r in rep2))
     # 故意做一个计数器不一致
     if sec0 is not None:
         g._set_security_total(_change_of(g, iid0), sec0 + 5)   # 只动计数
@@ -160,10 +162,49 @@ def main():
     rep4 = g.anti_cheat_report()
     check("一键修复后没有超限项", not any(r[3] for r in rep4),
           "；".join(r[0] for r in rep4 if r[3])[:80] or "、".join(done)[:60])
-    check("修复后存银回到上限内", sv.gold() <= xj_game.MAX_GOLD, sv.gold())
+    check("修复后金钱 = 上限 5/6 安全值（不贴上限）",
+          sv.gold() == xj_game.SAFE_GOLD, sv.gold())
+    check("修复后金钱账与实际金钱一致", g.security_gold() == sv.gold(),
+          "账=%s 钱=%s" % (g.security_gold(), sv.gold()))
+    check("修复后 Lock 校验和一致", sv.check_locks() == [])
     check("作弊标记被清掉",
           M.value_of(xj_save._deref(
               xj_save.ivar(sv.section("system"), "@cheated"))) is False)
+    kw_node = xj_save._deref(xj_save.ivar(sv.section("system"), "@keyword"))
+    check("作弊记录 @keyword 整个清空",
+          isinstance(kw_node, M.ArrayNode) and not kw_node.items,
+          "%r" % ([x for x in kw_node.items]
+                  if isinstance(kw_node, M.ArrayNode) else kw_node))
+
+    # 统一入口 GameEditor.set_gold：超限自动钳到 2/3，Lock + 金钱账一次同步
+    got, clamped = g.set_gold(999999999)
+    check("set_gold 超上限自动钳到 2/3 安全值",
+          got == xj_game.SAFE_GOLD and clamped is True, str((got, clamped)))
+    check("钳制后 Lock 与金钱账都同步",
+          sv.check_locks() == [] and g.security_gold() == got)
+    got2, clamped2 = g.set_gold(123456)
+    check("set_gold 未超限原样写入",
+          got2 == 123456 and clamped2 is False, str((got2, clamped2)))
+    check("正常改钱金钱账也跟着同步", g.security_gold() == 123456)
+
+    # Change 记账支持负数（真实档里金钱账本来就是负的）
+    ch_gold = xj_save._deref(xj_game.hash_get(g.security_node(), "gold"))
+    g._change_set(ch_gold, -987654321)
+    check("Change 负数记账读写往返", g.change_value(ch_gold) == -987654321,
+          str(g.change_value(ch_gold)))
+    g.sync_gold_security()
+    check("负数乱账能被 sync_gold_security 对齐",
+          g.security_gold() == sv.gold())
+
+    # 五类账一次性对齐
+    summary = g.resync_all_security()
+    check("resync_all_security 返回 (账名, 条数) 列表",
+          isinstance(summary, list)
+          and all(cn in ("金钱", "物品计数", "变量", "人气", "贡献")
+                  and isinstance(n, int) for cn, n in summary),
+          repr(summary))
+    check("全量对齐后体检无记账类异常",
+          not any(r[3] for r in g.anti_cheat_report()))
 
     # ---------------- v0.5：机器码
     now, err, ids, ok = g.machine_status()

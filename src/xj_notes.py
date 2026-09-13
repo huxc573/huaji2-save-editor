@@ -9,7 +9,7 @@
 
 用法（界面里）：
     from xj_notes import note_of_ivar, note_of_class, SECTION_NOTES
-    note_of_ivar("@gold")            # -> "存银（金钱）"
+    note_of_ivar("@gold")            # -> "金钱"
     note_of_ivar("@体质")            # -> "体质（五维之一）"
     note_of_class("Game_Baby")       # -> "召唤兽"
 """
@@ -25,7 +25,7 @@ SECTION_NOTES = {
     "variables": "变量（本作只用了 3 个）",
     "self_switches": "独立开关（每个地图事件自己的 A/B/C/D）",
     "actors": "角色数据（8 个槽位，@data[角色id]）",
-    "party": "队伍（存银、步数、背包、出战成员…）",
+    "party": "队伍（金钱、步数、背包、出战成员…）",
     "troop": "当前战斗的敌群",
     "map": "当前地图（地图 id、事件、卷动位置…）",
     "player": "主角（坐标、朝向、队伍跟随）",
@@ -36,8 +36,8 @@ SECTION_NOTES = {
 # --------------------------------------------------------------------------
 IVAR_NOTES = {
     # ---- 金钱 / 队伍
-    "@gold": "存银（金钱，游戏里就叫\"存银\"，Lock 包装）",
-    "@limit_gold": "存银上限/累计计数（游戏里另有的一笔）",
+    "@gold": "金钱（Lock 包装；改值要同步 @master 校验和与 security[:gold] 记账）",
+    "@limit_gold": "金钱上限/累计计数（游戏里另有的一笔）",
     "@value": "数值本体",
     "@master": "防作弊校验和（= 数值*91+45+种子/800，改数值要同步重算）",
     "@steps": "步数",

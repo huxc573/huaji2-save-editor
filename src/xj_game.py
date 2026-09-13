@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v0.4 新增的"游戏内容"编辑层：存银 / 背包 / 经验 / 召唤兽 / 防作弊体检。
+"""v0.4 新增的"游戏内容"编辑层：金钱 / 背包 / 经验 / 召唤兽 / 防作弊体检。
 
 和 `xj_save.SaveDoc` 的分工：
   * `xj_save` 管**存档骨架**（分区、Lock、开关变量、角色基础字段）；
@@ -43,6 +43,9 @@ from xj_save import _deref, _as_str, ivar, hash_get, hash_put_pairs  # noqa: E40
 MAX_LEVEL_ACTOR = xj_notes.MAX_LEVEL_ACTOR
 MAX_LEVEL_BABY = xj_notes.MAX_LEVEL_BABY
 MAX_GOLD = xj_notes.MAX_GOLD
+# 改金钱一旦超过上限，不压到"贴着上限"，而是压到上限的 5/6（= 25,000,000）：
+# 离 30,000,000 的判定线留出余量，游戏里再正常获得金钱也不会一脚踩过线。
+SAFE_GOLD = MAX_GOLD * 5 // 6       # 留 1/6 安全余量，避免贴着上限被周期检查
 MAX_ITEM = xj_notes.MAX_ITEM
 MAX_WAREHOUSE_PAGE = 3
 MAX_BABY_LIFE = xj_notes.MAX_BABY_LIFE
@@ -135,7 +138,26 @@ class GameEditor(object):
         self.sv = sv
         self.doc = sv.doc
 
-    # ==================================================== 存银 / 上限
+    # ==================================================== 金钱 / 上限
+    def set_gold(self, value):
+        """改金钱的统一入口（界面层都该走这里，而不是直接 sv.set_gold）。
+
+        三件事一次做齐，缺一个都会被游戏判作弊：
+          1. 超过 MAX_GOLD（30,000,000）→ 自动改成 SAFE_GOLD（上限的 5/6，
+             留安全余量），返回 (实际写入值, 是否被钳)；
+          2. sv.set_gold 同步 Lock 的 @master 校验和；
+          3. sync_gold_security 把游戏的金钱账 security[:gold] 对齐 ——
+             以前只做了第 2 步，游戏里一花钱/赚钱就因账实不符被记 'NE!'。
+        """
+        value = int(value)
+        clamped = False
+        if value > MAX_GOLD:
+            value = SAFE_GOLD
+            clamped = True
+        self.sv.set_gold(value)
+        self.sync_gold_security()
+        return value, clamped
+
     def limit_gold(self):
         return get_int(ivar(self.sv.section("party"), "@limit_gold"))
 
@@ -218,7 +240,7 @@ class GameEditor(object):
         out = []
         for i, node in items:
             nm = xj_db.s(node, "@name") or ("#%d" % i)
-            desc = (xj_db.s(node, "@description") or "")[:40].replace("\n", " ")
+            desc = (xj_db.s(node, "@description") or "").strip().replace("\r\n", "\n")
             if kw and kw not in nm.lower() and kw not in str(i) \
                     and kw not in desc.lower():
                 continue
@@ -511,6 +533,42 @@ class GameEditor(object):
 
     def item_name(self, kind, item_id):
         return self._name_map(kind).get(item_id, "?")
+
+    def _desc_map(self, kind):
+        """Data 表的 {id: (名称, 完整说明)}（懒加载缓存，悬浮提示用）。"""
+        if not getattr(self, "_desc_cache", None):
+            self._desc_cache = {}
+        if kind not in self._desc_cache:
+            import xj_db
+            m = {}
+            try:
+                _root, items = xj_db.load(kind)
+                for i, node in items:
+                    nm = xj_db.s(node, "@name") or ("#%d" % i)
+                    desc = (xj_db.s(node, "@description") or "").strip()
+                    m[i] = (nm, desc)
+            except Exception:
+                pass
+            self._desc_cache[kind] = m
+        return self._desc_cache[kind]
+
+    def item_description(self, node):
+        """背包物件的完整说明（按对象自己的类选 Items/Weapons/Armors 表，
+        选表逻辑与 item_display_name 一致；查不到再退回对象自带 @description）。"""
+        n = _deref(node)
+        if n is None:
+            return ""
+        iid = get_int(ivar(n, "@id"), -1)
+        cls = getattr(n, "cls", "") or ""
+        keys = []
+        if cls in self.CLASS_TO_DB:
+            keys.append(self.CLASS_TO_DB[cls])
+        keys += [k for k in ("Items", "Weapons", "Armors") if k not in keys]
+        for k in keys:
+            pair = self._desc_map(k).get(iid)
+            if pair and pair[1]:
+                return pair[1]
+        return (_as_str(ivar(n, "@description")) or "").strip()
 
     def set_count(self, kind, slot, count):
         """改某一格的数量（标量改动，安全）+ 同步物品计数校验。"""
@@ -883,38 +941,226 @@ class GameEditor(object):
              M.BignumNode(random.getrandbits(127) | 1)),
         ]
 
-    # ==================================================== 物品计数校验（Change）
-    def security_hash(self):
+    # ==================================================== 记账校验（Change）
+    # 游戏的 $game_system.security 是一个 Hash，一共 5 类账：
+    #   :gold       单个 Change，@code='$game_party.gold' —— 账必须 == 当前金钱
+    #   :items      {道具id => Change} —— 账必须 == 背包+仓库持有数
+    #   :renqi      {角色id => Change} —— 账必须 == 该角色 @人气
+    #   :gongxian   {角色id => Change} —— 账必须 == 该角色 @贡献
+    #   :variables  {变量id => Change} —— 账必须 == $game_variables[id]
+    # Change 每次数值变动都会 eval(@code) 和自己比，对不上立刻
+    # `keyword << 'NE!'` + `@cheated = 帧号`。改金钱/属性后**必须把账同步**。
+    def security_node(self):
         sec = _deref(ivar(self.sv.section("system"), "@security"))
-        if not isinstance(sec, M.HashNode):
-            return None, None
-        items = _deref(hash_get(sec, "items"))
-        return (sec, items if isinstance(items, M.HashNode) else None)
+        return sec if isinstance(sec, M.HashNode) else None
 
-    def security_total(self, item_id):
-        """游戏记录的"该物品累计获得数量"（读不出来返回 None）。"""
-        _sec, items = self.security_hash()
-        if items is None:
+    def security_sub(self, key):
+        """取 security 里的子表（:items / :renqi / :gongxian / :variables）。"""
+        sec = self.security_node()
+        if sec is None:
             return None
-        ch = _deref(hash_get(items, item_id))
-        if ch is None:
+        n = _deref(hash_get(sec, key))
+        return n if isinstance(n, M.HashNode) else None
+
+    def security_hash(self):
+        """兼容旧接口：返回 (@security 节点, items 子表)。"""
+        return self.security_node(), self.security_sub("items")
+
+    @staticmethod
+    def change_value(ch):
+        """解密一个 Change 的 @value；**支持负数**（首位可以是 '-'）。
+
+        游戏的 `Change#show` 是 `load.map{ AES_ECB.decrypt }.join.to_i`，
+        所以每位解出来拼成字符串再 int 即可；空数组 = 0（新建未记账）。
+        """
+        ch = _deref(ch)
+        if not isinstance(ch, M.ObjNode):
             return None
         val = _deref(ivar(ch, "@value"))
         if not isinstance(val, M.ArrayNode):
             return None
-        digits = []
+        chars = []
         for x in val.items:
-            d = xj_aes.decrypt_digit(_as_str(x))
-            if d is None:
+            t = xj_aes.decrypt_token(_as_str(x))
+            if t is None:
                 return None
-            digits.append(d)
-        return int("".join(digits) or "0")
+            chars.append(t)
+        txt = "".join(chars)
+        if not txt or txt == "-":
+            return 0
+        try:
+            return int(txt)
+        except ValueError:
+            return None
 
-    def _set_security_total(self, ch, total):
+    @staticmethod
+    def _change_set(ch, total):
+        """把 Change 的 @value 按数字重写（逐位 AES；负数带 '-' 位）。"""
+        ch = _deref(ch)
         arr = M.ArrayNode([hex_str_node(xj_aes.encrypt_digit(d))
                            for d in str(int(total))])
         if not set_ivar(ch, "@value", arr):
             ch.ivars.append(("@value", arr))
+
+    def security_total(self, item_id):
+        """游戏记录的"该物品累计获得数量"（读不出来返回 None）。"""
+        items = self.security_sub("items")
+        if items is None:
+            return None
+        ch = _deref(hash_get(items, item_id))
+        return self.change_value(ch) if ch is not None else None
+
+    def _set_security_total(self, ch, total):
+        self._change_set(ch, total)
+
+    # ---------------- 金钱账（security[:gold]）
+    def security_gold(self):
+        """游戏记的金钱账（读不出来返回 None；空账 = 0）。"""
+        sec = self.security_node()
+        if sec is None:
+            return None
+        ch = _deref(hash_get(sec, "gold"))
+        return self.change_value(ch) if ch is not None else None
+
+    def sync_gold_security(self):
+        """把 security[:gold] 的账对齐到当前金钱。返回是否改动了。
+
+        这是"用工具改完金钱、玩一会儿还是被判作弊"的根因：
+        游戏里下一次 gain_gold 时 `Change.new(show+delta, '$game_party.gold')`
+        会立刻 eval 比对，账实不符就记 'NE!'。
+        """
+        want = int(self.sv.gold())
+        sec = self.security_node()
+        if sec is None:
+            return False
+        ch = _deref(hash_get(sec, "gold"))
+        if isinstance(ch, M.ObjNode):
+            if self.change_value(ch) == want:
+                return False
+            self._change_set(ch, want)
+            self.doc.mark_structural()
+            return True
+        # 老档可能没有这笔账 —— 按 init_security 的样子补一个（键是符号 :gold）
+        ch = M.ObjNode("Change")
+        ch.ivars = [("@code", str_node("$game_party.gold")),
+                    ("@value", M.ArrayNode(
+                        [hex_str_node(xj_aes.encrypt_digit(d))
+                         for d in str(want)]))]
+        sec.pairs.append((M.SymbolNode("gold"), ch))
+        self.doc.mark_structural()
+        return True
+
+    # ---------------- 变量账（security[:variables]）
+    def security_variable_rows(self):
+        """[(变量id, 记账值, 实际值), ...]（只列游戏已建账的变量）。"""
+        vh = self.security_sub("variables")
+        out = []
+        if vh is None:
+            return out
+        for k, v in vh.pairs:
+            vid = M.value_of(_deref(k))
+            if not isinstance(vid, int):
+                continue
+            rec = self.change_value(v)
+            want = self.sv.get_variable(vid)
+            out.append((vid, rec, want if isinstance(want, int) else None))
+        out.sort()
+        return out
+
+    def sync_security_variables(self):
+        """把已建账的变量对齐到 $game_variables 当前值。返回改了几条。"""
+        n = 0
+        for _vid, ch, want in self._iter_security_changes("variables"):
+            if isinstance(want, int) and self.change_value(ch) != want:
+                self._change_set(ch, want)
+                n += 1
+        if n:
+            self.doc.mark_structural()
+        return n
+
+    # ---------------- 人气 / 贡献账（security[:renqi|gongxian]）
+    def _actor_attr_int(self, actor, attr_name):
+        obj = _deref(ivar(actor, "@attr"))
+        return get_int(ivar(obj, attr_name)) if obj is not None else None
+
+    def security_actor_rows(self, sec_key, attr_name):
+        """[(角色id, 角色名, 记账值, 实际值), ...]。"""
+        h = self.security_sub(sec_key)
+        out = []
+        if h is None:
+            return out
+        actors = dict(self.sv.actors())
+        for k, v in h.pairs:
+            aid = M.value_of(_deref(k))
+            if not isinstance(aid, int):
+                continue
+            a = actors.get(aid)
+            want = self._actor_attr_int(a, attr_name) if a is not None else None
+            out.append((aid, self.sv.actor_name(a) if a is not None
+                        else ("角色%d" % aid),
+                        self.change_value(v), want))
+        out.sort()
+        return out
+
+    def sync_security_actors(self, sec_key, attr_name):
+        """把某角色类账（人气/贡献）对齐到角色当前属性。返回改了几条。"""
+        h = self.security_sub(sec_key)
+        if h is None:
+            return 0
+        actors = dict(self.sv.actors())
+        n = 0
+        for k, v in h.pairs:
+            aid = M.value_of(_deref(k))
+            a = actors.get(aid) if isinstance(aid, int) else None
+            if a is None:
+                continue
+            want = self._actor_attr_int(a, attr_name)
+            if want is not None and self.change_value(v) != want:
+                self._change_set(v, want)
+                n += 1
+        if n:
+            self.doc.mark_structural()
+        return n
+
+    def _iter_security_changes(self, sec_key):
+        """遍历某子表里的 (键值, Change节点, 实际值) —— 实际值按子表类型取。"""
+        h = self.security_sub(sec_key)
+        if h is None:
+            return
+        actors = dict(self.sv.actors())
+        attr = {"renqi": "@人气", "gongxian": "@贡献"}.get(sec_key)
+        for k, v in h.pairs:
+            kv = M.value_of(_deref(k))
+            if not isinstance(kv, int):
+                continue
+            if sec_key == "variables":
+                want = self.sv.get_variable(kv)
+                want = want if isinstance(want, int) else None
+            elif attr:
+                a = actors.get(kv)
+                want = self._actor_attr_int(a, attr) if a is not None else None
+            else:
+                want = None
+            yield kv, v, want
+
+    def resync_all_security(self):
+        """把 5 类账全部对齐到存档实际状态。返回 [(账名, 改了几条), ...]。"""
+        out = []
+        n_items = self.resync_security()
+        if n_items:
+            out.append(("物品计数", n_items))
+        if self.sync_gold_security():
+            out.append(("金钱", 1))
+        n_var = self.sync_security_variables()
+        if n_var:
+            out.append(("变量", n_var))
+        n_renqi = self.sync_security_actors("renqi", "@人气")
+        if n_renqi:
+            out.append(("人气", n_renqi))
+        n_gx = self.sync_security_actors("gongxian", "@贡献")
+        if n_gx:
+            out.append(("贡献", n_gx))
+        return out
 
     def bump_security(self, item_id, delta):
         """兼容旧接口：不再是加 delta，而是直接把计数对齐到实际总数。"""
@@ -1034,6 +1280,13 @@ class GameEditor(object):
             return 0
         return M.value_of(_deref(h.pairs[0][1])) or 0
 
+    def set_actor_level(self, actor, value):
+        """改角色等级，自动触发潜能/五维调整（和召唤兽一样的规则）。"""
+        old_lv = get_int(ivar(actor, "@level"), 0)
+        self.sv.set_actor_field(actor, "@level", int(value))
+        attr = _deref(ivar(actor, "@attr"))
+        self._apply_level_delta(attr, int(value) - old_lv)
+
     def set_exp(self, actor, value):
         h = _deref(ivar(actor, "@exp"))
         if not isinstance(h, M.HashNode) or not h.pairs:
@@ -1149,7 +1402,28 @@ class GameEditor(object):
                 return None, parts[-1]
         return node, parts[-1]
 
+    def _apply_level_delta(self, attr_node, delta):
+        """level 改了后，潜能/五维跟着调整。
+        升级：每级 +5 潜能 +1 五维；降级：洗点（五维 + 潜能全清零 = 超级金柳露语义）。"""
+        if delta == 0 or attr_node is None:
+            return
+        if delta > 0:
+            for k in ("@潜能", "@体质", "@法力", "@力量", "@耐力", "@敏捷"):
+                n = ivar(attr_node, k[1:])
+                if n is None: continue
+                cur = get_int(n, 0)
+                add = delta * 5 if k == "@潜能" else delta
+                self.doc.set_value(n, cur + add)
+        else:
+            for k in ("@潜能", "@体质", "@法力", "@力量", "@耐力", "@敏捷"):
+                n = ivar(attr_node, k[1:])
+                if n is None: continue
+                self.doc.set_value(n, 0)
+
     def set_baby(self, baby, key, value):
+        old_lv = None
+        if key == "level":
+            old_lv = self.baby_value(baby, "level")
         for k, _label, path, typ in self.BABY_FIELDS:
             if k != key:
                 continue
@@ -1167,6 +1441,14 @@ class GameEditor(object):
                 self.doc.set_value(node, float(value))
             else:
                 self.doc.set_value(node, int(value))
+            # level 改了 → 潜能/五维自动跟着调整
+            if old_lv is not None:
+                try:
+                    new_lv = int(value)
+                    attr = _deref(ivar(baby, "@attr"))
+                    self._apply_level_delta(attr, new_lv - old_lv)
+                except Exception:
+                    pass
             return value
         raise KeyError("不认识的召唤兽字段 %r" % key)
 
@@ -1233,14 +1515,37 @@ class GameEditor(object):
         return total
 
     def anti_cheat_report(self):
-        """返回 [(项目, 当前, 上限, 是否超限, 说明), ...]。"""
+        """返回 [(项目, 当前, 上限, 是否超限, 说明), ...]。
+
+        覆盖游戏的全部作弊触发点：
+          ① Lock 校验和（@master）；
+          ② $jiance 周期检查（等级/召唤兽等级/金钱/仓库页/五维）；
+          ③ Change 记账（金钱/物品/变量/人气/贡献，对不上记 'NE!'）；
+          ④ @cheated 作弊标记 + @keyword；
+          ⑤ 机器码绑定。
+        """
         rows = []
 
         def row(name, cur, limit, why):
             rows.append((name, cur, limit, cur is not None and cur > limit, why))
 
+        def eq_row(name, cur, want, why):
+            rows.append((name, cur, want,
+                         cur is None or cur != want, why))
+
+        # ① Lock 校验和
+        bad_locks = self.sv.check_locks()
+        rows.append(("Lock 校验和（金钱等关键数值）",
+                     "不一致 %d 处" % len(bad_locks) if bad_locks else "一致",
+                     "一致", bool(bad_locks),
+                     ("关键数值包在 Lock 里（@master = 值*91+45+种子/800），"
+                      "直接改值会对不上：%r" % (bad_locks[:3],))
+                     if bad_locks else "所有 Lock 的 @master 都对得上"))
+
+        # ② $jiance 周期检查
         gold = self.sv.gold()
-        row("存银", gold, MAX_GOLD, "游戏每 300 帧检查一次，超了算作弊")
+        row("金钱", gold, MAX_GOLD, "游戏每 300 帧检查一次，超了算作弊；"
+                                    "工具改钱超过上限会自动压到 %d" % SAFE_GOLD)
         row("仓库页号 warehouse_page", self.warehouse_page(), MAX_WAREHOUSE_PAGE,
             "同上")
         for aid, a in self.sv.actors():
@@ -1255,12 +1560,50 @@ class GameEditor(object):
                 row("%s 的召唤兽「%s」等级" % (nm, self.baby_name(b)),
                     get_int(ivar(b, "@level")), MAX_LEVEL_BABY,
                     "上限来自 Config::Game::MAX_LEVEL_BABY")
+
+        # ③ Change 记账
+        # 金钱账：最容易漏 —— 以前工具改钱不同步它，玩一会儿必被记 'NE!'
+        rec_gold = self.security_gold()
+        eq_row("金钱记账 security[:gold]", rec_gold, gold,
+               "游戏里一花钱/赚钱就会拿这笔账和实际金钱比对，"
+               "对不上立刻判作弊（改金钱时必须同步）")
+        for vid, rec, want in self.security_variable_rows():
+            if rec is not None and want is not None and rec != want:
+                rows.append(("变量记账：$game_variables[%d]" % vid,
+                             rec, want, True,
+                             "游戏改变量时会逐笔核对这笔账，"
+                             "修复会把账对齐到当前值 %d" % want))
+        for sec_key, cn, attr in (("renqi", "人气", "@人气"),
+                                  ("gongxian", "贡献", "@贡献")):
+            for aid, nm, rec, want in self.security_actor_rows(sec_key, attr):
+                if rec is not None and want is not None and rec != want:
+                    rows.append(("%s记账：%s (角色%d)" % (cn, nm, aid),
+                                 rec, want, True,
+                                 "游戏加/减%s时会核对这笔账，修复会对齐到当前值 %d"
+                                 % (cn, want)))
+        for iid, nm, rec, act in self.security_rows():
+            if rec is not None and rec != act:
+                rows.append(("物品计数校验：%s (id=%d)" % (nm, iid), act, rec,
+                             True,
+                             "游戏记录的 %d / 背包实际 %d —— 不一致时建议点"
+                             "「同步物品计数校验」（正常玩着玩着也可能不一致，"
+                             "游戏自己用掉道具时不一定同步）" % (rec, act)))
+
+        # ④ 作弊标记
         ch = M.value_of(_deref(ivar(self.sv.section("system"), "@cheated")))
         rows.append(("作弊标记 @cheated", ch, "false", not is_ruby_false(ch),
                      "非 false 表示游戏已经判定作弊："
                      "20 分钟后警告、25 分钟后强制退出"
                      + ("（注意 Ruby 里 0 也算真值 → 必须写成 false）"
                         if ch == 0 else "")))
+        kw = _deref(ivar(self.sv.section("system"), "@keyword"))
+        kws = [_as_str(x) for x in kw.items] if isinstance(kw, M.ArrayNode) else []
+        rows.append(("作弊记录 @keyword", "、".join(kws) or "（空）", "（空）",
+                     bool(kws),
+                     "VNE=超限检查 / NE!=记账对不上 / 其余是内存修改器检测，"
+                     "全部清掉才算干净"))
+
+        # ⑤ 机器码
         now, err, ids, ok = self.machine_status()
         if err:
             rows.append(("机器码（本机）", "—", "—", False,
@@ -1273,13 +1616,6 @@ class GameEditor(object):
         else:
             rows.append(("机器码 %s 已在存档记录里" % now, "在", "在", False,
                          "存档记录的机器码：%s" % "、".join(ids)))
-        for iid, nm, rec, act in self.security_rows():
-            if rec is not None and rec != act:
-                rows.append(("物品计数校验：%s (id=%d)" % (nm, iid), act, rec,
-                             True,
-                             "游戏记录的 %d / 背包实际 %d —— 不一致时建议点"
-                             "「同步物品计数校验」（正常玩着玩着也可能不一致，"
-                             "游戏自己用掉道具时不一定同步）" % (rec, act)))
         return rows
 
     def fix_anti_cheat(self, clamp=True, clear_flag=True, resync=True):
@@ -1288,8 +1624,9 @@ class GameEditor(object):
         if clamp:
             gold = self.sv.gold()
             if gold > MAX_GOLD:
-                self.sv.set_gold(MAX_GOLD)
-                done.append("存银 %d → %d" % (gold, MAX_GOLD))
+                self.set_gold(SAFE_GOLD)         # 含 Lock @master + 金钱账同步
+                done.append("金钱 %d → %d（上限 %d 的 2/3 安全值）"
+                            % (gold, SAFE_GOLD, MAX_GOLD))
             wp = self.warehouse_page()
             if wp > MAX_WAREHOUSE_PAGE:
                 self.set_warehouse_page(MAX_WAREHOUSE_PAGE)
@@ -1329,9 +1666,14 @@ class GameEditor(object):
                         done.append("召唤兽「%s」寿命 %d → %d"
                                     % (self.baby_name(b), life, MAX_BABY_LIFE))
         if resync:
-            n = self.resync_security()
-            if n:
-                done.append("同步了 %d 件物品的计数校验" % n)
+            # 五类 Change 账全部对齐（金钱/物品/变量/人气/贡献）
+            for cn, n in self.resync_all_security():
+                done.append("同步了%s记账 %d 条" % (cn, n))
+            # Lock 校验和（改五维/金钱可能留下的不一致，理论上入口都同步了，
+            # 这里再兜底全扫一遍）
+            n_lock = self.sv.repair_locks()
+            if n_lock:
+                done.append("重算 %d 处 Lock 校验和" % n_lock)
             # 机器码：换机器玩时，把本机机器码追加进存档
             now, err, ids, ok = self.machine_status()
             if now and not ok:
@@ -1345,11 +1687,15 @@ class GameEditor(object):
         return done
 
     def clear_cheat_flag(self):
-        """把 `@cheated` 置成真正的 Ruby `false`，并把 keyword 里的 'VNE' 去掉。
+        """把 `@cheated` 置成真正的 Ruby `false`，并清空 `@keyword` 作弊记录。
 
         ⚠ 必须写成 Marshal 的 `F`（false），不能写成整数 0 ——
         Ruby 里 `0` 是**真值**，游戏 `if $game_system.cheated` 照样成立，
         20 分钟后还是会开始“惩罚”，25 分钟后弹「存档异常」。
+
+        @keyword 里记的全是作弊事件，脚本里只有三处往里写：
+        'VNE'（$jiance 超限）、'NE!'（Change 记账对不上）、
+        SHIELD 查到的内存修改器窗口标题 —— 没有别的正常用途，整个清空。
         """
         done = []
         sysn = self.sv.section("system")
@@ -1360,14 +1706,12 @@ class GameEditor(object):
                 self.doc.set_value(node, False)
                 done.append("@cheated: %r → false" % (cur,))
         kw = _deref(ivar(sysn, "@keyword"))
-        if isinstance(kw, M.ArrayNode):
-            keep = [x for x in kw.items
-                    if _as_str(x) not in ("VNE",)]
-            if len(keep) != len(kw.items):
-                kw.items = keep
-                self.doc.mark_structural()
-                done.append("keyword 去掉了 %d 个 VNE"
-                            % (len(kw.items) + len(keep) - 2 * len(keep)))
+        if isinstance(kw, M.ArrayNode) and kw.items:
+            old = [_as_str(x) for x in kw.items]
+            kw.items = []
+            self.doc.mark_structural()
+            done.append("keyword 清空 %d 条（%s）"
+                        % (len(old), "、".join(x or "?" for x in old)[:40]))
         return done
 
 
@@ -1404,7 +1748,10 @@ def save_files(save_path):
 
 
 def fix_save_file(path, backup=True, dry_run=False, note="按规则修复 + 清作弊标记"):
-    """打开一个存档文件 → 按规则修复 + 清作弊标记 + 同步物品计数 → 写回。
+    """打开一个存档文件 → 全量防作弊修复 → 写回。
+
+    fix_anti_cheat 已覆盖：Lock 校验和、周期超限（金钱压到 2/3 安全值等）、
+    五类 Change 记账（金钱/物品/变量/人气/贡献）、@cheated/@keyword、机器码。
 
     返回 ``(有没有问题, 做了哪些, 超限项列表)``；`dry_run=True` 只看不改。
     """
@@ -1422,14 +1769,10 @@ def fix_save_file(path, backup=True, dry_run=False, note="按规则修复 + 清�
         except Exception:
             pass
     done = []
-    for fn, what in ((g.fix_anti_cheat, "数值按规则修复"),
-                     (g.clear_cheat_flag, "清除作弊标记"),
-                     (g.resync_security, "同步物品计数校验")):
-        try:
-            if fn():
-                done.append(what)
-        except Exception:
-            pass
+    try:
+        done = g.fix_anti_cheat()
+    except Exception:
+        done = []
     if done:
         sv.doc.save()
     return True, done, over

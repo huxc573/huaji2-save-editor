@@ -256,6 +256,17 @@ def decrypt_digit(hexstr, key=None):
     return None
 
 
+def decrypt_token(hexstr, key=None):
+    """解密一位字符：数字 '0'..'9' 或负号 '-'（记账可能为负）；否则 None。"""
+    try:
+        s = decrypt(hexstr, key)
+    except Exception:
+        return None
+    if len(s) == 1 and (0x30 <= s[0] <= 0x39 or s[0] == 0x2D):
+        return s.decode("ascii")
+    return None
+
+
 if __name__ == "__main__":
     import sys
     sys.stdout.reconfigure(errors="replace")

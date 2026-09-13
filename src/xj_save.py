@@ -406,8 +406,11 @@ class SaveDoc(object):
         node = _deref(ivar(obj, name))
         if node is None:
             raise KeyError("属性 %s 不存在" % name)
-        self.doc.set_value(node, int(value))
-        return int(value)
+        # @活力 这类字段游戏存的是 Float（如 200.0）—— 节点原本是什么类型
+        # 就写回什么类型，别把浮点写成整型节点。
+        value = float(value) if isinstance(node, M.FloatNode) else int(value)
+        self.doc.set_value(node, value)
+        return value
 
     def skills(self, actor):
         """已学技能 id 列表。"""

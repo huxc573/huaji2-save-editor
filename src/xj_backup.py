@@ -205,6 +205,6 @@ def auto_backup_once(path, prefer=None, min_gap=90):
         for r in list_backups(path, prefer=prefer)[:5]:
             if r["kind"] == KIND_AUTO and time.time() - r["mtime"] < min_gap:
                 return None
-        return backup(path, kind=KIND_AUTO, note="打开/保存前自动备份")
+        return backup(path, kind=KIND_AUTO, note="")
     except Exception:
         return None
