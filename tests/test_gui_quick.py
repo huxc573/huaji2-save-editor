@@ -61,6 +61,14 @@ class FakeDialog(object):
         self.result = self.value
 
 
+class FakeNoteDialog(object):
+    """顶掉 NoteDialog：不弹窗，直接给 result（编辑备注、备份后填备注都用它）。"""
+
+    def __init__(self, master, cur="", **kw):
+        self.cur = cur
+        self.result = "测试备注"
+
+
 def kill_timers(root):
     try:
         for aid in root.tk.call("after", "info"):
@@ -88,6 +96,7 @@ def main():
         say("没有图形环境，跳过：%s" % e)
         return 0
 
+    import xj_backup
     import xj_db
     import xj_env
     import xj_save
@@ -148,6 +157,23 @@ def main():
         check("防作弊校验提示正常", "正常" in app.var_lock.get(),
               app.var_lock.get())
         check("概览文本已填充", "存银" in app.txt_info.get("1.0", "end"))
+        check("概览页有作弊/超限提示条", "作弊" in app.var_cheat.get()
+              or "超限" in app.var_cheat.get() or "正常" in app.var_cheat.get(),
+              app.var_cheat.get()[:60])
+        # 手动把 @cheated 打回“作弊”状态（模拟游戏判过作弊的存档），
+        # 验证「载入就提醒 + 顺手清掉」这条链路真的通。
+        sysnode = app.sv.section("system")
+        ch_node = xj_save._deref(xj_save.ivar(sysnode, "@cheated"))
+        app.doc.set_value(ch_node, 134700)
+        n_over = app.guard_check()
+        check("体检能把作弊标记报出来", n_over >= 1, app.var_cheat.get()[:60])
+        warned = app.warn_cheat_after_load()
+        root.update()
+        ch_now = xj_save.M.value_of(xj_save._deref(
+            xj_save.ivar(app.sv.section("system"), "@cheated")))
+        check("载入带作弊标记的存档会提醒并顺手清掉",
+              warned is True and ch_now is False,
+              "warned=%r 清完=%r" % (warned, ch_now))
 
         say("改金钱…")
         app.var_gold.set("7654321")
@@ -462,6 +488,16 @@ def main():
         app.babies_ed().clear_skills(app._baby())
         app.load_baby()
         app.fill_skill_templates()
+        check("搜索/默认选中后技能描述立即显示",
+              app.var_skill_desc.get() != "",
+              "%r" % app.var_skill_desc.get())
+        pick0 = app.var_skill_pick.get()
+        app._skill_arrow(1)
+        root.update()
+        check("下拉 ↑/↓ 直接切技能并刷新描述",
+              app.var_skill_pick.get() != pick0
+              and app.var_skill_desc.get() != "",
+              "%r -> %r" % (pick0, app.var_skill_pick.get()))
         app.var_skill_pick.set("#45 高级必杀"
                                if "#45 高级必杀" in app.cb_skill["values"]
                                else app.cb_skill["values"][0])
@@ -480,7 +516,7 @@ def main():
         app.var_baby_name.set("我的小精灵")
         app.baby_rename()
         root.update()
-        check("界面「改显示名」生效（不在名字表里会先弹确认）",
+        check("界面「改显示名」生效（显示名不查名字表、不弹确认）",
               app.g.baby_name(app._baby()) == "我的小精灵",
               app.g.baby_name(app._baby()))
         app.baby_restore_name()
@@ -669,7 +705,16 @@ def main():
         app.saves_refresh()
         root.update()
         n0 = len(app.save_rows)
-        app.saves_backup()
+        # 立即备份后会弹窗填备注（测试里换成假 NoteDialog，不弹模态）
+        real_note_dlg0 = xj_viewer.NoteDialog
+        real_wait0 = root.wait_window
+        xj_viewer.NoteDialog = FakeNoteDialog
+        root.wait_window = lambda w=None: None
+        try:
+            app.saves_backup()
+        finally:
+            xj_viewer.NoteDialog = real_note_dlg0
+            root.wait_window = real_wait0
         root.update()
         p = app.doc.path if app.doc else copy   # 恢复/撤销都拿文件本身比对
         check("界面「立即备份」生成一份", len(app.save_rows) == n0 + 1,
@@ -706,16 +751,57 @@ def main():
         root.update()
         check("界面「删除选中」生效", len(app.save_rows) == n_before_del - 1,
               "%d -> %d" % (n_before_del, len(app.save_rows)))
-        app.saves_backup()
-        root.update()
-        app.saves_backup()
-        root.update()
+        # 备注编辑：用假 NoteDialog（不弹模态）→ 写进备份旁的 .txt
+        # （新环境第一次跑备份目录是空的，可能被删空：先补一份，保证有 b0 可选）
+        real_note_dlg = xj_viewer.NoteDialog
+        real_wait2 = root.wait_window
+        xj_viewer.NoteDialog = FakeNoteDialog
+        root.wait_window = lambda w=None: None
+        try:
+            if not app.save_rows:
+                app.saves_backup()
+                root.update()
+            app.tv_saves.selection_set("b0")
+            app.saves_edit_note()
+            root.update()
+            r0 = app.save_rows[0]
+            check("界面「编辑备注」生效（写进 .txt）",
+                  r0["note"] == "测试备注"
+                  and os.path.exists(r0["path"] + ".txt"),
+                  "%r" % r0["note"])
+        finally:
+            xj_viewer.NoteDialog = real_note_dlg
+            root.wait_window = real_wait2
+        # 再备份两份（备份后填备注，测试里也是假 NoteDialog）
+        xj_viewer.NoteDialog = FakeNoteDialog
+        root.wait_window = lambda w=None: None
+        try:
+            app.saves_backup()
+            root.update()
+            app.saves_backup()
+            root.update()
+        finally:
+            xj_viewer.NoteDialog = real_note_dlg
+            root.wait_window = real_wait2
         n_before_clean = len(app.save_rows)
         app.saves_delete_old()
         root.update()
-        check("界面「删除非最新」只留一份",
-              n_before_clean >= 2 and len(app.save_rows) == 1,
+        check("界面「删除非最新」不碰手动备份（全是手动档就不删）",
+              n_before_clean >= 2 and len(app.save_rows) == n_before_clean
+              and all(r["kind"] == "manual" for r in app.save_rows),
               "%d -> %d" % (n_before_clean, len(app.save_rows)))
+        # 删除无备注：手工造一份没备注的，验证只删没备注的、留带备注的
+        xj_backup.backup(p, xj_backup.KIND_MANUAL)     # 这份不带备注
+        app.saves_refresh()
+        root.update()
+        n_with_note = sum(1 for r in app.save_rows if r["note"])
+        app.saves_delete_no_note()
+        root.update()
+        check("界面「删除无备注」只删没备注的",
+              len(app.save_rows) == n_with_note
+              and all(r["note"] for r in app.save_rows)
+              and n_with_note >= 1,
+              "%d 份带备注 -> 剩 %d" % (n_with_note, len(app.save_rows)))
         check("备份目录就在存档旁边",
               os.path.isdir(os.path.join(os.path.dirname(p),
                                          ".huaji2-save-editor")),

@@ -103,8 +103,15 @@ def encode_scalar(node, value):
     """按节点的类型把 value 编码成 Marshal 字节。"""
     t = node.type
     if t == 'i':
+        # ⚠ Ruby 里 0 是**真值**：把 false 写成整数 0，游戏会当成 true
+        # （`if $game_system.cheated` 成立 → 20 分钟后开始惩罚）。
+        # 所以布尔值必须写成 Marshal 的 T/F。
+        if isinstance(value, bool):
+            return b'T' if value else b'F'
         return M.encode_integer(value)
     if t == 'l':
+        if isinstance(value, bool):
+            return b'T' if value else b'F'
         return M.encode_bignum(value)
     if t == '"':
         if isinstance(value, str):
@@ -126,8 +133,11 @@ def encode_scalar(node, value):
         if isinstance(value, str):
             return M.encode_string(value)
         raise PatchError("nil 节点不支持写入 %r" % (value,))
-    # BoolNode 的 type 是 '?'（见 xj_marshal.BoolNode），按值判断
-    if t == '?' and isinstance(getattr(node, 'value', None), bool):
+    # BoolNode 的 type 是 '?'（见 xj_marshal.BoolNode）：只存得下 true/false
+    # ⚠ 不要去看 node.value 是不是 bool：这个节点上可能已经被写过整数
+    # （比如把 @cheated 设成 134700），那时 value 是 int，再写就报
+    # “不支持修改类型 '?' 的标量” 了。按**新值**的真值决定就行。
+    if t == '?':
         return b'T' if value else b'F'
     raise PatchError("不支持修改类型 %r 的标量" % t)
 

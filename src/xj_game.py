@@ -107,6 +107,17 @@ def get_float(node, default=0.0):
         return default
 
 
+def is_ruby_false(value):
+    """这个值在 Ruby 里算不算“假”？
+
+    Ruby 只有 `false` 和 `nil` 是假值 —— **整数 0 是真值**。
+    所以判断 `@cheated` 这类开关时不能只写 `bool(value)`：
+    曾经把 false 写成整数 0，游戏 `if $game_system.cheated` 照样成立，
+    20 分钟后还是开始惩罚（画面转圈），25 分钟后弹「存档异常」退出。
+    """
+    return value is False or value is None
+
+
 def set_ivar(obj, name, node):
     """替换对象的某个 ivar 的值节点（保持位置）。"""
     obj = _deref(obj)
@@ -442,12 +453,18 @@ class GameEditor(object):
         return out
 
     def empty_slots(self, kind="Items", page=None):
+        """空槽号：键是整数槽号、值**有货**的才算占用（置 nil 的槽当空的）。
+
+        和 `bag()` / 游戏 `has_vacancy?` 一致 —— 被「清空」的格子还能再装东西。
+        """
         h = self.container(kind)
         used = set()
-        for k, _v in h.pairs:
+        for k, v in h.pairs:
             slot = M.value_of(_deref(k))
             if isinstance(slot, int):
-                used.add(slot)
+                arr = _deref(v)
+                if isinstance(arr, M.ArrayNode) and arr.items:
+                    used.add(slot)
         pages = [page] if page is not None else range(MAX_PACK_PAGE)
         out = []
         for p in pages:
@@ -1239,9 +1256,11 @@ class GameEditor(object):
                     get_int(ivar(b, "@level")), MAX_LEVEL_BABY,
                     "上限来自 Config::Game::MAX_LEVEL_BABY")
         ch = M.value_of(_deref(ivar(self.sv.section("system"), "@cheated")))
-        rows.append(("作弊标记 @cheated", ch, 0, bool(ch),
+        rows.append(("作弊标记 @cheated", ch, "false", not is_ruby_false(ch),
                      "非 false 表示游戏已经判定作弊："
-                     "20 分钟后警告、25 分钟后强制退出"))
+                     "20 分钟后警告、25 分钟后强制退出"
+                     + ("（注意 Ruby 里 0 也算真值 → 必须写成 false）"
+                        if ch == 0 else "")))
         now, err, ids, ok = self.machine_status()
         if err:
             rows.append(("机器码（本机）", "—", "—", False,
@@ -1326,13 +1345,18 @@ class GameEditor(object):
         return done
 
     def clear_cheat_flag(self):
-        """把 `@cheated` 置 false，并把 keyword 里的 'VNE' 标记去掉。"""
+        """把 `@cheated` 置成真正的 Ruby `false`，并把 keyword 里的 'VNE' 去掉。
+
+        ⚠ 必须写成 Marshal 的 `F`（false），不能写成整数 0 ——
+        Ruby 里 `0` 是**真值**，游戏 `if $game_system.cheated` 照样成立，
+        20 分钟后还是会开始“惩罚”，25 分钟后弹「存档异常」。
+        """
         done = []
         sysn = self.sv.section("system")
         node = _deref(ivar(sysn, "@cheated"))
         if node is not None:
             cur = M.value_of(node)
-            if cur:
+            if not is_ruby_false(cur):
                 self.doc.set_value(node, False)
                 done.append("@cheated: %r → false" % (cur,))
         kw = _deref(ivar(sysn, "@keyword"))
@@ -1345,3 +1369,67 @@ class GameEditor(object):
                 done.append("keyword 去掉了 %d 个 VNE"
                             % (len(kw.items) + len(keep) - 2 * len(keep)))
         return done
+
+
+# --------------------------------------------------------------------------
+# 存档文件层面：扫描 / 批量修复（作弊标记、超限项、物品计数校验）
+# --------------------------------------------------------------------------
+def save_files(save_path):
+    r"""游戏目录下**所有可能被游戏读到的存档**：
+
+        <游戏根>\save.rvdata2      （主存档）
+        <游戏根>\save*.rvdata2     （其它存档，如果有）
+        <游戏根>\AutoSave\*.rvdata2（自动存档，读它一样会被惩罚）
+    """
+    import os
+    main = os.path.abspath(save_path)
+    root = os.path.dirname(main)
+    out = [main]
+    try:
+        for n in sorted(os.listdir(root)):
+            p = os.path.join(root, n)
+            if n.lower().endswith(".rvdata2") and os.path.isfile(p) and p != main:
+                out.append(p)
+    except OSError:
+        pass
+    d = os.path.join(root, "AutoSave")
+    if os.path.isdir(d):
+        try:
+            for n in sorted(os.listdir(d)):
+                if n.lower().endswith(".rvdata2"):
+                    out.append(os.path.join(d, n))
+        except OSError:
+            pass
+    return out
+
+
+def fix_save_file(path, backup=True, dry_run=False, note="按规则修复 + 清作弊标记"):
+    """打开一个存档文件 → 按规则修复 + 清作弊标记 + 同步物品计数 → 写回。
+
+    返回 ``(有没有问题, 做了哪些, 超限项列表)``；`dry_run=True` 只看不改。
+    """
+    import xj_backup
+    import xj_save
+    sv = xj_save.SaveDoc(path)
+    g = GameEditor(sv)
+    rows = g.anti_cheat_report()
+    over = [r for r in rows if r[3]]
+    if not over or dry_run:
+        return bool(over), [], over
+    if backup:
+        try:
+            xj_backup.backup(path, xj_backup.KIND_MANUAL, note=note)
+        except Exception:
+            pass
+    done = []
+    for fn, what in ((g.fix_anti_cheat, "数值按规则修复"),
+                     (g.clear_cheat_flag, "清除作弊标记"),
+                     (g.resync_security, "同步物品计数校验")):
+        try:
+            if fn():
+                done.append(what)
+        except Exception:
+            pass
+    if done:
+        sv.doc.save()
+    return True, done, over

@@ -136,6 +136,11 @@ def main():
     # ---------------- 防作弊
     rep = g.anti_cheat_report()
     check("体检报告有内容", len(rep) >= 4, "%d 项" % len(rep))
+    # 正常存档本来就不该有超限项（这个副本是干净档）；先造一个作弊标记，
+    # 再看体检能不能标出来。
+    sys_node = xj_save._deref(xj_save.ivar(sv.section("system"), "@cheated"))
+    sv.doc.set_value(sys_node, True)
+    rep = g.anti_cheat_report()
     check("体检能标出超限项", any(r[3] for r in rep),
           "、".join(r[0] for r in rep if r[3])[:60] or "（没有超限项）")
 

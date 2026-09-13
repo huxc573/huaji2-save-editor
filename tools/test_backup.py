@@ -74,18 +74,37 @@ def main():
     B.restore(r["path"], save)
     check("恢复最新能换回上一次修改前", open(save, "rb").read() == b"B" * 120)
 
-    # 「删除非最新」只留一份
+    # 「删除非最新」：留最新一份 + **所有手动备份**（只清自动备份）
     B.backup(save, B.KIND_MANUAL)
     time.sleep(0.01)
     last = B.backup(save, B.KIND_MANUAL)
     n_all = len(B.list_backups(save))
+    n_manual = len([x for x in B.list_backups(save) if x["kind"] == "manual"])
     kept, gone = B.keep_newest(save)
     check("删除非最新：留下的就是最新那份", kept and kept["path"] == last,
           os.path.basename(kept["path"]) if kept else "None")
-    check("删除非最新：其余都删了", gone == n_all - 1
-          and len(B.list_backups(save)) == 1,
-          "删了 %d，剩 %d" % (gone, len(B.list_backups(save))))
-    check("只剩一份时不再删", B.keep_newest(save)[1] == 0)
+    rows_left = B.list_backups(save)
+    check("删除非最新：只删自动备份，手动全留",
+          gone == n_all - n_manual
+          and len(rows_left) == n_manual
+          and all(x["kind"] == "manual" for x in rows_left),
+          "删了 %d，剩 %d" % (gone, len(rows_left)))
+    check("只剩手动备份时不再删", B.keep_newest(save)[1] == 0)
+
+    # 备注编辑：写 → 改 → 清空（删掉 .txt）
+    B.set_note(last, "这是备注")
+    check("备注写进去了",
+          B.list_backups(save)[0]["note"] == "这是备注",
+          "%r" % B.list_backups(save)[0]["note"])
+    B.set_note(last, "改过的备注")
+    check("备注能改",
+          B.list_backups(save)[0]["note"] == "改过的备注",
+          "%r" % B.list_backups(save)[0]["note"])
+    B.set_note(last, "")
+    check("备注清空后 .txt 被删掉",
+          not os.path.exists(last + ".txt")
+          and B.list_backups(save)[0]["note"] == "",
+          "note=%r" % B.list_backups(save)[0]["note"])
 
     # 频繁保存不会刷一堆自动备份
     B.backup(save, B.KIND_AUTO)          # 先保证有一份“刚做的”自动备份

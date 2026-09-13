@@ -41,7 +41,7 @@ _*.txt
 
 # 一次性工具的输出（解密副本、脚本反编译、探针日志……都能重跑生成）
 tools/_*
-csv/
+csv/*
 error.log
 selftest_result.txt
 last.txt
@@ -54,7 +54,9 @@ _tmp/
 *.bak.*
 
 # 数据表导出的 CSV（随时可重导，不入库；要发布就单独打附件）
-csv/
+csv/*
+# 但手工整理的《技能关系表》要入库（不是可重导的导出物）
+!csv/技能关系表.csv
 
 # GUI 写出的异常日志
 error.log

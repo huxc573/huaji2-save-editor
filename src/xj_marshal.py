@@ -748,8 +748,13 @@ def reencode(node):
     仅支持 int / bignum / bool / string / float / nil。
     """
     if isinstance(node, IntNode):
+        # 同上：bool 必须写成 T/F，不能写成整数 0/1
+        if isinstance(node.value, bool):
+            return encode_bool(node.value)
         return encode_integer(node.value)
     if isinstance(node, BignumNode):
+        if isinstance(node.value, bool):
+            return encode_bool(node.value)
         return encode_bignum(node.value)
     if isinstance(node, BoolNode):
         return encode_bool(node.value)
@@ -883,8 +888,13 @@ def serialize(node, depth=0, table=None, base=None, symtab=None):
     if isinstance(node, BoolNode):
         return encode_bool(node.value)
     if isinstance(node, IntNode):
+        # Ruby 里 0 是真值 → 节点里存的若是 Python bool，就必须写 T/F
+        if isinstance(node.value, bool):
+            return encode_bool(node.value)
         return encode_integer(node.value)
     if isinstance(node, BignumNode):
+        if isinstance(node.value, bool):
+            return encode_bool(node.value)
         return encode_bignum(node.value)
     if isinstance(node, FloatNode):
         return b'f' + encode_long(len(node.raw)) + node.raw

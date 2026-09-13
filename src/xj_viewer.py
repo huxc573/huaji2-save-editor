@@ -79,7 +79,7 @@ class _IV(object):
         return xj_save._deref(xj_save.ivar(obj, name))
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.4.7"
+VERSION = "v0.5.0"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -380,8 +380,15 @@ class App(object):
         self.tab_quick = f
         self.nb.add(f, text="概览 / 快捷修改")
 
-        self.txt_info = tk.Text(f, height=14, wrap="none", font=("Consolas", 10))
-        self.txt_info.pack(fill="x")
+        inf = ttk.Frame(f)
+        inf.pack(fill="x")
+        self.txt_info = tk.Text(inf, height=12, wrap="none", font=("Consolas", 10))
+        vs = ttk.Scrollbar(inf, orient="vertical", command=self.txt_info.yview)
+        hs = ttk.Scrollbar(inf, orient="horizontal", command=self.txt_info.xview)
+        self.txt_info.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        vs.pack(side="right", fill="y")
+        hs.pack(side="bottom", fill="x")
+        self.txt_info.pack(fill="both", expand=True)
 
         g = ttk.LabelFrame(f, text="快捷修改（先点「应用」，再点上面的「保存修改」）",
                            padding=10)
@@ -390,42 +397,53 @@ class App(object):
         self.var_steps = tk.StringVar()
         self.var_savecnt = tk.StringVar()
         self.var_battlecnt = tk.StringVar()
-        rows = [("存银", self.var_gold,
-                 "游戏里就叫「存银」；Lock 包装，改值会同步重算 @master；"
-                 "上限 30,000,000"),
-                ("步数", self.var_steps, ""),
-                ("存档次数", self.var_savecnt, ""),
-                ("战斗次数", self.var_battlecnt, "")]
-        for i, (label, var, hint) in enumerate(rows):
-            ttk.Label(g, text=label, width=9).grid(row=i, column=0, sticky="w", pady=3)
-            ttk.Entry(g, textvariable=var, width=20).grid(row=i, column=1, sticky="w")
-            if hint:
-                ttk.Label(g, text=hint, foreground="#888").grid(
-                    row=i, column=2, sticky="w", padx=8)
+        pairs = [(("存银", self.var_gold), ("步数", self.var_steps)),
+                 (("存档次数", self.var_savecnt), ("战斗次数", self.var_battlecnt))]
+        for r, (p1, p2) in enumerate(pairs):
+            for c, (label, var) in enumerate((p1, p2)):
+                ttk.Label(g, text=label, width=9).grid(
+                    row=r, column=c * 3, sticky="w", padx=(0 if c else 4, 0), pady=3)
+                ttk.Entry(g, textvariable=var, width=18).grid(
+                    row=r, column=c * 3 + 1, sticky="w")
+        ttk.Label(g, text="存银上限 30,000,000（Lock 包装，改值会同步重算 @master）",
+                  foreground="#888").grid(row=0, column=2, columnspan=4,
+                                          sticky="w", padx=10)
         bar = ttk.Frame(g)
-        bar.grid(row=len(rows), column=1, sticky="w", pady=8)
+        bar.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
         ttk.Button(bar, text="应用", command=self.apply_quick).pack(side="left")
-        ttk.Button(bar, text="检查并修复防作弊校验",
+        ttk.Button(bar, text="校验码修复（Lock 校验和）",
                    command=self.fix_locks).pack(side="left", padx=8)
         self.var_lock = tk.StringVar(value="防作弊校验：—")
         ttk.Label(g, textvariable=self.var_lock).grid(
-            row=len(rows) + 1, column=0, columnspan=3, sticky="w")
+            row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         # ---- 防作弊体检（v0.4：游戏每 300 帧会自己查一遍）
         h = ttk.LabelFrame(f, text="防作弊体检（游戏自己的检查规则）", padding=10)
         h.pack(fill="both", expand=True, pady=8)
         ttk.Label(h, text="游戏每 300 帧检查一次：角色等级 ≤ 60、出战召唤兽等级 ≤ 65、"
-                          "存银 ≤ 30,000,000、仓库页号 ≤ 3、五维总点数 ≤ 等级*10+500。\n"
-                          "越界就把存档标记成「作弊」（@cheated），之后 20 分钟弹警告、"
-                          "25 分钟强制退出。",
+                          "存银 ≤ 30,000,000、仓库页号 ≤ 3、五维总点数 ≤ 等级*10+500；"
+                          "物品计数校验（Change）对不上也照样算作弊。\n"
+                          "越界就把存档标记成「作弊」（@cheated）：20 分钟后画面转圈/缩放，"
+                          "25 分钟后弹「存档异常」直接退出，战斗中还会崩 "
+                          "RGSSError: disposed sprite。\n"
+                          "⚠ 上面那个「校验码修复」修的是存银/步数那套 Lock 校验和，"
+                          "跟这里的作弊标记是两码事 —— 清标记要用下面的按钮。",
                   foreground="#555", justify="left").pack(anchor="w")
-        self.tv_guard = ttk.Treeview(h, columns=("a", "b", "c", "d"),
+        self.var_cheat = tk.StringVar(value="")
+        ttk.Label(h, textvariable=self.var_cheat, foreground="#c00",
+                  justify="left", wraplength=1180).pack(anchor="w", pady=(4, 0))
+        gv = ttk.Frame(h)
+        gv.pack(fill="both", expand=True, pady=6)
+        self.tv_guard = ttk.Treeview(gv, columns=("a", "b", "c", "d"),
                                      show="headings", height=9)
         for c, w, t in (("a", 240, "项目"), ("b", 130, "当前值"),
                         ("c", 130, "上限/记录值"), ("d", 420, "说明")):
             self.tv_guard.heading(c, text=t)
             self.tv_guard.column(c, width=w, anchor="w")
-        self.tv_guard.pack(fill="both", expand=True, pady=6)
+        vs = ttk.Scrollbar(gv, orient="vertical", command=self.tv_guard.yview)
+        self.tv_guard.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        self.tv_guard.pack(fill="both", expand=True)
         gbar = ttk.Frame(h)
         gbar.pack(fill="x")
         ttk.Button(gbar, text="体检",
@@ -436,6 +454,8 @@ class App(object):
                    command=self.guard_clear).pack(side="left", padx=6)
         ttk.Button(gbar, text="同步物品计数校验",
                    command=self.guard_resync).pack(side="left", padx=6)
+        ttk.Button(gbar, text="清理所有存档（含 AutoSave）",
+                   command=self.guard_fix_all).pack(side="left", padx=(18, 6))
 
         # ---- 机器码：单独一页（照画迹1 的布局）
         mq = ttk.Frame(h)
@@ -526,19 +546,23 @@ class App(object):
                   wraplength=1150).pack(anchor="w")
         ttk.Label(f, text="备份目录就在存档旁边（.huaji2-save-editor）；"
                           "「恢复最新」＝把上一次修改之前的存档换回来；"
-                          "「删除非最新」只留最新的一份。",
+                          "「删除非最新」只留最新的一份 + 手动备份（自动备份才清）。",
                   foreground="#777").pack(anchor="w", pady=(2, 6))
 
         bar = ttk.Frame(f)
         bar.pack(fill="x")
         ttk.Button(bar, text="立即备份",
                    command=self.saves_backup).pack(side="left")
+        ttk.Button(bar, text="编辑备注",
+                   command=self.saves_edit_note).pack(side="left", padx=6)
         ttk.Button(bar, text="恢复选中",
                    command=self.saves_restore).pack(side="left", padx=6)
         ttk.Button(bar, text="恢复最新",
                    command=self.saves_restore_newest).pack(side="left", padx=6)
         ttk.Button(bar, text="删除选中",
                    command=self.saves_delete).pack(side="left", padx=6)
+        ttk.Button(bar, text="删除无备注",
+                   command=self.saves_delete_no_note).pack(side="left", padx=6)
         ttk.Button(bar, text="删除非最新",
                    command=self.saves_delete_old).pack(side="left", padx=6)
         ttk.Button(bar, text="刷新",
@@ -546,12 +570,12 @@ class App(object):
         ttk.Button(bar, text="打开备份目录",
                    command=self.saves_open_dir).pack(side="left", padx=6)
 
-        cols = ("time", "kind", "size", "name", "note")
+        cols = ("idx", "time", "kind", "size", "name", "note")
         self.tv_saves = ttk.Treeview(f, columns=cols, show="headings", height=16,
                                      selectmode="extended")
-        for c, w, t in (("time", 170, "时间"), ("kind", 110, "类型"),
-                        ("size", 90, "大小"), ("name", 330, "文件"),
-                        ("note", 380, "备注")):
+        for c, w, t in (("idx", 44, "#"), ("time", 168, "时间"),
+                        ("kind", 108, "类型"), ("size", 86, "大小"),
+                        ("name", 330, "文件"), ("note", 380, "备注")):
             self.tv_saves.heading(c, text=t)
             self.tv_saves.column(c, width=w, anchor="w")
         vs = ttk.Scrollbar(f, orient="vertical", command=self.tv_saves.yview)
@@ -578,7 +602,8 @@ class App(object):
                    "before-restore": "恢复前", "other": "其它"}
         for i, r in enumerate(rows):
             self.tv_saves.insert("", "end", iid="b%d" % i,
-                                 values=(r["stamp"].replace("_", " "),
+                                 values=(i + 1,
+                                         r["stamp"].replace("_", " "),
                                          kind_cn.get(r["kind"], r["kind"]),
                                          "%.1f KB" % (r["size"] / 1024.0),
                                          r["name"], r["note"]))
@@ -597,9 +622,20 @@ class App(object):
         except Exception as e:
             messagebox.showerror("备份失败", zh_error(e), parent=self.root)
             return
+        # 备份完成 → 弹窗让玩家填备注（可留空＝不写备注）
+        dlg = NoteDialog(self.root, title="备份完成 - 填备注",
+                         label="已备份到：\n%s\n\n备注（可留空，会存在备份旁的 .txt）："
+                               % p)
+        self.root.wait_window(dlg)
+        note = (dlg.result or "").strip() if dlg.result is not None else ""
+        if note:
+            try:
+                xj_backup.set_note(p, note)
+            except Exception as e:
+                messagebox.showerror("写备注失败", zh_error(e), parent=self.root)
         self.saves_refresh()
-        self.set_status("已备份到 %s" % os.path.basename(p))
-        messagebox.showinfo("备份完成", "已备份：\n%s" % p, parent=self.root)
+        self.set_status("已备份到 %s（备注：%s）" % (os.path.basename(p),
+                                                     note or "无"))
 
     def _save_sel(self, quiet=False):
         sel = self.tv_saves.selection()
@@ -684,8 +720,47 @@ class App(object):
         self.saves_refresh()
         self.set_status("已删除 %d 份备份" % n)
 
+    def saves_delete_no_note(self):
+        """删除全部没有备注的备份（有 .txt 备注的保留）。"""
+        if not self.doc:
+            return
+        self.saves_refresh()
+        rows = [r for r in self.save_rows if not r["note"]]
+        if not rows:
+            messagebox.showinfo("删除无备注", "没有无备注的备份。", parent=self.root)
+            return
+        if not self.confirm(
+                "删除无备注",
+                "删掉 %d 份没有备注的备份？（不可撤销）\n\n%s"
+                % (len(rows), "\n".join("  " + r["name"] for r in rows[:8]))):
+            return
+        n = xj_backup.remove([r["path"] for r in rows])
+        self.saves_refresh()
+        self.set_status("已删除 %d 份无备注备份" % n)
+
+    def saves_edit_note(self):
+        """给选中的备份改备注（存成备份旁边的 .txt；清空就是删备注）。"""
+        rows = self._save_sel()
+        if not rows:
+            return
+        if len(rows) > 1:
+            messagebox.showinfo("提示", "一次只能改一份的备注。", parent=self.root)
+            return
+        r = rows[0]
+        dlg = NoteDialog(self.root, r["note"])
+        self.root.wait_window(dlg)
+        if dlg.result is None:
+            return
+        try:
+            xj_backup.set_note(r["path"], dlg.result)
+        except Exception as e:
+            messagebox.showerror("写备注失败", zh_error(e), parent=self.root)
+            return
+        self.saves_refresh()
+        self.set_status("已更新备注：%s" % r["name"])
+
     def saves_delete_old(self):
-        """删除非最新＝只留最新的一份备份，其余全删。"""
+        """删除非最新＝只留最新的一份 + 所有手动备份，其余（自动备份）全删。"""
         if not self.doc:
             return
         self.saves_refresh()
@@ -699,14 +774,22 @@ class App(object):
             if x["is_this_file"]:
                 keep = x
                 break
+        n_manual = sum(1 for r in rows if r["kind"] == "manual")
+        if n_manual == len(rows):
+            messagebox.showinfo("删除非最新",
+                                "全是手动备份（共 %d 份），这份操作不碰手动备份。"
+                                % len(rows), parent=self.root)
+            return
+        n_del = len(rows) - n_manual - 1     # 留最新一份 + 所有手动
         if not self.confirm(
                 "删除非最新",
-                "只留最新的一份，其余 %d 份都删掉？（不可撤销）\n\n"
-                "  保留：%s\n  %s" % (len(rows) - 1, keep["stamp"], keep["name"])):
+                "留最新的一份 + 所有手动备份，其余 %d 份自动备份删掉？"
+                "（不可撤销）\n\n"
+                "  保留：%s\n  %s" % (n_del, keep["stamp"], keep["name"])):
             return
         kept, n = xj_backup.keep_newest(self.doc.path)
         self.saves_refresh()
-        self.set_status("已删除 %d 份旧备份，保留 %s"
+        self.set_status("已删除 %d 份自动备份，保留最新 %s"
                         % (n, os.path.basename(kept["path"]) if kept else "无"))
 
     def saves_open_dir(self):
@@ -750,6 +833,10 @@ class App(object):
         for c, w, t in (("p", 460, "路径"), ("t", 60, "类型"), ("v", 320, "值")):
             self.tv_hits.heading(c, text=t)
             self.tv_hits.column(c, width=w, anchor="w")
+        vs_hits = ttk.Scrollbar(self.fr_hits, orient="vertical",
+                                command=self.tv_hits.yview)
+        self.tv_hits.configure(yscrollcommand=vs_hits.set)
+        vs_hits.pack(side="right", fill="y")
         self.tv_hits.pack(fill="x")
         self.tv_hits.bind("<Double-1>", self.goto_search_hit)
         self.tv_hits.bind("<Return>", self.goto_search_hit)
@@ -809,6 +896,9 @@ class App(object):
                         ("hp", 90, "HP"), ("mp", 90, "MP"), ("cls", 80, "职业ID")):
             self.tv_actor.heading(c, text=t)
             self.tv_actor.column(c, width=w, anchor="w")
+        vs_actor = ttk.Scrollbar(f, orient="vertical", command=self.tv_actor.yview)
+        self.tv_actor.configure(yscrollcommand=vs_actor.set)
+        vs_actor.pack(side="right", fill="y")
         self.tv_actor.pack(fill="x")
         self.tv_actor.bind("<<TreeviewSelect>>", lambda e: self.load_actor())
 
@@ -855,6 +945,9 @@ class App(object):
                   ).pack(anchor="w", pady=(8, 0))
         self.txt_actor = tk.Text(f, height=8, wrap="word",
                                  font=("Microsoft YaHei UI", 10))
+        vs_ta = ttk.Scrollbar(f, orient="vertical", command=self.txt_actor.yview)
+        self.txt_actor.configure(yscrollcommand=vs_ta.set)
+        vs_ta.pack(side="right", fill="y")
         self.txt_actor.pack(fill="both", expand=True)
 
     # -------------------------------------------------- 4 队伍 / 物品
@@ -1019,13 +1112,16 @@ class App(object):
                  "防资", "体资", "法资", "速资", "躲资", "技能", "出战")
         widths = (34, 104, 108, 50, 54, 54, 66, 60, 60, 60, 60, 60, 60, 44, 44)
         self.tv_babies = ttk.Treeview(f, columns=cols, show="headings",
-                                      height=8, selectmode="browse")
+                                      height=6, selectmode="browse")
         for c, h, w in zip(cols, heads, widths):
             self.tv_babies.heading(c, text=h)
             self.tv_babies.column(c, width=w, anchor="w")
         self.tv_babies.tag_configure("active", foreground="#0a0")
+        vs_bab = ttk.Scrollbar(f, orient="vertical", command=self.tv_babies.yview)
+        self.tv_babies.configure(yscrollcommand=vs_bab.set)
         hs = ttk.Scrollbar(f, orient="horizontal", command=self.tv_babies.xview)
         self.tv_babies.configure(xscrollcommand=hs.set)
+        vs_bab.pack(side="right", fill="y")
         self.tv_babies.pack(fill="x")
         hs.pack(fill="x")
         self.tv_babies.bind("<<TreeviewSelect>>", lambda e: self.on_baby_select())
@@ -1058,23 +1154,22 @@ class App(object):
                         ("note", 300, "说明")):
             self.tv_baby.heading(c, text=t)
             self.tv_baby.column(c, width=w, anchor="w")
+        vs_baby = ttk.Scrollbar(left, orient="vertical", command=self.tv_baby.yview)
+        self.tv_baby.configure(yscrollcommand=vs_baby.set)
+        vs_baby.pack(side="right", fill="y")
         self.tv_baby.pack(fill="both", expand=True)
         self.tv_baby.bind("<<TreeviewSelect>>", lambda e: self.baby_pick())
 
         # ---------------- 名字 + 技能
         right = ttk.Frame(mid)
         right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        nf = ttk.LabelFrame(right, text="名字（游戏显示 @attr.@name）", padding=6)
+        nf = ttk.LabelFrame(right, text="名字（改显示名 @attr.@name；基础名 @name 管立绘/音效，不提供修改）",
+                            padding=6)
         nf.pack(fill="x")
         self.var_baby_name = tk.StringVar()
         ttk.Entry(nf, textvariable=self.var_baby_name, width=16).pack(side="left")
         ttk.Button(nf, text="改显示名",
                    command=self.baby_rename).pack(side="left", padx=3)
-        ttk.Button(nf, text="改基础名",
-                   command=lambda: self.baby_rename(base=True)).pack(side="left")
-        self.var_baby_name_ok = tk.StringVar(value="")
-        ttk.Label(nf, textvariable=self.var_baby_name_ok,
-                  foreground="#777").pack(side="left", padx=8)
 
         skf = ttk.LabelFrame(right, text="技能（@skills，最多 12 个）", padding=6)
         skf.pack(fill="both", expand=True, pady=(6, 0))
@@ -1091,6 +1186,8 @@ class App(object):
         self.cb_skill.pack(side="left")
         self.cb_skill.bind("<<ComboboxSelected>>",
                            lambda e: self.show_skill_desc())
+        self.cb_skill.bind("<Down>", lambda e: self._skill_arrow(1))
+        self.cb_skill.bind("<Up>", lambda e: self._skill_arrow(-1))
         ttk.Button(skbar, text="学会", command=self.baby_skill_add).pack(side="left",
                                                                        padx=4)
         ttk.Button(skbar, text="忘掉选中",
@@ -1101,17 +1198,21 @@ class App(object):
         ttk.Label(skf, textvariable=self.var_skill_desc, foreground="#555",
                   justify="left", wraplength=560).pack(anchor="w", pady=(4, 0))
         self.tv_baby_skills = ttk.Treeview(skf, columns=("id", "name", "desc"),
-                                           show="headings", height=6,
+                                           show="headings", height=8,
                                            selectmode="browse")
         for c, t, w in (("id", "技能 id", 62), ("name", "名字", 140),
                         ("desc", "描述", 340)):
             self.tv_baby_skills.heading(c, text=t)
             self.tv_baby_skills.column(c, width=w, anchor="w")
+        vs_bsk = ttk.Scrollbar(skf, orient="vertical",
+                               command=self.tv_baby_skills.yview)
+        self.tv_baby_skills.configure(yscrollcommand=vs_bsk.set)
+        vs_bsk.pack(side="right", fill="y")
         self.tv_baby_skills.pack(fill="both", expand=True, pady=(6, 0))
         self.tv_baby_skills.bind("<<TreeviewSelect>>",
                                  lambda e: self.show_skill_desc())
 
-        self.txt_baby = tk.Text(f, height=3, wrap="word",
+        self.txt_baby = tk.Text(f, height=2, wrap="word",
                                 font=("Microsoft YaHei UI", 10))
         self.txt_baby.pack(fill="x", pady=(6, 0))
 
@@ -1224,7 +1325,6 @@ class App(object):
         self.tv_baby_skills.delete(*self.tv_baby_skills.get_children())
         self.txt_baby.delete("1.0", "end")
         self.var_baby_name.set("")
-        self.var_baby_name_ok.set("")
         if b is None or self.g is None:
             return
         bd = self.babies_ed()
@@ -1244,9 +1344,6 @@ class App(object):
                                        values=(sid, nm, desc))
         self.show_skill_desc()
         self.var_baby_name.set(bd.display_name(b))
-        ok = bd.name_ok(bd.display_name(b))
-        self.var_baby_name_ok.set("√ 名字在游戏名字表里" if ok
-                                  else "⚠ 名字不在名字表里（战斗可能取不到立绘）")
         self.fill_skill_templates()
         self.txt_baby.insert("1.0", "\n".join([
             "第 %d 只：%s（模板 %s #%d，%s）　等级 %s / 忠诚 %s / 寿命 %s / 成长 %s"
@@ -1319,6 +1416,25 @@ class App(object):
         self.cb_skill["values"] = vals
         if vals and self.var_skill_pick.get() not in vals:
             self.var_skill_pick.set(vals[0])
+        self.tv_baby_skills.selection_remove(self.tv_baby_skills.selection())
+        self.show_skill_desc()          # 搜索/换选中后，描述立刻跟着变
+
+    def _skill_arrow(self, d):
+        """下拉框按 ↑/↓：不开弹层，直接切到上/下一个技能并刷新描述。"""
+        vals = getattr(self, "_skill_choices", None) or []
+        if not vals:
+            vals = list(self.cb_skill["values"] or [])
+        if not vals:
+            return "break"
+        cur = self.var_skill_pick.get()
+        try:
+            i = vals.index(cur)
+        except ValueError:
+            i = 0 if d > 0 else len(vals) - 1
+        self.var_skill_pick.set(vals[(i + d) % len(vals)])
+        self.tv_baby_skills.selection_remove(self.tv_baby_skills.selection())
+        self.show_skill_desc()
+        return "break"
 
     def _skill_pick_id(self):
         s = self.var_skill_pick.get()
@@ -1407,6 +1523,9 @@ class App(object):
         for c, h, w in zip(cols, heads, widths):
             tv.heading(c, text=h)
             tv.column(c, width=w, anchor="w")
+        vs = ttk.Scrollbar(f, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
         tv.pack(fill="both", expand=True, pady=6)
 
         info = tk.StringVar(value="")
@@ -1531,7 +1650,13 @@ class App(object):
         self.refresh_baby_list_keep(b)
         self.set_status("已设为出战：%s" % self.g.baby_name(b))
 
-    def baby_rename(self, base=False):
+    def baby_rename(self):
+        """改显示名（@attr.@name）。
+
+        显示名只是给人看的，游戏战斗查立绘/音效用的是基础名 @name（``read_note
+        ('battler') or name``），所以显示名随便改、也不用查名字表；基础名不提供
+        修改（改了会取不到立绘/音效）。
+        """
         b = self._baby()
         if b is None:
             return
@@ -1539,17 +1664,7 @@ class App(object):
         if not name:
             messagebox.showinfo("提示", "名字不能是空的。", parent=self.root)
             return
-        bd = self.babies_ed()
-        if not bd.name_ok(name) and not self.confirm(
-                "名字不在名字表里",
-                "「%s」不在游戏的召唤兽名字表里。\n\n"
-                "名字不是取不到的话，只是战斗里可能取不到对应立绘/音效，"
-                "也可能显示成默认样子。仍要改吗？" % name):
-            return
-        if base:
-            bd.set_base_name(b, name)
-        else:
-            bd.set_display_name(b, name)
+        self.babies_ed().set_display_name(b, name)
         self.mark_dirty()
         self.load_baby()
         self.refresh_baby_list_keep(b)
@@ -1624,6 +1739,9 @@ class App(object):
         self.tv_sw.column("i", width=60, anchor="w")
         self.tv_sw.column("v", width=60, anchor="w")
         self.tv_sw.column("n", width=280, anchor="w")
+        vs_sw = ttk.Scrollbar(lf, orient="vertical", command=self.tv_sw.yview)
+        self.tv_sw.configure(yscrollcommand=vs_sw.set)
+        vs_sw.pack(side="right", fill="y")
         self.tv_sw.pack(fill="both", expand=True)
         self.tv_sw.bind("<Double-1>", lambda e: self.sw_toggle())
 
@@ -1638,6 +1756,9 @@ class App(object):
         self.tv_va.column("i", width=60, anchor="w")
         self.tv_va.column("v", width=90, anchor="w")
         self.tv_va.column("n", width=280, anchor="w")
+        vs_va = ttk.Scrollbar(rf, orient="vertical", command=self.tv_va.yview)
+        self.tv_va.configure(yscrollcommand=vs_va.set)
+        vs_va.pack(side="right", fill="y")
         self.tv_va.pack(fill="both", expand=True)
         self.tv_va.bind("<Double-1>", lambda e: self.va_edit())
 
@@ -1862,6 +1983,8 @@ class App(object):
                             % (os.path.basename(path), len(self.doc.raw),
                                len(self.doc.objects),
                                "" if self.sv else "；不是本作存档，只有数据树可用"))
+        if not quiet:
+            self.warn_cheat_after_load()
 
     def save_save(self):
         if not self.doc or not self.doc.dirty:
@@ -2100,6 +2223,23 @@ class App(object):
             self.tv_guard.insert("", "end", values=(
                 name, cur, limit, ("❌ " + why) if bad else why))
         n_bad = len([r for r in rows if r[3]])
+        over = [r for r in rows if r[3]]
+        flag = [r for r in over if "作弊标记" in r[0]]
+        others = [r for r in over if "作弊标记" not in r[0]]
+        tips = []
+        if flag:
+            tips.append("⚠ 存档带着作弊标记 @cheated：游戏 20 分钟后开始“惩罚”"
+                        "（画面转圈/缩放），25 分钟后弹「存档异常」并退出，"
+                        "战斗中还会报 disposed sprite 崩掉 → 点「清除作弊标记」")
+        if others:
+            tips.append("⚠ 还有 %d 项超限：%s → 点「一键按规则修复」"
+                        % (len(others), "、".join(r[0] for r in others)[:130]))
+        if not tips:
+            tips.append("✔ 体检 %d 项全部正常" % len(rows))
+        try:
+            self.var_cheat.set("\n".join(tips))
+        except Exception:
+            pass
         self.set_status("防作弊体检：%d 项，其中 %d 项有问题%s"
                         % (len(rows), n_bad,
                            "（点「一键按规则修复」）" if n_bad else " ✔"))
@@ -2153,6 +2293,89 @@ class App(object):
         messagebox.showinfo("物品计数校验",
                             "已把 %d 件物品的计数对齐到背包实际数量。" % n if n
                             else "已经全部对得上。", parent=self.root)
+
+    def guard_fix_all(self):
+        """把游戏目录下**所有存档**（主存档 + AutoSave/*）的作弊标记/超限一起清掉。
+
+        为什么要这个：AutoSave 里也可能带着 @cheated —— 读那种档一样会被惩罚
+        （20 分钟后画面转圈，25 分钟后弹「存档异常」直接退出）。
+        """
+        if not self.doc:
+            return
+        paths = xj_game.save_files(self.doc.path)
+        self.set_status("正在检查 %d 个存档…" % len(paths))
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        bad = []
+        for p in paths:
+            try:
+                _b, _d, over = xj_game.fix_save_file(p, dry_run=True)
+                if over:
+                    bad.append((p, over))
+            except Exception as e:
+                self.err(e)
+        if not bad:
+            messagebox.showinfo("清理所有存档",
+                                "检查了 %d 个存档（含 AutoSave），"
+                                "全都没有超限项/作弊标记 ✔" % len(paths),
+                                parent=self.root)
+            self.set_status("所有存档都干净")
+            return
+        txt = "\n".join("  · %s：%s" % (os.path.basename(p),
+                                       "、".join(r[0] for r in ov[:4]))
+                         for p, ov in bad[:10])
+        if not self.confirm("有 %d 个存档要被游戏惩罚" % len(bad),
+                            "这些存档带着超限项/作弊标记（读它们都会触发惩罚）：\n\n"
+                            "%s\n\n全部按规则修好？（各自会先备份一份）" % txt):
+            return
+        n = 0
+        cur_fixed = False
+        for p, _ov in bad:
+            try:
+                _b, done, _o = xj_game.fix_save_file(p)
+                if done:
+                    n += 1
+                if os.path.abspath(p) == os.path.abspath(self.doc.path):
+                    cur_fixed = True
+            except Exception as e:
+                self.err(e)
+        if cur_fixed and not self.doc.dirty:
+            self.load(self.doc.path, quiet=True)     # 当前档被改过 → 重新载入
+        else:
+            self.refresh_panels()
+        messagebox.showinfo("清理所有存档",
+                            "已修好 %d 个存档（各自备份在 .huaji2-save-editor）。\n\n"
+                            "如果游戏里已经弹过「存档异常」，请把游戏**整个关掉再重开**；"
+                            "读档后就不会再被惩罚了。" % n, parent=self.root)
+
+    def warn_cheat_after_load(self, quiet=False):
+        """载入后如果存档带作弊标记 → 立刻提醒（惩罚 20 分钟后开始、25 分钟后强退）。
+
+        返回是否真的提醒过（测试用；也方便上层决定要不要再提示一次）。
+        """
+        if not self.g or quiet:
+            return False
+        try:
+            rows = self.g.anti_cheat_report()
+        except Exception:
+            return False
+        over = [r for r in rows if r[3]]
+        flag = [r for r in over if "作弊标记" in r[0]]
+        if not flag:
+            return False
+        if self.confirm(
+                "这个存档被游戏标记了作弊（@cheated）",
+                "游戏会在 20 分钟后开始“惩罚”（画面转圈/缩放），25 分钟后弹\n"
+                "「存档异常」直接退出；战斗中还会报 RGSSError: disposed sprite 崩掉。\n\n"
+                "要现在顺手修好吗？（推荐）\n"
+                "点「是」= 按规则修数值 + 清作弊标记 + 同步物品计数，之后 Ctrl+S 保存\n"
+                "点「否」= 先不管（概览页随时可以点按钮处理）"):
+            self.guard_autofix()
+            self.refresh_panels()
+            self.set_status("已清除作弊标记 —— 记得点「保存修改」（Ctrl+S）")
+        return True
 
     # ================================================== 2 数据树（懒加载）
     def _kids(self, node):
@@ -3099,6 +3322,36 @@ def node_detail(node):
     elif isinstance(node, M.UserDefNode):
         L.append("自定义序列化：%s，%d 字节" % (node.cls, len(node.data)))
     return "\n".join(L)
+
+
+class NoteDialog(tk.Toplevel):
+    """改备份备注的小窗：多行文本，确定/取消；result=None 表示取消。"""
+
+    def __init__(self, master, cur="", title="编辑备注", label=None):
+        tk.Toplevel.__init__(self, master)
+        self.title(title)
+        self.result = None
+        ttk.Label(self, text=label
+                  or "备注（会存在备份旁边的 .txt；留空＝删除备注）"
+                  ).pack(anchor="w", padx=8, pady=(8, 2))
+        self.txt = tk.Text(self, width=60, height=6,
+                           font=("Microsoft YaHei UI", 10), wrap="word")
+        vs = ttk.Scrollbar(self, orient="vertical", command=self.txt.yview)
+        self.txt.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        self.txt.pack(fill="both", expand=True, padx=(8, 0), pady=2)
+        self.txt.insert("1.0", cur or "")
+        self.txt.focus_set()
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", pady=8)
+        ttk.Button(bar, text="确定", command=self.ok).pack(side="left", padx=8)
+        ttk.Button(bar, text="取消", command=self.destroy).pack(side="left", padx=6)
+        self.bind("<Control-Return>", lambda e: self.ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def ok(self):
+        self.result = self.txt.get("1.0", "end").strip()
+        self.destroy()
 
 
 class EditDialog(tk.Toplevel):

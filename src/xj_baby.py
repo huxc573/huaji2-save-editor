@@ -183,7 +183,9 @@ class Babies(object):
     def build(self, actor, baby_id, mutation=False, rnd=None):
         """按游戏规则造一只召唤兽（**不**挂到角色上），返回节点。
 
-        `actor` 是主人（Game_Actor 节点）—— 5 维、资质里的“主人等级”用它。
+        `actor` 是主人（Game_Actor 节点）—— 5 维/潜能用的等级是**召唤兽自己**
+        的等级（= Data\\Actors 模板的 `@initial_level`），游戏里
+        `Game_Baby_Attr.new(self)` 的 `master.level` 就是这个值，跟主人等级无关。
         """
         baby_id = int(baby_id)
         info = self.actor_node(baby_id)
@@ -195,7 +197,8 @@ class Babies(object):
         rnd = rnd or random.Random()
         god = cfg.get("type") == "神兽"
         scale = 1.0 if (god or not mutation) else 0.66
-        mlevel = get_int(ivar(actor, "@level"), 1)
+        # 召唤兽自己的初始等级（游戏里 @level = actor.initial_level）
+        level = max(1, get_int(ivar(info, "@initial_level"), 1))
 
         # ---- 资质 / 成长 / 寿命 / 五维
         def zi(key, spread):
@@ -216,19 +219,19 @@ class Babies(object):
                          - _int_rand(rnd, 6) / 100.0 * scale, 2)
             life = int(cfg.get("life", 10000)) - _int_rand(rnd, 13) * 100
         if god:
-            five = {k: 20 + mlevel for k in ("体质", "法力", "力量", "耐力", "敏捷")}
+            five = {k: 20 + level for k in ("体质", "法力", "力量", "耐力", "敏捷")}
         else:
-            five = {k: 10 + mlevel + _int_rand(rnd, 11)
+            five = {k: 10 + level + _int_rand(rnd, 11)
                     for k in ("体质", "法力", "力量", "耐力", "敏捷")}
-        five["潜能"] = mlevel * 5
+        five["潜能"] = level * 5
         loyalty = 100.0
 
         # ---- 属性（满血满蓝）
-        mhp = int(round(five["体质"] * grow * 6 + hpq * mlevel // 1000))
-        mmp = int(round(five["法力"] * grow * 3 + mpq * mlevel // 500))
-        a_atk = int(round(mlevel * atk * (14 + 10 * grow) / 7500.0
+        mhp = int(round(five["体质"] * grow * 6 + hpq * level // 1000))
+        mmp = int(round(five["法力"] * grow * 3 + mpq * level // 500))
+        a_atk = int(round(level * atk * (14 + 10 * grow) / 7500.0
                           + five["力量"] * grow))
-        a_def = int(round(mlevel * dfn * (9.4 + 6 * grow) / 7500.0
+        a_def = int(round(level * dfn * (9.4 + 6 * grow) / 7500.0
                           + five["耐力"] * grow * 4 / 3.0))
         a_agi = int(round(five["敏捷"] * agi / 1000.0))
         a_mat = int(round(five["体质"] * 0.3 + five["法力"] * 0.7
@@ -244,7 +247,6 @@ class Babies(object):
         char_i = get_int(ivar(info, "@character_index"), 0)
         nick = xj_db.s(info, "@nickname") or ""
         class_id = get_int(ivar(info, "@class_id"), baby_id)
-        level = max(1, get_int(ivar(info, "@initial_level"), 1))
         equips = _deref(ivar(info, "@equips"))
 
         # ---- 技能：神兽 = 该职业全部技能；普通 = 每条 40% 概率

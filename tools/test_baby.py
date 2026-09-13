@@ -66,7 +66,6 @@ def main():
 
     n0 = len(B.g.babies(actor))
     active0 = B.active_index(actor)
-    owner_lv = xj_game.get_int(xj_save.ivar(actor, "@level"), 1)
 
     # ---------------- 加一只小孩（小精灵）
     b = B.add(actor, 181)
@@ -86,10 +85,13 @@ def main():
     life = M.value_of(_deref_attr(a, "@life"))
     check("寿命 = :infinite（永生）", life == "infinite", repr(life))
     check("忠诚 = 100", g.baby_value(b, "loyalty") == 100, g.baby_value(b, "loyalty"))
-    check("五维 = 20+主人等级",
-          all(g.baby_value(b, k) == 20 + owner_lv
+    check("五维 = 20+召唤兽自身等级（1 级 = 21）",
+          all(g.baby_value(b, k) == 20 + g.baby_value(b, "level")
               for k in ("体质", "法力", "力量", "耐力", "敏捷")),
           g.baby_value(b, "体质"))
+    check("潜能 = 召唤兽等级 * 5（1 级 = 5）",
+          g.baby_value(b, "潜能") == 5 * g.baby_value(b, "level"),
+          g.baby_value(b, "潜能"))
     check("气血/魔法 > 0（算过满血）",
           g.baby_value(b, "hp") > 0 and g.baby_value(b, "mp") > 0,
           "%s / %s" % (g.baby_value(b, "hp"), g.baby_value(b, "mp")))

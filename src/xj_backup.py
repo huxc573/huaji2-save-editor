@@ -167,13 +167,34 @@ def newest(save_path, prefer=None, this_file=True):
 
 
 def keep_newest(save_path, prefer=None):
-    """只留最新的一份、其余全删（「删除非最新」）。返回 (留下的, 删掉的份数)。"""
+    """「删除非最新」：留最新的一份 + **所有手动备份**，其余全删。
+
+    手动备份是玩家主动留的档，不跟着自动备份一起被清掉。
+    返回 (留下的最新那份, 删掉的份数)。
+    """
     rows = list_backups(save_path, prefer=prefer)
     if len(rows) < 2:
         return (rows[0] if rows else None), 0
     keep = newest(save_path, prefer=prefer)
-    gone = [r["path"] for r in rows if r["path"] != keep["path"]]
+    keep_paths = {keep["path"]}
+    keep_paths.update(r["path"] for r in rows if r["kind"] == KIND_MANUAL)
+    gone = [r["path"] for r in rows if r["path"] not in keep_paths]
     return keep, remove(gone)
+
+
+def set_note(backup_path, note):
+    """给备份写/改备注（存在备份文件旁边的 .txt）；传空串就删掉备注。"""
+    tf = backup_path + ".txt"
+    note = (note or "").strip()
+    try:
+        if note:
+            with open(tf, "w", encoding="utf-8") as f:
+                f.write(note)
+        else:
+            if os.path.exists(tf):
+                os.remove(tf)
+    except OSError:
+        raise IOError("备注写不进去：%s" % tf)
 
 
 def auto_backup_once(path, prefer=None, min_gap=90):

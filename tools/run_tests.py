@@ -33,6 +33,7 @@ TESTS = [
     ("db_csv", ["tools/test_db_csv.py"]),
     ("smoke", ["tools/smoke.py"]),
     ("save_layer", ["tools/test_save_layer.py"]),
+    ("save_files", ["tests/test_save_files.py"]),
     ("verify_all", ["tools/verify_all.py"]),
     ("dist", ["tools/test_dist.py"]),
 ]

@@ -35,7 +35,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.4.7"
+APP_VERSION = "0.5.0"
 EXE_NAME = "画迹2存档工具v" + APP_VERSION
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")
@@ -187,8 +187,11 @@ def find_pyinstaller_python():
     cands.append(sys.executable)
     for p in cands:
         try:
+            # cwd 必须指定：PyInstaller 6.22+ 拒绝在 Windows 系统目录下运行，
+            # 而工具/终端启动脚本时 cwd 未必是仓库根。
             r = subprocess.run([p, "-m", "PyInstaller", "--version"],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, timeout=120,
+                               cwd=ROOT)
         except Exception:
             continue
         if r.returncode == 0:
