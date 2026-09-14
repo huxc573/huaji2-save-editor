@@ -22,6 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import xj_backup  # noqa: E402
 import xj_codec  # noqa: E402
 import xj_edit  # noqa: E402
 import xj_env  # noqa: E402
@@ -96,7 +97,16 @@ class Doc(object):
             new = self.engine.apply()
         M.parse_stream(new)                    # 编不出来就别写，避免写坏档
         if backup and os.path.exists(path):
-            bak = path + ".bak.%s" % time.strftime("%Y%m%d-%H%M%S")
+            # 备份放进 .huaji2-save-editor 目录，不再散落在存档同目录
+            bak_dir = xj_backup.backup_dir(path)
+            base = os.path.basename(path)
+            bak = os.path.join(
+                bak_dir, "%s.bak.%s" % (base, time.strftime("%Y%m%d-%H%M%S")))
+            i = 1
+            while os.path.exists(bak):
+                i += 1
+                bak = "%s-%d" % (bak, i) if not bak[-1].isdigit() \
+                    else "%s-%d" % (bak.rsplit("-", 1)[0], i)
             shutil.copyfile(path, bak)
         if self.plain:
             open(path, "wb").write(new)

@@ -179,6 +179,33 @@ class GameEditor(object):
             raise KeyError("没有 warehouse_page")
         self.doc.set_value(node, int(value))
 
+    # ==================================================== 祈福池
+    # 祈福池窗口里 4 个储备量，存在 $game_party.hash 里（符号键）：
+    # 左键物品加人物储备(actor_*)，右键加宠物储备(baby_*)。
+    # 这 4 个值不在游戏防作弊检查范围内，直接写即可。
+    BLESSING_KEYS = (
+        ("actor_hp_pool", "角色气血储备"),
+        ("actor_mp_pool", "角色魔法储备"),
+        ("baby_hp_pool", "宠物气血储备"),
+        ("baby_mp_pool", "宠物魔法储备"),
+    )
+
+    def blessing_rows(self):
+        """祈福池 4 个储备量：[(key, 显示名, 当前值), ...]。"""
+        h = self._hash()
+        return [(key, cn, get_int(hash_get(h, key)))
+                for key, cn in self.BLESSING_KEYS]
+
+    def set_blessing(self, key, value):
+        """改某个祈福池储备量（负数钳 0），返回实际写入值。"""
+        h = self._hash()
+        node = _deref(hash_get(h, key))
+        if node is None:
+            raise KeyError("祈福池字段不存在：%s" % key)
+        value = max(0, int(value))
+        self.doc.set_value(node, value)
+        return value
+
     def _hash(self):
         """$game_party.hash（Key 是符号，这里用字符串键取）。"""
         return _deref(ivar(self.sv.section("party"), "@hash"))

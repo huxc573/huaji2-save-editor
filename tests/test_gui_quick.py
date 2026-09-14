@@ -681,8 +681,11 @@ def main():
         check("保存后面板重建成功", app.sv is not None)
         check("保存后金钱仍是 7654321", app.sv and app.sv.gold() == 7654321,
               "%r" % (app.sv.gold() if app.sv else None))
-        baks = [x for x in os.listdir(WORK) if ".bak." in x]
-        check("原文件留了备份", len(baks) >= 1, "%r" % baks[:2])
+        baks = [x for x in os.listdir(xj_backup.backup_dir(copy))
+                if ".bak." in x]
+        check("原文件留了备份（在备份目录）", len(baks) >= 1, "%r" % baks[:2])
+        check("存档目录不再散落 .bak.",
+              not [x for x in os.listdir(WORK) if ".bak." in x])
 
         say("重新打开副本…")
         app.load(copy, quiet=True)

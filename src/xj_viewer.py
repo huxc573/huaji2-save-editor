@@ -79,7 +79,7 @@ class _IV(object):
         return xj_save._deref(xj_save.ivar(obj, name))
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.5.1"
+VERSION = "v0.5.2"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -413,31 +413,56 @@ class App(object):
         self.var_steps = tk.StringVar()
         self.var_savecnt = tk.StringVar()
         self.var_battlecnt = tk.StringVar()
-        for r, (label, var) in enumerate(
-                [("金钱", self.var_gold), ("步数", self.var_steps),
-                 ("存档次数", self.var_savecnt), ("战斗次数", self.var_battlecnt)]):
-            ttk.Label(g, text=label + "：", width=9, anchor="w").grid(
-                row=r, column=0, sticky="w", padx=(4, 4), pady=3)
-            ttk.Entry(g, textvariable=var, width=18).grid(
-                row=r, column=1, sticky="w")
-        # v0.5.0 灰字提示：金钱说明（精简，加 wraplength 自动换行）
+        # 单行 4 列：金钱 / 步数 / 存档次数 / 战斗次数（共用同一行）
+        flat_top = [
+            ("金钱", self.var_gold), ("步数", self.var_steps),
+            ("存档次数", self.var_savecnt), ("战斗次数", self.var_battlecnt),
+        ]
+        for i, (label, var) in enumerate(flat_top):
+            col_label = i * 2
+            col_entry = i * 2 + 1
+            ttk.Label(g, text=label + "：", anchor="w").grid(
+                row=0, column=col_label, sticky="w", padx=(4, 2), pady=3)
+            ttk.Entry(g, textvariable=var, width=10).grid(
+                row=0, column=col_entry, sticky="we", padx=(0, 8))
+        # ---- 祈福池储备（4 个值，party.@hash 的 *_pool，单行 4 列）----
+        ttk.Separator(g, orient="horizontal").grid(
+            row=1, column=0, columnspan=8, sticky="we", pady=(8, 6))
+        self.var_bless = {}
+        bless_flat = [
+            ("角色气血", "actor_hp_pool"),
+            ("角色魔法", "actor_mp_pool"),
+            ("宠物气血", "baby_hp_pool"),
+            ("宠物魔法", "baby_mp_pool"),
+        ]
+        for i, (label, key) in enumerate(bless_flat):
+            col_label = i * 2
+            col_entry = i * 2 + 1
+            ttk.Label(g, text=label + "：", anchor="w").grid(
+                row=2, column=col_label, sticky="w", padx=(4, 2), pady=3)
+            var = tk.StringVar(); self.var_bless[key] = var
+            ttk.Entry(g, textvariable=var, width=10).grid(
+                row=2, column=col_entry, sticky="we", padx=(0, 8))
+        # v0.5.0 灰字提示：金钱说明
         ttk.Label(g, text="金钱上限 3000 万；超限自动压到 2500 万（上限 5/6）\n"
                           "改钱会同步重算 Lock 校验和 + 游戏内金钱记账，不会被判定作弊",
                   foreground="#888", justify="left", wraplength=420).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+            row=3, column=0, columnspan=8, sticky="w", pady=(4, 0))
         bar = ttk.Frame(g)
-        bar.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        bar.grid(row=4, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(bar, text="应用", command=self.apply_quick).pack(side="left")
         ttk.Button(bar, text="防作弊检测并修复",
                    command=self.detect_and_fix_cheats).pack(side="left", padx=8)
         self.var_lock = tk.StringVar(value="防作弊检测：—")
         ttk.Label(g, textvariable=self.var_lock, foreground="#c00"
-                  ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        # 存档概况（= 概览内容，放在快捷修改 LabelFrame 里 var_lock 行之后）
+                  ).grid(row=5, column=0, columnspan=8, sticky="w", pady=(6, 0))
+        # 存档概况
         inf = ttk.Frame(g)
-        inf.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=6)
-        g.rowconfigure(7, weight=1)
-        g.columnconfigure(1, weight=1)
+        inf.grid(row=6, column=0, columnspan=8, sticky="nsew", pady=6)
+        g.rowconfigure(6, weight=1)
+        # 4 个 entry 列等权重 → 4 组输入框平均分配宽度
+        for c in (1, 3, 5, 7):
+            g.columnconfigure(c, weight=1)
         self.txt_info = tk.Text(inf, height=10, wrap="none", font=("Consolas", 10))
         vs = ttk.Scrollbar(inf, orient="vertical", command=self.txt_info.yview)
         hs = ttk.Scrollbar(inf, orient="horizontal", command=self.txt_info.xview)
@@ -2292,6 +2317,10 @@ class App(object):
                           (self.var_battlecnt, "@battle_count")):
             v = self.sv.sys_get(name)
             var.set("" if v is None else str(v))
+        # 祈福池 4 个储备量回填
+        if hasattr(self, "var_bless") and self.g:
+            for key, _cn, val in self.g.blessing_rows():
+                self.var_bless[key].set(str(val))
         self.var_lock.set("防作弊检测：%s"
                           % ("Lock 校验和正常" if not bad
                              else "Lock 不一致 %d 处，点「防作弊检测并修复」"
@@ -2336,6 +2365,12 @@ class App(object):
             if self.var_battlecnt.get().strip():
                 self.sv.sys_set("@battle_count",
                                 parse_num(self.var_battlecnt.get()))
+            # 祈福池储备（4 个值共享同一个「应用」按钮）
+            if self.g and hasattr(self, "var_bless"):
+                for key, _cn, old in self.g.blessing_rows():
+                    raw = self.var_bless[key].get().strip()
+                    if raw:
+                        self.g.set_blessing(key, parse_num(raw))
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return

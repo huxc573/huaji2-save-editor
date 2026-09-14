@@ -14,6 +14,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.stdout.reconfigure(errors="replace")
 
+import xj_backup  # noqa: E402
 import xj_env  # noqa: E402
 import xj_game  # noqa: E402
 import xj_marshal as M  # noqa: E402
@@ -425,8 +426,10 @@ def main():
     check("重开后召唤兽改动还在",
           g2.baby_value(g2.babies(actor2)[0][1], "level") == 7,
           g2.baby_value(g2.babies(actor2)[0][1], "level"))
-    baks = [f for f in os.listdir(WORK) if ".bak." in f]
-    check("原文件留了备份", len(baks) >= 1, "%r" % baks[:2])
+    baks = [f for f in os.listdir(xj_backup.backup_dir(copy)) if ".bak." in f]
+    check("原文件留了备份（在备份目录）", len(baks) >= 1, "%r" % baks[:2])
+    check("存档目录不再散落 .bak.",
+          not [f for f in os.listdir(WORK) if ".bak." in f])
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
