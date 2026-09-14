@@ -34,6 +34,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import xj_aes  # noqa: E402
+import xj_exps  # noqa: E402   # 升级经验表（游戏脚本里的 $exps，tools/gen_exp_table.py 生成）
 import xj_marshal as M  # noqa: E402
 import xj_notes  # noqa: E402
 import xj_payload  # noqa: E402
@@ -91,6 +92,28 @@ def hex_str_node(hexstr):
 
 def nil_node():
     return M.NilNode()
+
+
+def exp_for_level(level, kind="actor"):
+    """升到下一级所需的经验 —— **查表**（游戏脚本里的 `$exps`），不是公式算的。
+
+    游戏脚本：
+        def exp_for_level(lv)  = $exps[:actor][lv - 1]
+        def next_level_exp     = exp_for_level(@level + 1) == $exps[:actor][@level]
+    所以**下标就是当前等级**：40 级 → `ACTOR_EXP[40]`（= 332296，和游戏里显示的一致）。
+
+    ⚠ 别拿 `@limit_exp` 当升级所需经验，那是「累计获得经验」的计数器。
+
+    kind: "actor"（角色）/ "baby"（召唤兽）。越界（满级 / 等级异常）返回 None。
+    """
+    tbl = xj_exps.BABY_EXP if kind == "baby" else xj_exps.ACTOR_EXP
+    try:
+        lv = int(level)
+    except (TypeError, ValueError):
+        return None
+    if lv < 0 or lv >= len(tbl):
+        return None
+    return tbl[lv]
 
 
 def get_int(node, default=0):
@@ -1301,11 +1324,24 @@ class GameEditor(object):
 
     # ==================================================== 经验
     def exp(self, actor):
-        """角色经验（Hash：职业id → 经验）。"""
+        """角色「本级经验」= `@exp[@class_id]`。
+
+        ⚠ `@exp` 是个 Hash（**职业id → 经验**），游戏读的是 `@exp[@class_id]`，
+        不是"Hash 里第一项"——这俩平时碰巧一样（没转过职的存档只有一项），
+        但转职过的角色会同时留着旧职业那条，取第一项就取错了。
+        """
         h = _deref(ivar(actor, "@exp"))
         if not isinstance(h, M.HashNode) or not h.pairs:
             return 0
-        return M.value_of(_deref(h.pairs[0][1])) or 0
+        want = M.value_of(_deref(ivar(actor, "@class_id")))
+        picked = None
+        for k, v in h.pairs:
+            if want is not None and M.value_of(_deref(k)) == want:
+                picked = _deref(v)
+                break
+        if picked is None:
+            picked = _deref(h.pairs[0][1])
+        return M.value_of(picked) or 0
 
     def set_actor_level(self, actor, value):
         """改角色等级，自动触发潜能/五维调整（和召唤兽一样的规则）。"""
@@ -1314,12 +1350,60 @@ class GameEditor(object):
         attr = _deref(ivar(actor, "@attr"))
         self._apply_level_delta(attr, int(value) - old_lv)
 
+    def set_actor_level_full(self, actor, level, sync_exp=True):
+        """改等级 + 把 @exp 对齐到该等级的门槛（`init_exp` 的语义）。
+
+        为什么必须一起改：游戏升级走的是 `gain_exp` → `change_exp`，
+        而 `change_exp` 里**没有**升级逻辑，等级只在玩家点「升级」按钮
+        （`level_up?` 判定后调 `actor.level_up`）时才 +1。
+        满级角色 gain_exp 第一行就 return，所以只改 @exp 在游戏里
+        永远看不出变化 —— 等级要动，就得直接改 @level。
+
+        返回 (等级, 是否写了 exp)；level 会被夹到 1..MAX_LEVEL_ACTOR。
+        """
+        lv = int(level)
+        if lv < 1:
+            lv = 1
+        if lv > MAX_LEVEL_ACTOR:
+            lv = MAX_LEVEL_ACTOR
+        self.set_actor_level(actor, lv)
+        wrote = None
+        if sync_exp:
+            wrote = self.sync_exp_to_level(actor, lv)
+        return lv, wrote
+
     def set_exp(self, actor, value):
+        node = self.exp_node(actor)
+        if node is None:
+            raise KeyError("这个角色没有 @exp")
+        self.doc.set_value(node, int(value))
+        return int(value)
+
+    def sync_exp_to_level(self, actor, level):
+        """把 @exp 设成 level 对应的「本级起始经验」。
+        游戏里 `init_exp` 就是 `@exp[@class_id] = current_level_exp`
+        （= `exp_for_level(@level)`），升级时 `exp - next_level_exp` 会减到门槛重来。
+        ⚠ 游戏**只在 gain_exp 时才会动等级**（编辑器里 `level_up?` → 玩家点按钮
+        → `actor.level_up`），光改 @exp 不会让等级变；而且满级角色 gain_exp
+        直接 return，改 exp 完全没反应。所以「调等级」必须同时把 exp 对齐，
+        否则会出现「60 级但获得经验 0」这种读出来怪怪的档。
+        返回写进去的值 / None（满级或其他取不到门槛的情况）。
+        """
+        tbl = exp_for_level(level, "actor")
+        if tbl is None:
+            return None
+        return self.set_exp(actor, tbl)
+
+    def exp_node(self, actor):
+        """`@exp[@class_id]` 对应的那个节点（要写值就往这儿写）。"""
         h = _deref(ivar(actor, "@exp"))
         if not isinstance(h, M.HashNode) or not h.pairs:
-            raise KeyError("这个角色没有 @exp")
-        self.doc.set_value(_deref(h.pairs[0][1]), int(value))
-        return int(value)
+            return None
+        want = M.value_of(_deref(ivar(actor, "@class_id")))
+        for k, v in h.pairs:
+            if want is not None and M.value_of(_deref(k)) == want:
+                return _deref(v)
+        return _deref(h.pairs[0][1])
 
     def exp_key(self, actor):
         h = _deref(ivar(actor, "@exp"))
@@ -1327,15 +1411,87 @@ class GameEditor(object):
             return M.value_of(_deref(h.pairs[0][0]))
         return None
 
-    def limit_exp(self, actor):
-        return get_int(ivar(actor, "@limit_exp"))
+    # ---------------- 「累计获得经验」= 经验封顶开关（以前叫"升级所需经验"）
+    # 游戏脚本 Game_Actor#gain_exp：
+    #     @limit_exp ||= 0
+    #     if @limit_exp > 202123741
+    #       $tip.say("体验版本, #{name}经验累计获得已达上限：202273024", 1)
+    #       return          # ← 直接返回，这一级的经验一个字节都不给
+    #     end
+    #     @limit_exp += exp
+    # 也就是说它**既是累计计数器，又是"还发不发经验"的开关**：
+    # 一旦超过 202123741，再获得的经验会被**全部丢弃**（等级也涨不上去）。
+    LIMIT_EXP_MAX = 202123741
 
-    def set_limit_exp(self, actor, value):
+    def limit_exp(self, actor):
+        """累计获得经验（0 = 该角色没有这个 ivar，也就是从没拿过经验）。"""
+        return get_int(ivar(actor, "@limit_exp"), 0)
+
+    def limit_exp_on(self, actor):
+        """这个角色还有没有"经验额度"（False = 封顶了，再打也不给经验）。
+
+        游戏脚本 `Game_Actor#gain_exp` 裁判的是 **写入前** 的值：
+            if @limit_exp > 202123741  → 直接 return（这一级的经验一个字节都不给）
+            else @limit_exp += exp
+        所以：值 ≤ 202123741 时还有额度；一旦越过这条线，**后续获得的经验全部作废**。
+        """
         node = _deref(ivar(actor, "@limit_exp"))
         if node is None:
-            raise KeyError("这个角色没有 @limit_exp")
-        self.doc.set_value(node, int(value))
-        return int(value)
+            return True                 # 没这个 ivar 的角色不会被判封顶
+        return self.limit_exp(actor) <= self.LIMIT_EXP_MAX
+
+    def limit_exp_room(self, actor):
+        """还剩多少经验额度才到线（提前提醒用）。"""
+        return max(0, self.LIMIT_EXP_MAX - self.limit_exp(actor))
+
+    def set_limit_exp(self, actor, value):
+        """写累计获得经验。**只允许 0..202123741**，超了游戏就再也不发经验了。
+
+        返回：写入的值 / None（角色没有这个 ivar，跳过）/ False（输入不合法）。
+        """
+        v = int(value)
+        if v < 0 or v > self.LIMIT_EXP_MAX:
+            return False
+        node = _deref(ivar(actor, "@limit_exp"))
+        if node is None:
+            # 没拿过经验的角色压根没这个 ivar。硬加一个属于结构性改动
+            # （整档重写 + 对象链接重排），为改个计数器不值得冒这个险。
+            return None
+        self.doc.set_value(node, v)
+        return v
+
+    def reset_limit_exp(self):
+        """把所有角色的累计获得经验清零 —— 体验版「经验已达上限」的解法。
+
+        返回 [(角色名, 原值), …]。零值本来就没这个 ivar，不用动。
+        """
+        out = []
+        for _aid, actor in self.sv.actors():
+            node = _deref(ivar(actor, "@limit_exp"))
+            if node is None:
+                continue
+            old = self.limit_exp(actor)
+            if old == 0:
+                continue
+            self.doc.set_value(node, 0)
+            out.append((self.sv.actor_name(actor), old))
+        return out
+
+    # ---- 升级所需经验：**查表**，不是公式
+    def actor_level(self, actor):
+        return get_int(ivar(actor, "@level"), 0)
+
+    def next_level_exp(self, actor):
+        """升到下一级所需的经验（游戏界面上显示的那个数）。
+
+        游戏里 `next_level_exp = exp_for_level(@level + 1) = $exps[:actor][@level]`
+        —— 是**查表**得来的，跟存档字段无关；满级或等级越界返回 None。
+        """
+        return exp_for_level(self.actor_level(actor), "actor")
+
+    def baby_next_level_exp(self, baby):
+        """召唤兽的升级所需经验（同一套表，用 :baby 那张）。"""
+        return exp_for_level(get_int(ivar(baby, "@level"), 0), "baby")
 
     def add_exp(self, actor, delta):
         return self.set_exp(actor, self.exp(actor) + int(delta))

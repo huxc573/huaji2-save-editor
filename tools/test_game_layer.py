@@ -431,6 +431,151 @@ def main():
     check("存档目录不再散落 .bak.",
           not [f for f in os.listdir(WORK) if ".bak." in f])
 
+    # ---------------- 升级所需经验 = 查表（不是 @limit_exp）
+    print("\n-- 升级所需经验（游戏脚本 $exps 查表）--")
+    sv3 = xj_save.SaveDoc(copy)
+    g3 = xj_game.GameEditor(sv3)
+    check("actor 表：40 级 = 332296（游戏界面上显示的数）",
+          xj_game.exp_for_level(40, "actor") == 332296,
+          xj_game.exp_for_level(40, "actor"))
+    check("baby 表：40 级 = 84050",
+          xj_game.exp_for_level(40, "baby") == 84050,
+          xj_game.exp_for_level(40, "baby"))
+    check("等级越界返回 None", xj_game.exp_for_level(9999) is None)
+    check("等级非法（None）返回 None", xj_game.exp_for_level(None) is None)
+
+    a3 = sv3.actors()[0][1]
+    lv3 = g3.actor_level(a3)
+    check("next_level_exp == 表里[当前等级]",
+          g3.next_level_exp(a3) == xj_game.exp_for_level(lv3, "actor"),
+          "lv=%s → %s" % (lv3, g3.next_level_exp(a3)))
+    g3.set_actor_level(a3, 20)
+    check("改等级后升级所需经验跟着变",
+          g3.next_level_exp(a3) == xj_game.exp_for_level(20, "actor"),
+          g3.next_level_exp(a3))
+
+    # @limit_exp 是「累计获得经验」的封顶计数器，不是升级所需经验
+    none_lim = [a for _, a in sv3.actors()
+                if xj_save._deref(xj_save.ivar(a, "@limit_exp")) is None]
+    if none_lim:
+        check("没这个 ivar 的角色：limit_exp 读到 0（不再是空白）",
+              g3.limit_exp(none_lim[0]) == 0, g3.limit_exp(none_lim[0]))
+        check("没这个 ivar 的角色：set_limit_exp 返回 None 且不抛异常",
+              g3.set_limit_exp(none_lim[0], 123) is None)
+    else:
+        check("（本存档所有角色都有 @limit_exp，跳过缺字段场景）", True)
+    has_lim = [a for _, a in sv3.actors()
+               if xj_save._deref(xj_save.ivar(a, "@limit_exp")) is not None]
+    if has_lim:
+        check("有这个 ivar 的角色：能正常写入",
+              g3.set_limit_exp(has_lim[0], 7) == 7 and g3.limit_exp(has_lim[0]) == 7)
+
+    # ---------------- 累计获得经验 = 经验封顶开关
+    print("\n-- 累计获得经验（@limit_exp = 游戏的经验封顶开关）--")
+    check("封顶线 = 202123741", g3.LIMIT_EXP_MAX == 202123741, g3.LIMIT_EXP_MAX)
+    lim_actor = has_lim[0] if has_lim else None
+    if lim_actor is not None:
+        # 超线 = 游戏再也不发经验 → 必须拒收（以前工具让它写进去，等于把角色改废）
+        check("拒绝写入超线值（返回 False，且没写进去）",
+              g3.set_limit_exp(lim_actor, 999999999) is False
+              and g3.limit_exp(lim_actor) != 999999999,
+              "现值 %s" % g3.limit_exp(lim_actor))
+        check("拒绝写入负数", g3.set_limit_exp(lim_actor, -1) is False)
+        check("刚好等于封顶线是允许的",
+              g3.set_limit_exp(lim_actor, g3.LIMIT_EXP_MAX) == g3.LIMIT_EXP_MAX)
+        check("刚过线 → limit_exp_on() = False（游戏不再发经验）",
+              g3.set_limit_exp(lim_actor, g3.LIMIT_EXP_MAX + 1) is False
+              or g3.limit_exp_on(lim_actor) is False,
+              "现值 %s" % g3.limit_exp(lim_actor))
+        check("线内时 limit_exp_on() = True",
+              g3.set_limit_exp(lim_actor, g3.LIMIT_EXP_MAX - 1) is not None
+              and g3.limit_exp_on(lim_actor) is True)
+        check("额度提示：线内还剩多少",
+              g3.limit_exp_room(lim_actor) == 1, g3.limit_exp_room(lim_actor))
+    else:
+        check("（本存档没有带 @limit_exp 的角色，跳过封顶用例）", True)
+
+    if none_lim:
+        check("没这个 ivar 的角色不会被判封顶",
+              g3.limit_exp_on(none_lim[0]) is True)
+
+    # 清零：把顶着上限的角色全清掉
+    if lim_actor is not None:
+        g3.set_limit_exp(lim_actor, g3.LIMIT_EXP_MAX)
+        done = g3.reset_limit_exp()
+        check("「清零」把超线角色清成 0（游戏重新发经验）",
+              g3.limit_exp(lim_actor) == 0 and g3.limit_exp_on(lim_actor) is True
+              and any(n == sv3.actor_name(lim_actor) for n, _v in done),
+              "%r" % (done,))
+
+    # ---------------- 获得经验写对格子（@exp 是「职业id → 经验」的 Hash）
+    print("\n-- 获得经验（@exp[@class_id]，不是 Hash 第一项）--")
+    a4 = sv3.actors()[0][1]
+    e_before = g3.exp(a4)
+    g3.set_exp(a4, 12345)
+    check("改获得经验写进了 @exp[@class_id]", g3.exp(a4) == 12345, g3.exp(a4))
+    en = g3.exp_node(a4)
+    check("写的是 class_id 对应的那个节点",
+          en is not None and xj_save.M.value_of(en) == 12345,
+          "class_id=%s" % xj_save.M.value_of(xj_save._deref(
+              xj_save.ivar(a4, "@class_id"))))
+    check("exp_key() 与 @class_id 一致",
+          g3.exp_key(a4) == xj_save.M.value_of(xj_save._deref(
+              xj_save.ivar(a4, "@class_id"))))
+    g3.set_exp(a4, e_before)
+
+    # 造一个「转过职」的存档：Hash 里塞一条别的职业，游戏读 class_id 那条
+    h = xj_save._deref(xj_save.ivar(a4, "@exp"))
+    cid = g3.exp_key(a4)
+    other = 999 if cid != 999 else 998
+    h.pairs.insert(0, (M.IntNode(other), M.IntNode(777777)))
+    check("转过职的存档：exp() 仍读 @class_id 那条（不被 Hash 第一项带偏）",
+          g3.exp(a4) == e_before,
+          "Hash=%r" % [(M.value_of(xj_save._deref(k)),
+                        M.value_of(xj_save._deref(v))) for k, v in h.pairs])
+    g3.set_exp(a4, 555)
+    check("转过职的存档：set_exp 也写 @class_id 那条",
+          g3.exp(a4) == 555
+          and M.value_of(xj_save._deref(h.pairs[0][1])) == 777777,
+          "第一项仍是 777777")
+
+    # ---------------- 改等级必须把 @exp 对齐（光改 @exp 游戏里永远看不到变化）
+    print("\n-- set_actor_level_full：级别 + 获得经验一起对齐 --")
+    check("游戏满级 = 60（MAX_LEVEL_ACTOR）", xj_game.MAX_LEVEL_ACTOR == 60,
+          xj_game.MAX_LEVEL_ACTOR)
+    check("满级门槛 exp_for_level(60) = 1091704",
+          xj_game.exp_for_level(60, "actor") == 1091704)
+    a5 = sv3.actors()[0][1]
+    lv5, wrote5 = g3.set_actor_level_full(a5, 40)
+    check("设 40 级：等级写进 @level", g3.actor_level(a5) == 40, g3.actor_level(a5))
+    check("设 40 级：@exp 同步成该级门槛 332296",
+          wrote5 == 332296 and g3.exp(a5) == 332296, g3.exp(a5))
+    check("同步后 next_level_exp 正好查到 41 级门槛",
+          g3.next_level_exp(a5) == xj_game.exp_for_level(40, "actor"))
+
+    lv6, _w = g3.set_actor_level_full(a5, 60)
+    check("设 60 级：等级夹到满级", lv6 == 60 and g3.actor_level(a5) == 60)
+    check("设 60 级：@exp = 1091704（不是 0，也不是原值）",
+          g3.exp(a5) == 1091704, g3.exp(a5))
+    check("满级后 sync_exp_to_level 仍取得到门槛", 
+          g3.sync_exp_to_level(a5, 60) == 1091704)
+
+    lv7, _w = g3.set_actor_level_full(a5, 999)
+    check("等级超上限被夹到 60", lv7 == 60 and g3.actor_level(a5) == 60)
+    lv8, _w = g3.set_actor_level_full(a5, -5)
+    check("等级为负被夹到 1", lv8 == 1 and g3.actor_level(a5) == 1)
+    check("1 级的 @exp = 110（表的第 1 项）", g3.exp(a5) == 110, g3.exp(a5))
+
+    _lv9, wrote9 = g3.set_actor_level_full(a5, 30, sync_exp=False)
+    check("sync_exp=False 时不碰 @exp",
+          wrote9 is None and g3.exp(a5) == 110, g3.exp(a5))
+
+    # 显式写的 @exp 要能盖过等级同步（界面上先设等级再写 exp 的顺序依赖这个）
+    g3.set_actor_level_full(a5, 20)
+    g3.set_exp(a5, 777)
+    check("等级同步后再显式 set_exp 能盖过它",
+          g3.exp(a5) == 777 and g3.actor_level(a5) == 20)
+
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
     return 1 if OK[1] else 0

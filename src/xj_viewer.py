@@ -338,11 +338,25 @@ class App(object):
         self._build_status()
 
         auto = save_path or self._guess_save()
+        self._auto_load_job = None
         if auto:
             self.var_path.set(auto)
-            root.after(200, lambda: self.load(auto))
+            # ⚠ 这个延迟载入必须能被取消：万一（比如自动化脚本）随后手动
+            # load 了别的文件，200ms 后这个回调会醒来把 doc 换回 auto，
+            # 之后所有改动都落在 auto 那本档上 —— 玩家真档就这么被写坏过
+            # （2026-09-14 踩到）。cancel_auto_load() 给它留个后门。
+            self._auto_load_job = root.after(200, lambda: self.load(auto))
         else:
             self.set_status("请点「选择存档…」打开 <游戏根>\\save.rvdata2")
+
+    def cancel_auto_load(self):
+        """取消 __init__ 里排队的延迟自动载入（自动化/测试脚本必须先调）。"""
+        if getattr(self, "_auto_load_job", None) is not None:
+            try:
+                self.root.after_cancel(self._auto_load_job)
+            except Exception:
+                pass
+            self._auto_load_job = None
 
     # ================================================== 顶部
     def _build_top(self, save_path):
@@ -959,34 +973,80 @@ class App(object):
         self.tv_actor.pack(fill="x")
         self.tv_actor.bind("<<TreeviewSelect>>", lambda e: self.load_actor())
 
-        mid = ttk.Frame(f)
-        mid.pack(fill="x", pady=6)
-        g = ttk.LabelFrame(mid, text="基础字段", padding=8)
-        g.pack(side="left", fill="y")
+        # ---- 左右布局（PanedWindow，中间可拖）：左「基础字段」/ 右「属性概览」
+        # 参考「概览 / 快捷修改」页的写法，两边等大 weight=1。
+        mid = ttk.Panedwindow(f, orient="horizontal")
+        mid.pack(fill="both", expand=True, pady=6)
+
+        # ========== 左：基础字段 + 中文属性 ==========
+        left = ttk.Frame(mid)
+        mid.add(left, weight=1)
+        g = ttk.LabelFrame(left, text="基础字段", padding=8)
+        g.pack(fill="x")
+        self._actor_entry_parent = str(g)   # 冒烟测试用来确认左右确实分开了
         self.actor_vars = {}
-        base = [("@name", "名字"), ("@level", "等级（上限 60）"),
-                ("@hp", "HP"), ("@mp", "MP"), ("@tp", "TP"),
-                ("@exp", "获得经验"), ("@limit_exp", "升级所需经验")]
+        # 名字跟**游戏界面**保持一致（游戏里叫「获得经验」「升级经验」），免得对不上。
+        # 「升级经验」是查表算出来的（游戏脚本 $exps[:actor][等级]），
+        # 存档里没这个字段 → 用 "#" 前缀标记成只读。
+        base = [("@name", "名字"), ("@level", "级别"),
+                ("@hp", "气血"), ("@mp", "魔法"), ("@tp", "愤怒"),
+                ("@exp", "获得经验"), ("#next_exp", "升级经验")]
+        # 每行**4 列**（和「概览 / 快捷修改」页的金钱/步数/存档次数/战斗次数同一套排法）：
+        # 一行一个太占地，7 个字段会拉成 7 行把下面的按钮条挤没；4 列只要 2 行。
+        # 行序 = i//4，第几组列 = i%4；每组占 2 个 grid 列（标签 + 输入框）。
         for i, (k, label) in enumerate(base):
-            ttk.Label(g, text=label, width=12).grid(row=i, column=0, sticky="w", pady=2)
+            r, c = i // 4, i % 4
+            # 「升级经验」是查表算的，只读 → 灰一点，一眼能分辨
+            fg = "#8a8a8a" if k.startswith("#") else ""
+            # ⚠ 不要给标签设 width：撑宽后文字右边的空白全垫在输入框左边
+            # （2026-09-14 川截图反馈）。照「快捷修改」的样式：自适应 + 全角冒号。
+            ttk.Label(g, text=label + "：", foreground=fg).grid(
+                row=r, column=c * 2, sticky="w", pady=2,
+                padx=(0 if c == 0 else 10, 2))
             var = tk.StringVar()
-            ttk.Entry(g, textvariable=var, width=18).grid(row=i, column=1, pady=2)
+            ro = "readonly" if k.startswith("#") else "normal"
+            ent = ttk.Entry(g, textvariable=var, width=13, state=ro)
+            ent.grid(row=r, column=c * 2 + 1, pady=2, sticky="we")
             self.actor_vars[k] = var
+            # 「获得经验」这格最容易踩坑（改了游戏里不动），挂个悬浮说明
+            if k == "@exp":
+                self._bind_tip(ent, "本级内经验（存档 @exp[@class_id]）。\n"
+                                    "⚠ 游戏只在打怪/任务拿到经验时才升级，\n"
+                                    "光改这里游戏里不会升级 —— 而且满级角色\n"
+                                    "游戏直接不发经验，改了完全没反应。\n"
+                                    "要调等级请直接改旁边的「级别」。")
+            elif k == "#next_exp":
+                self._bind_tip(ent, "升到下一级还需要的经验（查游戏表 $exps，\n"
+                                    "下标就是当前等级）。存档里没有这个字段，\n"
+                                    "所以只读、改了也没用。")
+        # 4 组输入框等权重，窗口拉宽时一起变宽
+        for c in (1, 3, 5, 7):
+            g.columnconfigure(c, weight=1)
+        # 改等级要不要顺手把「获得经验」对到该等级的门槛上（接在最后一行下面）
+        nrow = (len(base) + 3) // 4
+        self.var_sync_exp = tk.IntVar(value=1)
+        ttk.Checkbutton(g, text="改级别时同步「获得经验」",
+                        variable=self.var_sync_exp).grid(
+            row=nrow, column=0, columnspan=8, sticky="w", pady=(4, 0))
 
-        g2 = ttk.LabelFrame(mid, text="中文属性（Game_Actor_Attr）", padding=8)
-        g2.pack(side="left", fill="y", padx=8)
+        g2 = ttk.LabelFrame(left, text="中文属性（Game_Actor_Attr）", padding=8)
+        g2.pack(fill="x", pady=(6, 0))
         self.attr_vars = {}
+        # 每行 4 列（原来是 5 行 × 2 列）→ 10 个字段只要 3 行
         for i, k in enumerate(xj_save.SaveDoc.ATTR_FIELDS):
-            col = (i // 5) * 2
-            ttk.Label(g2, text=k[1:], width=7).grid(row=i % 5, column=col,
-                                                   sticky="w", pady=2)
+            r, c = i // 4, i % 4
+            ttk.Label(g2, text=k[1:] + "：").grid(
+                row=r, column=c * 2, sticky="w", pady=2,
+                padx=(0 if c == 0 else 10, 2))
             var = tk.StringVar()
-            ttk.Entry(g2, textvariable=var, width=8).grid(row=i % 5, column=col + 1,
-                                                          pady=2, padx=(0, 8))
+            ttk.Entry(g2, textvariable=var, width=8).grid(
+                row=r, column=c * 2 + 1, pady=2, sticky="we")
             self.attr_vars[k] = var
+        for c in (1, 3, 5, 7):
+            g2.columnconfigure(c, weight=1)
 
-        bar = ttk.Frame(f)
-        bar.pack(fill="x")
+        bar = ttk.Frame(left)
+        bar.pack(fill="x", pady=(6, 0))
         ttk.Button(bar, text="应用修改", command=self.apply_actor).pack(side="left")
         ttk.Button(bar, text="满级(60)",
                    command=lambda: self.actor_preset("maxlv")).pack(side="left", padx=6)
@@ -998,14 +1058,24 @@ class App(object):
         ttk.Button(bar, text="属性全 +10",
                    command=lambda: self.actor_preset("attr")).pack(side="left", padx=6)
 
-        ttk.Label(f, text="已学技能 / 装备 / 五维（只读，技能名取自 Data\\Skills.rvdata2）"
-                  ).pack(anchor="w", pady=(8, 0))
-        self.txt_actor = tk.Text(f, height=8, wrap="word",
+        # ========== 右：属性概览 ==========
+        right = ttk.LabelFrame(mid, text="属性概览", padding=8)
+        mid.add(right, weight=1)
+        # 满级提示做成悬浮说明（鼠标移到概览上就能看），不再占版面
+        self._actor_tip_holder = ttk.Frame(right)
+        self._actor_tip_holder.pack(fill="both", expand=True)
+        self.txt_actor = tk.Text(self._actor_tip_holder, wrap="word",
                                  font=("Microsoft YaHei UI", 10))
-        vs_ta = ttk.Scrollbar(f, orient="vertical", command=self.txt_actor.yview)
+        vs_ta = ttk.Scrollbar(self._actor_tip_holder, orient="vertical",
+                              command=self.txt_actor.yview)
         self.txt_actor.configure(yscrollcommand=vs_ta.set)
         vs_ta.pack(side="right", fill="y")
         self.txt_actor.pack(fill="both", expand=True)
+        # 鼠标移到概览上 → 浮窗给出「满级 / 经验封顶 / 升级还差多少」这类提醒
+        self.txt_actor.bind("<Motion>", self._actor_tip_motion)
+        self.txt_actor.bind("<Leave>", lambda e: self._tip_hide())
+        # 初始把分隔条放中间（等窗口实际尺寸出来后再设）
+        self.root.after(150, lambda: mid.sashpos(0, mid.winfo_width() // 2))
 
     # -------------------------------------------------- 4 队伍 / 物品
     def _tab_party(self):
@@ -1208,10 +1278,13 @@ class App(object):
         mid = ttk.Frame(f)
         mid.pack(fill="both", expand=True, pady=(6, 0))
         left = ttk.Frame(mid)
-        left.pack(side="left", fill="both", expand=True)
+        left.pack(side="left", fill="both")
+        right = ttk.Frame(mid)
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
         cols2 = ("k", "v")
         self.tv_baby = ttk.Treeview(left, columns=cols2, show="headings", height=12)
-        for c, w, t in (("k", 190, "字段"), ("v", 300, "当前值")):
+        # 字段列要能显示长标签（如「忠诚度（<100 不能参战）」），当前值多为短数字
+        for c, w, t in (("k", 170, "字段"), ("v", 110, "当前值")):
             self.tv_baby.heading(c, text=t)
             self.tv_baby.column(c, width=w, anchor="w")
         vs_baby = ttk.Scrollbar(left, orient="vertical", command=self.tv_baby.yview)
@@ -1220,63 +1293,88 @@ class App(object):
         self.tv_baby.pack(fill="both", expand=True)
         self.tv_baby.bind("<<TreeviewSelect>>", lambda e: self.baby_pick())
 
-        # ---------------- 名字 + 技能
-        right = ttk.Frame(mid)
-        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        nf = ttk.LabelFrame(right, text="名字（改显示名 @attr.@name；基础名 @name 管立绘/音效，不提供修改）",
-                            padding=6)
-        nf.pack(fill="x")
+        # ---------------- 常用（名字+技能）/ 详细信息（2 列：2/3 vs 1/3）
+        commonf = ttk.LabelFrame(right, text="常用", padding=6)
+        commonf.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        # ---- 名字
+        name_row = ttk.Frame(commonf)
+        name_row.pack(fill="x")
+        ttk.Label(name_row, text="名字：").pack(side="left")
         self.var_baby_name = tk.StringVar()
-        ttk.Entry(nf, textvariable=self.var_baby_name, width=16).pack(side="left")
-        ttk.Button(nf, text="改显示名",
+        ttk.Entry(name_row, textvariable=self.var_baby_name, width=16).pack(side="left")
+        ttk.Button(name_row, text="改显示名",
                    command=self.baby_rename).pack(side="left", padx=3)
 
-        skf = ttk.LabelFrame(right, text="技能（@skills，最多 12 个）", padding=6)
-        skf.pack(fill="both", expand=True, pady=(6, 0))
-        skbar = ttk.Frame(skf)
-        skbar.pack(fill="x")
-        ttk.Label(skbar, text="搜索").pack(side="left")
+        # ---- 技能
+        ttk.Label(commonf, text="技能：").pack(anchor="w", pady=(6, 0))
+        sk_search = ttk.Frame(commonf)
+        sk_search.pack(fill="x")
+        ttk.Label(sk_search, text="搜索").pack(side="left")
         self.var_skill_search = tk.StringVar()
-        ske = ttk.Entry(skbar, textvariable=self.var_skill_search, width=8)
+        ske = ttk.Entry(sk_search, textvariable=self.var_skill_search, width=8)
         ske.pack(side="left", padx=3)
         ske.bind("<KeyRelease>", lambda e: self.fill_skill_templates())
         self.var_skill_pick = tk.StringVar()
-        self.cb_skill = ttk.Combobox(skbar, textvariable=self.var_skill_pick,
+        self.cb_skill = ttk.Combobox(sk_search, textvariable=self.var_skill_pick,
                                      state="readonly", width=20)
         self.cb_skill.pack(side="left")
         self.cb_skill.bind("<<ComboboxSelected>>",
                            lambda e: self.show_skill_desc())
         self.cb_skill.bind("<Down>", lambda e: self._skill_arrow(1))
         self.cb_skill.bind("<Up>", lambda e: self._skill_arrow(-1))
-        ttk.Button(skbar, text="学会", command=self.baby_skill_add).pack(side="left",
-                                                                       padx=4)
-        ttk.Button(skbar, text="忘掉",
+
+        # 川：学会一排按钮放到下一行
+        sk_btns = ttk.Frame(commonf)
+        sk_btns.pack(fill="x", pady=(4, 0))
+        ttk.Button(sk_btns, text="学会", command=self.baby_skill_add).pack(side="left",
+                                                                           padx=(0, 4))
+        ttk.Button(sk_btns, text="忘掉",
                    command=self.baby_skill_del).pack(side="left")
-        ttk.Button(skbar, text="清空", command=self.baby_skill_clear).pack(
+        ttk.Button(sk_btns, text="清空", command=self.baby_skill_clear).pack(
             side="left", padx=4)
-        ttk.Button(skbar, text="从…克隆",
+        ttk.Button(sk_btns, text="从…克隆",
                    command=self.baby_skill_clone).pack(side="left")
-        self.var_skill_desc = tk.StringVar(value="")
-        ttk.Label(skf, textvariable=self.var_skill_desc, foreground="#555",
-                  justify="left", wraplength=560).pack(anchor="w", pady=(4, 0))
-        self.tv_baby_skills = ttk.Treeview(skf, columns=("id", "name", "desc"),
+
+        # 技能选择框（去掉描述列）
+        self.tv_baby_skills = ttk.Treeview(commonf, columns=("id", "name"),
                                            show="headings", height=8,
                                            selectmode="browse")
-        for c, t, w in (("id", "技能 id", 62), ("name", "名字", 140),
-                        ("desc", "描述", 340)):
+        for c, t, w in (("id", "技能 id", 62), ("name", "名字", 200)):
             self.tv_baby_skills.heading(c, text=t)
-            self.tv_baby_skills.column(c, width=w, anchor="w")
-        vs_bsk = ttk.Scrollbar(skf, orient="vertical",
+            self.tv_baby_skills.column(c, width=w, anchor="w", stretch=True)
+        vs_bsk = ttk.Scrollbar(commonf, orient="vertical",
                                command=self.tv_baby_skills.yview)
         self.tv_baby_skills.configure(yscrollcommand=vs_bsk.set)
         vs_bsk.pack(side="right", fill="y")
         self.tv_baby_skills.pack(fill="both", expand=True, pady=(6, 0))
         self.tv_baby_skills.bind("<<TreeviewSelect>>",
                                  lambda e: self.show_skill_desc())
+        # 川：鼠标放技能行上也显示描述，避免描述太长页面看不全
+        self.tv_baby_skills.bind("<Motion>", self._baby_skill_tip_motion)
+        self.tv_baby_skills.bind("<Leave>", lambda e: self._tip_hide())
 
-        self.txt_baby = tk.Text(f, height=2, wrap="word",
+        # 描述改为只读 Text（和「详细信息」同款），太长也能换行看全
+        self.txt_skill_desc = tk.Text(commonf, height=3, wrap="word",
+                                      font=("Microsoft YaHei UI", 9),
+                                      relief="flat", highlightthickness=1,
+                                      highlightbackground="#ddd", state="disabled")
+        self.txt_skill_desc.pack(fill="x", pady=(4, 0))
+        # 鼠标放到描述上也弹浮窗（描述太长时窗口里看不全）
+        self.txt_skill_desc.bind("<Motion>", self._skill_desc_tip_motion)
+        self.txt_skill_desc.bind("<Leave>", lambda e: self._tip_hide())
+
+        # ---- 详细信息
+        infof = ttk.LabelFrame(right, text="详细信息", padding=6)
+        infof.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        self.txt_baby = tk.Text(infof, height=2, wrap="word",
+                                relief="flat", highlightthickness=1,
+                                highlightbackground="#ddd",
                                 font=("Microsoft YaHei UI", 10))
-        self.txt_baby.pack(fill="x", pady=(6, 0))
+        self.txt_baby.pack(fill="both", expand=True)
+
+        right.columnconfigure(0, weight=1, uniform="col")
+        right.columnconfigure(1, weight=1, uniform="col")
 
     def fill_babies(self):
         """刷角色下拉框（召唤兽列表依赖它）。"""
@@ -1403,7 +1501,7 @@ class App(object):
         for sid in bd.skills(b):
             nm, desc = meta.get(sid, ("?", ""))
             self.tv_baby_skills.insert("", "end", iid="sk%d" % sid,
-                                       values=(sid, nm, desc))
+                                       values=(sid, nm))
         self.show_skill_desc()
         self.var_baby_name.set(bd.display_name(b))
         self.fill_skill_templates()
@@ -1446,6 +1544,17 @@ class App(object):
     def _skill_names(self):
         return dict((i, nm) for i, (nm, _d) in self._skills_meta().items())
 
+    def _set_skill_desc(self, text):
+        """把描述写进只读 Text（灰色）。Text 是 disabled 的，得临时开一下。"""
+        t = getattr(self, "txt_skill_desc", None)
+        if t is None:
+            return
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        if text:
+            t.insert("1.0", text)
+        t.configure(state="disabled")
+
     def show_skill_desc(self):
         """显示选中的技能描述（下拉里选的，或技能表里选中的）。"""
         meta = self._skills_meta()
@@ -1459,10 +1568,46 @@ class App(object):
         if sid is None:
             sid = self._skill_pick_id()
         if sid is None or sid not in meta:
-            self.var_skill_desc.set("")
+            self._skill_desc_text = ""
+            self._set_skill_desc("")
             return
         nm, desc = meta[sid]
-        self.var_skill_desc.set("技能 #%d %s：%s" % (sid, nm, desc or "（没有说明）"))
+        text = "技能 #%d %s：%s" % (sid, nm, desc or "（没有说明）")
+        self._skill_desc_text = text       # 浮窗要用完整文本
+        self._set_skill_desc(text)
+
+    def _baby_skill_tip_motion(self, event):
+        """鼠标在技能列表行上移动 → 浮窗显示该技能完整描述。"""
+        row = self.tv_baby_skills.identify_row(event.y)
+        if not row:
+            self._tip_hide(); return
+        if getattr(self, "_tip_key", None) == row:
+            return
+        try:
+            sid = int(row[2:])
+        except (ValueError, IndexError):
+            self._tip_hide(); return
+        meta = self._skills_meta()
+        if sid not in meta:
+            self._tip_hide(); return
+        nm, desc = meta[sid]
+        text = "技能 #%d %s\n%s" % (sid, nm, desc or "（没有说明）")
+        self._tip_show(text,
+                       self.tv_baby_skills.winfo_rootx() + event.x + 12,
+                       self.tv_baby_skills.winfo_rooty() + event.y + 12,
+                       key=row)
+
+    def _skill_desc_tip_motion(self, event):
+        """鼠标在描述框上移动 → 浮窗显示完整描述（框里被截断时看这个）。"""
+        text = getattr(self, "_skill_desc_text", "")
+        if not text:
+            self._tip_hide(); return
+        if getattr(self, "_tip_key", None) == "skdesc":
+            return
+        self._tip_show(text,
+                       self.txt_skill_desc.winfo_rootx() + event.x + 12,
+                       self.txt_skill_desc.winfo_rooty() + event.y + 12,
+                       key="skdesc")
 
     def fill_skill_templates(self):
         nm = self._skill_names()
@@ -2087,8 +2232,16 @@ class App(object):
         widget.bind("<Enter>", on_enter, add="")
         widget.bind("<Leave>", on_leave, add="")
 
-    def _tip_show(self, text, x, y):
+    def _tip_show(self, text, x, y, key=None):
+        """弹出浮窗。
+
+        key 是「当前浮窗对应哪个目标」的标识：调用方在 <Motion> 里先比 key、
+        一样就直接 return（不然每动一像素都销毁重建，闪得厉害）。
+        ⚠ 这里必须**先记住 key 再 _tip_hide()** —— _tip_hide 会把 _tip_key
+        清成 None，写反了就等于每次都重建。
+        """
         self._tip_hide()
+        self._tip_key = key
         if not text:
             return
         tw = self.tk.Toplevel(self.root)
@@ -2138,7 +2291,7 @@ class App(object):
             parts.append(desc)
         if content:
             parts.append("运行时内容：%s" % content)
-        self._tip_show("\n".join(parts), event.x_root, event.y_root)
+        self._tip_show("\n".join(parts), event.x_root, event.y_root, key=key)
 
     def _tpl_tip_motion(self, event):
         """鼠标在物品模板列表上移动 → 浮窗显示模板完整说明。"""
@@ -2148,7 +2301,6 @@ class App(object):
         key = ("tpl", self._bag_kind(), self.var_tpl_kw.get(), row)
         if key == getattr(self, "_tip_key", None):
             return
-        self._tip_key = key
         if not row:
             self._tip_hide()
             return
@@ -2164,7 +2316,7 @@ class App(object):
         parts = ["#%d  %s" % (iid, nm)]
         if desc:
             parts.append(desc)
-        self._tip_show("\n".join(parts), event.x_root, event.y_root)
+        self._tip_show("\n".join(parts), event.x_root, event.y_root, key=key)
 
     def mark_dirty(self):
         self.root.title(TITLE + "  * 有未保存的修改")
@@ -2229,6 +2381,10 @@ class App(object):
             self.load(p)
 
     def load(self, path, quiet=False):
+        # 手动载入 = 已明确指定要开哪本，把 __init__ 里排队的自动载入撤掉。
+        # 不撤的话，那个 after(200) 回调随后会把 doc 换回 _guess_save() 猜到的
+        # 那本档 —— 自动化脚本先 load(副本) 再改，最终就写到了玩家真档上。
+        self.cancel_auto_load()
         try:
             self.doc = xj_model.Doc(path)
         except Exception as e:
@@ -2762,9 +2918,9 @@ class App(object):
         # 只在不同 iid 时刷新 tooltip，防闪烁
         if getattr(self, "_tip_key", None) == ("tree", iid):
             return
-        self._tip_key = ("tree", iid)
         self._tip_show(note, self.tree.winfo_rootx() + event.x + 10,
-                       self.tree.winfo_rooty() + event.y + 10)
+                       self.tree.winfo_rooty() + event.y + 10,
+                       key=("tree", iid))
 
     def _guard_tip_motion(self, event):
         """防作弊体检条目悬浮 → 浮窗显示该条的具体说明。"""
@@ -2775,9 +2931,9 @@ class App(object):
             return
         if getattr(self, "_tip_key", None) == ("guard", iid):
             return
-        self._tip_key = ("guard", iid)
         self._tip_show(note, self.tv_guard.winfo_rootx() + event.x + 10,
-                       self.tv_guard.winfo_rooty() + event.y + 10)
+                       self.tv_guard.winfo_rooty() + event.y + 10,
+                       key=("guard", iid))
 
     def _add_stub(self, iid):
         node = self.nodes.get(iid)
@@ -2978,7 +3134,12 @@ class App(object):
         return iid
 
     # ================================================== 3 角色
-    def fill_actors(self):
+    def fill_actors(self, keep_id=None):
+        """重建角色列表。keep_id 指定时保持选中那一行
+        （apply_actor 改了人再刷新，别把选中跳回第一个 —— 会让人以为改错了）。"""
+        sel = self.tv_actor.selection()
+        if keep_id is None and sel:
+            keep_id = sel[0]
         self.tv_actor.delete(*self.tv_actor.get_children())
         self.actor_rows.clear()
         if not self.sv:
@@ -2991,7 +3152,10 @@ class App(object):
                 self.sv.actor_field(a, "@class_id")))
             self.actor_rows[iid] = a
         kids = self.tv_actor.get_children()
-        if kids:
+        if keep_id in self.actor_rows:
+            self.tv_actor.selection_set(keep_id)
+            self.tv_actor.see(keep_id)
+        elif kids:
             self.tv_actor.selection_set(kids[0])
 
     def current_actor(self):
@@ -3003,7 +3167,9 @@ class App(object):
         if a is None or not self.sv:
             return
         for k, var in self.actor_vars.items():
-            if k == "@exp":
+            if k == "#next_exp":
+                v = self.g.next_level_exp(a)      # 查表：升级经验
+            elif k == "@exp":
                 v = self.g.exp(a)
             else:
                 v = self.sv.actor_field(a, k)
@@ -3014,13 +3180,28 @@ class App(object):
         sk = "、".join("#%d %s" % (i, nm) for i, nm in self.sv.skill_names(a))
         eq = "、".join("槽%d:%s#%s" % (i, "武器" if c == 0 else "防具", i2)
                        for i, c, i2 in self.sv.equips(a))
+        lv = self.sv.actor_field(a, "@level") or 0
+        cur = self.g.exp(a)
+        nxt = self.g.next_level_exp(a)
+        lim = self.g.limit_exp(a)
+        # 累计获得经验不再给输入框（改它没意义），但封顶这件事必须能看见
+        # —— 挂在概览里 + 做成悬浮提示。
+        gate = not self.g.limit_exp_on(a)
+        self._actor_tip_note = self._actor_note(
+            self.sv.actor_name(a), lv, cur, nxt, lim, gate)
+        if lv >= xj_game.MAX_LEVEL_ACTOR:
+            exp_txt = "已满级（上限 %d），游戏不再发经验" % xj_game.MAX_LEVEL_ACTOR
+        elif nxt is None:
+            exp_txt = "—（等级越界，查不到门槛）"
+        else:
+            exp_txt = "%d（还差 %d）" % (nxt, max(0, nxt - cur))
         L = ["名字：%s（存档 @name）" % self.sv.actor_name(a),
-             "等级 / 经验 / 升级所需：%s / %s / %s"
-             % (self.sv.actor_field(a, "@level"), self.g.exp(a),
-                self.g.limit_exp(a)),
+             "级别：%s（上限 %d）" % (lv, xj_game.MAX_LEVEL_ACTOR),
+             "获得经验：%s（本级内）" % cur,
+             "升级经验：%s" % exp_txt,
+             "累计获得经验：%s%s" % (lim, "　⚠ 已封顶" if gate else ""),
              "防作弊：五维总点数 %d（上限 = 等级*10+500 = %d）"
-             % (self.g.point_num(a),
-                (self.sv.actor_field(a, "@level") or 0) * 10 + 500),
+             % (self.g.point_num(a), lv * 10 + 500),
              "已学技能：%s" % (sk or "（无）"),
              "装备：%s" % (eq or "（无）"),
              "五维/潜能：%s" % "、".join("%s=%s" % (k, v)
@@ -3030,20 +3211,71 @@ class App(object):
         self.txt_actor.delete("1.0", "end")
         self.txt_actor.insert("1.0", "\n".join(L))
 
+    def _actor_note(self, name, lv, cur, nxt, lim, gate):
+        """鼠标移到「属性概览」上要看的那段提醒（满级 / 封顶 / 升级进度）。"""
+        P = ["【%s】" % name,
+             "级别 %s / 上限 %d" % (lv, xj_game.MAX_LEVEL_ACTOR)]
+        if lv >= xj_game.MAX_LEVEL_ACTOR:
+            P.append("⚠ 已满级：游戏对满级角色直接不发经验，")
+            P.append("  改「获得经验」在游戏里看不出任何变化。")
+            P.append("  要调等级请直接改左边的「级别」，")
+            P.append("  「获得经验」会自动对齐到该级门槛。")
+        elif gate:
+            P.append("⚠ 累计获得经验 %d 已超过 %d：" % (lim, self.g.LIMIT_EXP_MAX))
+            P.append("  游戏判定「经验累计获得已达上限」，")
+            P.append("  该角色再获得的经验全部作废（等级也涨不上去）。")
+            P.append("  用「一键按规则修复」里的清零可解除。")
+        elif nxt is None:
+            P.append("升级经验查不到（等级越界），请确认「级别」在 1..%d"
+                     % xj_game.MAX_LEVEL_ACTOR)
+        else:
+            P.append("升级经验 %d，还差 %d 点获得经验" % (nxt, max(0, nxt - cur)))
+            P.append("累计获得经验 %d（距体验版封顶 %d 还差 %d）"
+                     % (lim, self.g.LIMIT_EXP_MAX,
+                        max(0, self.g.LIMIT_EXP_MAX - lim)))
+        P.append("")
+        P.append("提示：「获得经验」光改游戏里不会升级，")
+        P.append("因为游戏只在打怪拿经验时才结算等级。")
+        return "\n".join(P)
+
+    def _actor_tip_motion(self, event):
+        """鼠标在「属性概览」上移动 → 浮窗显示满级/封顶等提醒。"""
+        note = getattr(self, "_actor_tip_note", "")
+        if not note:
+            self._tip_hide()
+            return
+        if getattr(self, "_tip_key", None) == "actor":
+            return                      # 已经在显示同一段，别反复重建闪烁
+        self._tip_show(note, self.txt_actor.winfo_rootx() + event.x + 10,
+                       self.txt_actor.winfo_rooty() + event.y + 10,
+                       key="actor")
+
     def apply_actor(self):
         a = self.current_actor()
         if a is None:
             messagebox.showinfo("提示", "先在上面选一个角色。", parent=self.root)
             return
+        skipped = []
+        over = []
+        notes = []
         try:
+            # 先处理「级别」：要同步经验就一起设好，最后再让显式的 @exp 覆盖它
+            # （游戏里的语义就是「改完等级，获得经验从本级门槛重新开始」）
+            sync_exp = bool(self.var_sync_exp.get())
+            lv_raw = self.actor_vars["@level"].get().strip()
+            if lv_raw != "":
+                lv, wrote = self.g.set_actor_level_full(
+                    a, parse_num(lv_raw), sync_exp=sync_exp)
+                if wrote is None and sync_exp:
+                    notes.append("级别已设为 %d（但取不到该级门槛，获得经验没同步）" % lv)
             for k, var in self.actor_vars.items():
+                if k.startswith("#") or k == "@level":
+                    continue      # 只读项 / 级别上面已经处理过
                 raw = var.get().strip()
                 if raw == "":
                     continue
                 if k == "@exp":
                     self.g.set_exp(a, parse_num(raw))
-                elif k == "@level":
-                    self.g.set_actor_level(a, parse_num(raw))
                 else:
                     self.sv.set_actor_field(a, k, raw)
             for k, var in self.attr_vars.items():
@@ -3060,7 +3292,39 @@ class App(object):
         self.mark_dirty()
         self.fill_actors()
         self.load_actor()
-        self.set_status("角色已改（记得点「保存修改」）")
+        msg = "角色已改（记得点「保存修改」）"
+        if skipped:
+            msg += "；已跳过：" + "、".join(skipped)
+        if notes:
+            msg += "；" + "、".join(notes)
+        self.set_status(msg)
+
+    def actor_reset_limit_exp(self):
+        """把所有角色的累计获得经验清零 —— 解「体验版经验已达上限」。
+
+        「累计获得经验」已经不给输入框改了（改它没意义），但这个清零按钮有用：
+        顶着封顶线的角色，游戏再也不发经验。放在概览浮窗的提示里指过来。
+        """
+        if not self.sv:
+            return
+        done = self.g.reset_limit_exp()
+        if not done:
+            messagebox.showinfo("不用清", "没有角色的累计获得经验是被顶着的。",
+                                parent=self.root)
+            return
+        txt = "、".join("%s(%s)" % (n, v) for n, v in done)
+        if not messagebox.askyesno(
+                "清零累计获得经验",
+                "会把下列角色的累计获得经验清零：\n%s\n\n"
+                "（清零后体验版的经验上限重新计算，游戏里继续正常获得经验）\n"
+                "确定吗？" % txt, parent=self.root):
+            return
+        self.doc.dirty = True
+        self.mark_dirty()
+        self.fill_actors()
+        self.load_actor()
+        self.set_status("已清零 %d 个角色的累计获得经验（记得点「保存修改」）"
+                        % len(done))
 
     def actor_preset(self, what):
         a = self.current_actor()
