@@ -865,7 +865,23 @@ def serialize(node, depth=0, table=None, base=None, symtab=None):
     if table is not None:
         if base is None:
             base = node.gidx if node.gidx >= 0 else 0
-        if isinstance(node, NUMBERED_NODES):
+        numbered = isinstance(node, NUMBERED_NODES)
+        # ⚠ 整数按**写出的形态**决定占不占编号：装不下 Fixnum 的值写出来是
+        #   'l' 大整数，Ruby 会给它分配对象编号；装得下的写 'i'，不分配。
+        #   以前 IntNode 换成大值后写出 'l' 却不占编号，而解析侧给 BignumNode
+        #   编号 —— 存档里后面的 '@N' 全部错位（@pages 链到 MoveRoute，
+        #   游戏报 NoMethodError: undefined method 'condition'）。
+        if isinstance(node, (IntNode, NilNode)):
+            v = node.value
+            if isinstance(v, bool):
+                numbered = False              # 写 T/F，不占编号
+            elif isinstance(v, int):
+                numbered = not fits_fixnum(v)
+        elif isinstance(node, BignumNode):
+            if isinstance(node.value, bool):
+                numbered = False              # 写 T/F，不占编号
+            # 否则写 'l'，永远占编号（哪怕值装得下 Fixnum）
+        if numbered:
             if node in table:
                 # 已经 dump 过：发引用（这也正是环能被收住的原因）
                 return b'@' + encode_long(table[node])

@@ -92,6 +92,7 @@ class Babies(object):
         self.sv = g.sv
         self._actors = None
         self._names = None
+        self._skill_ids = None
 
     # ------------------------------------------------------------------ 数据表
     def actor_table(self):
@@ -468,6 +469,85 @@ class Babies(object):
 
     def clear_skills(self, baby):
         return self.set_skills(baby, [])
+
+    # ------------------------------------------------------------------ 技能克隆
+    def valid_skill_ids(self):
+        """{技能 id: 名字}（Data\\Skills 表，带缓存）；拿不到表就返回空字典。"""
+        if self._skill_ids is None:
+            try:
+                _r, items = xj_db.load("Skills")
+                self._skill_ids = dict(
+                    (i, xj_db.s(n, "@name") or "") for i, n in items)
+            except Exception:
+                self._skill_ids = {}
+        return self._skill_ids
+
+    def all_babies(self):
+        """整份存档里**所有角色**的召唤兽（克隆时挑来源用）。
+
+        返回 [{actor, actor_id, actor_name, index, baby, name, tpl, skills}]。
+        """
+        out = []
+        if not self.sv:
+            return out
+        for aid, actor in self.sv.actors():
+            try:
+                rows = self.g.babies(actor)
+            except Exception:
+                continue
+            for i, b in rows:
+                if b is None:
+                    continue
+                out.append({
+                    "actor": actor, "actor_id": aid,
+                    "actor_name": self.sv.actor_name(actor) or "",
+                    "index": i, "baby": b,
+                    "name": self.display_name(b),
+                    "tpl": self.template_name(b),
+                    "skills": self.skills(b),
+                })
+        return out
+
+    def clone_skills(self, dst, src, replace=False):
+        """把 `src` 的技能复制给 `dst`。
+
+        `replace=True`  → 覆盖：dst 的技能改成和 src 一模一样；
+        `replace=False` → 合并：只补 src 有、dst 没有的，直到 12 个为止。
+
+        返回 {'ids': 最终技能, 'added': 新增个数, 'bad': 被丢掉的无效 id,
+              'dropped': 因为满 12 个没写进去的 id, 'replace': 是否覆盖}。
+        """
+        if dst is None or src is None:
+            raise ValueError("要先选好「克隆给谁」和「从哪只克隆」")
+        if dst is src:
+            raise ValueError("来源和目标不能是同一只")
+
+        known = self.valid_skill_ids()
+        raw = [s for s in self.skills(src) if s > 0]
+        # 存档里可能混着 Data\Skills 已经没有的 id：照抄过去游戏会取不到技能
+        bad = [s for s in raw if known and s not in known]
+        src_ids = [s for s in raw if not known or s in known]
+
+        if replace:
+            ids = src_ids[:MAX_SKILLS]
+            dropped = src_ids[MAX_SKILLS:]
+        else:
+            ids = [s for s in self.skills(dst) if s > 0]
+            before = list(ids)
+            dropped = []
+            for s in src_ids:
+                if s in ids:
+                    continue
+                if len(ids) >= MAX_SKILLS:
+                    dropped.append(s)
+                    continue
+                ids.append(s)
+        self.set_skills(dst, ids)
+        return {
+            "ids": list(ids),
+            "added": len(ids) if replace else len(ids) - len(before),
+            "bad": bad, "dropped": dropped, "replace": bool(replace),
+        }
 
     # ------------------------------------------------------------------ 名字
     def display_name(self, baby):

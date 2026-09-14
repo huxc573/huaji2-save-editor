@@ -79,7 +79,13 @@ class _IV(object):
         return xj_save._deref(xj_save.ivar(obj, name))
 
 APP_NAME = "画迹2 存档工具"
-VERSION = "v0.5.2"
+try:
+    # 版本号单一来源 = tools/build.py 的 APP_VERSION（它生成 xj_changelog.py）；
+    # 界面标题 / 关于 / 帮助头都从这里取，升级只改 build.py 一处。
+    import xj_changelog as _xj_cl
+    VERSION = "v" + _xj_cl.VERSION
+except Exception:               # xj_changelog 缺失时兜底（别让它再变成第二处真源）
+    VERSION = "v0.5.4"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -1231,12 +1237,12 @@ class App(object):
         skbar.pack(fill="x")
         ttk.Label(skbar, text="搜索").pack(side="left")
         self.var_skill_search = tk.StringVar()
-        ske = ttk.Entry(skbar, textvariable=self.var_skill_search, width=10)
+        ske = ttk.Entry(skbar, textvariable=self.var_skill_search, width=8)
         ske.pack(side="left", padx=3)
         ske.bind("<KeyRelease>", lambda e: self.fill_skill_templates())
         self.var_skill_pick = tk.StringVar()
         self.cb_skill = ttk.Combobox(skbar, textvariable=self.var_skill_pick,
-                                     state="readonly", width=26)
+                                     state="readonly", width=20)
         self.cb_skill.pack(side="left")
         self.cb_skill.bind("<<ComboboxSelected>>",
                            lambda e: self.show_skill_desc())
@@ -1244,10 +1250,12 @@ class App(object):
         self.cb_skill.bind("<Up>", lambda e: self._skill_arrow(-1))
         ttk.Button(skbar, text="学会", command=self.baby_skill_add).pack(side="left",
                                                                        padx=4)
-        ttk.Button(skbar, text="忘掉选中",
+        ttk.Button(skbar, text="忘掉",
                    command=self.baby_skill_del).pack(side="left")
         ttk.Button(skbar, text="清空", command=self.baby_skill_clear).pack(
             side="left", padx=4)
+        ttk.Button(skbar, text="从…克隆",
+                   command=self.baby_skill_clone).pack(side="left")
         self.var_skill_desc = tk.StringVar(value="")
         ttk.Label(skf, textvariable=self.var_skill_desc, foreground="#555",
                   justify="left", wraplength=560).pack(anchor="w", pady=(4, 0))
@@ -1540,6 +1548,121 @@ class App(object):
         self.mark_dirty()
         self.load_baby()
         self.refresh_baby_list_keep(b)
+
+    def baby_skill_clone(self):
+        """从存档里任意一只召唤兽（别的角色身上的也行）把技能整套复制过来。"""
+        bd = self.babies_ed()
+        b = self._baby()
+        if bd is None or b is None:
+            messagebox.showinfo("提示", "先在列表里选一只召唤兽（被克隆的那只）。",
+                                parent=self.root)
+            return
+        meta = self._skills_meta()
+        rows = [r for r in bd.all_babies() if r["baby"] is not b]
+        if not rows:
+            messagebox.showinfo("提示", "存档里没有别的召唤兽可以当来源。",
+                                parent=self.root)
+            return
+
+        def skill_text(ids):
+            out = []
+            for s in ids:
+                nm = meta.get(s, ("", ""))[0]
+                out.append(nm or "#%d" % s)
+            return "、".join(out) or "（没有技能）"
+
+        tk, ttk = self.tk, self.ttk
+        win = self.tk.Toplevel(self.root)
+        win.title("克隆技能 → %s" % bd.display_name(b))
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=8)
+        f.pack(fill="both", expand=True)
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="搜索（技能 / 名字 / 角色）：").pack(side="left")
+        var_kw = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=var_kw, width=20)
+        ent.pack(side="left", padx=4)
+        ent.bind("<KeyRelease>", lambda e: refill())
+        var_merge = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="合并（保留目标原有技能）",
+                        variable=var_merge).pack(side="left", padx=6)
+
+        cols = ("who", "no", "name", "tpl", "n", "skills")
+        heads = ("角色", "序", "名字", "模板", "技能数", "技能")
+        widths = (130, 34, 100, 100, 48, 420)
+        tv = ttk.Treeview(f, columns=cols, show="headings", height=16,
+                          selectmode="browse")
+        for c, h, w in zip(cols, heads, widths):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="w")
+        vs = ttk.Scrollbar(f, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        tv.pack(fill="both", expand=True, pady=6)
+
+        rows_map = {}
+
+        def refill(_e=None):
+            tv.delete(*tv.get_children())
+            rows_map.clear()
+            kw = var_kw.get().strip()
+            for r in rows:
+                txt = skill_text(r["skills"])
+                hay = "%s %s %s %s" % (r["actor_name"], r["name"], r["tpl"], txt)
+                if kw and kw not in hay:
+                    continue
+                iid = "c%d_%d" % (r["actor_id"], r["index"])
+                rows_map[iid] = r
+                tv.insert("", "end", iid=iid,
+                          values=("%s(#%d)" % (r["actor_name"], r["actor_id"]),
+                                  r["index"] + 1, r["name"], r["tpl"],
+                                  len(r["skills"]), txt))
+            kids = tv.get_children()
+            if kids:
+                tv.selection_set(kids[0])
+
+        refill()
+
+        def do_clone(_e=None):
+            sel = tv.selection()
+            if not sel:
+                return
+            r = rows_map.get(sel[0])
+            if r is None:
+                return
+            replace = not var_merge.get()
+            tip = ("把「%s」的技能覆盖到「%s」上（原来的 %d 个技能会被清掉）？"
+                   % (r["name"], bd.display_name(b), len(bd.skills(b)))) \
+                if replace else \
+                ("把「%s」的技能补进「%s」？" % (r["name"], bd.display_name(b)))
+            if not self.confirm("克隆技能", tip):
+                return
+            try:
+                res = bd.clone_skills(b, r["baby"], replace=replace)
+            except Exception as e:
+                messagebox.showerror("克隆失败", zh_error(e), parent=win)
+                return
+            win.destroy()
+            self.mark_dirty()
+            self.load_baby()
+            self.refresh_baby_list_keep(b)
+            msg = "已从「%s」克隆：现有 %d 个技能" % (r["name"], len(res["ids"]))
+            if res["bad"]:
+                msg += "；跳过 %d 个无效 id %s" % (len(res["bad"]), res["bad"])
+            if res["dropped"]:
+                msg += "；满了 12 个，没塞进去 %s" % res["dropped"]
+            self.set_status(msg)
+            self.log("技能克隆：" + msg)
+
+        tv.bind("<Double-1>", do_clone)
+        bf = ttk.Frame(f)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="克隆给「%s」" % bd.display_name(b),
+                   command=do_clone).pack(side="right", padx=4)
+        ttk.Button(bf, text="取消", command=win.destroy).pack(side="right")
 
     def baby_add_dialog(self):
         """新增召唤兽：列出全部可选项（含小孩），挑一个加给当前角色。"""

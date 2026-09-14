@@ -165,6 +165,77 @@ def main():
     check("删完保存重开也没问题", "大海龟" not in names3 and "小精灵" in names3,
           "、".join(names3))
 
+    # ---------------- 技能克隆
+    rows3 = B3.g.babies(a3)
+    if len(rows3) < 2:
+        B3.add(a3, 21)                       # 不够两只，先补一只普通召唤兽
+        rows3 = B3.g.babies(a3)
+    dst = rows3[-1][1]
+    src = rows3[0][1]
+    src_ids = B3.skills(src)
+    if not src_ids:
+        B3.set_skills(src, [45, 88, 91])     # 普通召唤兽可能一个技能都没抽到
+        src_ids = B3.skills(src)
+    check("来源有技能可以克隆", len(src_ids) > 0, "%d 个：%s" % (len(src_ids), src_ids))
+
+    B3.set_skills(dst, [88])
+    want = min(xj_baby.MAX_SKILLS, 1 + len([s for s in src_ids if s != 88]))
+    res = B3.clone_skills(dst, src)
+    check("合并克隆：保留目标原有的 88", B3.skills(dst)[:1] == [88], B3.skills(dst))
+    check("合并克隆：来源技能补进来（到 12 个为止）", len(B3.skills(dst)) == want,
+          "%d（期望 %d）" % (len(B3.skills(dst)), want))
+    check("合并克隆：added 计数对得上", res["added"] == want - 1, res["added"])
+
+    res2 = B3.clone_skills(dst, src, replace=True)
+    check("覆盖克隆：和来源一模一样",
+          B3.skills(dst) == src_ids[:xj_baby.MAX_SKILLS], B3.skills(dst))
+    check("覆盖克隆：返回 replace 标记", res2["replace"] is True)
+
+    # 存档里夹带 Data\Skills 没有的 id → 不能照抄过去
+    B3.set_skills(src, src_ids + [99999])
+    res3 = B3.clone_skills(dst, src, replace=True)
+    check("无效技能 id 被挡下来",
+          99999 not in B3.skills(dst) and res3["bad"] == [99999],
+          "bad=%s" % res3["bad"])
+    B3.set_skills(src, src_ids)
+
+    # 超过 12 个 → 只写满 12，剩下的报出来
+    # （直接改数组：set_skills() 自己就会截到 12 个，造不出“异常旧档有 13 个”的情况）
+    valid = sorted(B3.valid_skill_ids())[:xj_baby.MAX_SKILLS + 1]
+    src_arr = _deref_attr(src, "@skills")
+    if len(valid) > xj_baby.MAX_SKILLS and isinstance(src_arr, M.ArrayNode):
+        src_arr.items = [xj_baby.int_node(s) for s in valid]
+        B3.doc.mark_structural()
+        res4 = B3.clone_skills(dst, src, replace=True)
+        check("超过 12 个只写满 12",
+              len(B3.skills(dst)) == xj_baby.MAX_SKILLS
+              and res4["dropped"] == valid[xj_baby.MAX_SKILLS:],
+              "dropped=%s" % res4["dropped"])
+        B3.set_skills(src, src_ids)
+    else:
+        check("超过 12 个只写满 12", True, "技能表不够多，跳过")
+
+    # 来源可以是别的角色身上的召唤兽
+    allb = B3.all_babies()
+    check("能列出整档所有召唤兽（跨角色）",
+          len(allb) >= len(rows3) and all(r["baby"] is not None for r in allb),
+          "%d 只 / %d 个角色" % (len(allb), len({r["actor_id"] for r in allb})))
+    check("列表里带角色名和模板名", all(r["actor_name"] and r["tpl"] for r in allb),
+          "%s / %s" % (allb[0]["actor_name"], allb[0]["tpl"]))
+    try:
+        B3.clone_skills(dst, dst)
+        check("自己克隆给自己会报错", False, "居然没报错")
+    except ValueError:
+        check("自己克隆给自己会报错", True, "ValueError")
+
+    B3.set_skills(dst, [45, 88])
+    B3.doc.save()
+    sv4 = xj_save.SaveDoc(path)
+    B4 = xj_baby.Babies(xj_game.GameEditor(sv4))
+    a4 = sv4.actors()[0][1]
+    got4 = [B4.skills(x) for _i, x in B4.g.babies(a4)]
+    check("克隆完保存重开技能还在", [45, 88] in got4, got4)
+
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
     return 1 if OK[1] else 0

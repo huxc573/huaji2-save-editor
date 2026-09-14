@@ -96,6 +96,12 @@ class Doc(object):
         else:
             new = self.engine.apply()
         M.parse_stream(new)                    # 编不出来就别写，避免写坏档
+        # 守卫：重解析 → 重序列化必须逐字节还原。对象编号一旦错位
+        # （如 Bignum 占编号的约定不一致），这一步必然对不上，把坏档
+        # 拦在写盘之前 —— 游戏读那种档会直接 NoMethodError。
+        if M.serialize_doc(M.parse_stream(new)) != new:
+            raise ValueError("保存前自检失败：重写的字节不自洽"
+                             "（对象编号错位），已取消写入，原文件未动")
         if backup and os.path.exists(path):
             # 备份放进 .huaji2-save-editor 目录，不再散落在存档同目录
             bak_dir = xj_backup.backup_dir(path)
@@ -125,6 +131,17 @@ class Doc(object):
 
     # ------------------------------------------------------------------ 改值
     def set_value(self, node, value):
+        old = xj_edit.value_of(node)
+        # ⚠ 整数跨过 Fixnum 边界（±2^32）会改变"对象编号个数"：
+        #   装得下写 'i'（不占编号），装不下写 'l' 大整数（占编号）。
+        #   就地补丁无法同步修正全档的 '@N' 索引，必须升级为整档重写
+        #   （0.5.2 祈福池改成 9999999999 就是因为这个把整档链接弄错位）。
+        if isinstance(old, int) and not isinstance(old, bool) \
+                and isinstance(value, int) and not isinstance(value, bool) \
+                and M.fits_fixnum(old) != M.fits_fixnum(value):
+            xj_edit.PatchEngine.set_scalar(self.engine, node, value)
+            self.mark_structural()
+            return
         xj_edit.PatchEngine.set_scalar(self.engine, node, value)
         self.dirty = True
 

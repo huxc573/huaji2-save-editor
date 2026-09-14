@@ -1,0 +1,18 @@
+# 统一用 LF 存文本：core.autocrlf=false 时，工作区被写成 CRLF 会把每个 .py
+# 当成「整文件重写」，diff 全是噪音。加了这文件就不会再犯。
+* text=auto eol=lf
+
+# 二进制，一律别碰
+*.exe binary
+*.dll binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.pdf binary
+*.ogg binary
+*.wav binary
+*.was binary
+*.rvdata2 binary
