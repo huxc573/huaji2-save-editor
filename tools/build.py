@@ -265,7 +265,9 @@ def build_exe(py):
     free_old_exe(EXE_NAME + ".exe")
     cmd = ([py, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
             "--windowed", "--name", EXE_NAME,
-            "--distpath", DIST, "--workpath", BUILD, "--specpath", ROOT,
+            # --specpath 必须指 build/（不是 ROOT）：spec 是纯中间产物，
+            # 放仓库根目录会按版本号越堆越多（v0.4.x~v0.5.x 堆了二十几个）。
+            "--distpath", DIST, "--workpath", BUILD, "--specpath", BUILD,
             "--paths", SRC]
            + tcl_data_args(py)
            + [os.path.join(SRC, "xj_viewer.py")])
