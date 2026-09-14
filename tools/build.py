@@ -37,6 +37,19 @@ sys.stdout.reconfigure(errors="replace")
 
 APP_VERSION = "0.5.4"
 EXE_NAME = "画迹2存档工具v" + APP_VERSION
+
+# GitHub Release 的附件名：平台对中文文件名会自动改名，所以一律用 ASCII，
+# **跟仓库名保持一致 + 版本号**（本地 dist\ 里的中文名不影响，内容同一个文件）。
+# 发 Release 别手敲名字，直接跑 `python tools/release.py`。
+REPO_NAME = "huaji2-save-editor"
+RELEASE_EXE_NAME = "%s_v%s.exe" % (REPO_NAME, APP_VERSION)
+# (dist 里的文件名, Release 上的附件名) —— 宿主和说明必须一起发
+RELEASE_ASSETS = [
+    (EXE_NAME + ".exe", RELEASE_EXE_NAME),
+    ("XJCodec32.exe", "XJCodec32.exe"),   # 缺了它读不了存档
+    ("使用说明.txt", "USAGE.txt"),
+]
+
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")
 HOST_NAME = "XJCodec32.exe"

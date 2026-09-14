@@ -83,6 +83,10 @@ python src\xj_viewer.py
 :: 5) 打包成 exe（需要 PyInstaller；会自动找仓库旁的 .venv）
 python tools\build.py
 python tools\build.py --dll-dir     :: 宿主放进 dist\dll\ 子目录
+
+:: 6) 发 GitHub Release（附件按 ASCII 命名，需要 gh 已登录）
+python tools\release.py
+python tools\release.py --upload-only   :: Release 已存在，只重传附件
 ```
 
 打包产物在 `dist\`：`画迹2存档工具v0.5.4.exe` + `XJCodec32.exe`（**必须挨着 exe**，
@@ -90,8 +94,10 @@ python tools\build.py --dll-dir     :: 宿主放进 dist\dll\ 子目录
 `selftest_result.txt` 自检报告。
 
 > GitHub Release 附件名只能用 ASCII（中文文件名会被平台自动改名），所以发布版附件叫
-> `Huaji2SaveTool_v0.5.4.exe` + `USAGE.txt`（内容与 `dist\画迹2存档工具v0.5.4.exe` /
-> `使用说明.txt` 相同）。
+> `huaji2-save-editor_v0.5.4.exe` + `XJCodec32.exe` + `USAGE.txt`
+> —— **跟仓库名保持一致 + 版本号**，内容分别就是 `dist\画迹2存档工具v0.5.4.exe` /
+> `dist\XJCodec32.exe` / `使用说明.txt`。本地中文名不用改。
+> 命名规则写在 `tools/build.py`（`RELEASE_ASSETS`），发版直接跑 `python tools/release.py`。
 
 界面会自动定位游戏目录和存档；找不到就设环境变量：
 
