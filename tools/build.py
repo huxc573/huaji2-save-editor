@@ -156,7 +156,9 @@ def gen_changelog():
             '源码见仓库根目录的 CHANGELOG.md。\n"""\n'
             'VERSION = "%s"\n\n'
             'TEXT = %r\n' % (APP_VERSION, text))
-    with open(out, "w", encoding="utf-8") as f:
+    # newline="\n"：Windows 上默认会写成 CRLF，而仓库按 LF 存（见 .gitattributes），
+    # 不钉死的话每次打包生成的这个文件都会变成「整文件重写」的假 diff。
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write(body)
     log("已生成内置更新日志：src/xj_changelog.py（%d 字）" % len(text))
 
