@@ -9,7 +9,7 @@
 
 发行目录（dist/）里有什么：
 
-    画迹2存档工具v0.4.exe    PyInstaller 单文件 exe（内含 tcl/tk 脚本库）
+    画迹2存档工具.exe        PyInstaller 单文件 exe（内含 tcl/tk 脚本库）
     XJCodec32.exe            自带的 32 位加解密宿主（**必须**和 exe 放一起，
                              或者放 dll/ 子目录；xj_codec 会按顺序找）
     使用说明.txt
@@ -36,7 +36,10 @@ sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
 APP_VERSION = "0.5.4"
-EXE_NAME = "画迹2存档工具v" + APP_VERSION
+# 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
+# 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
+# 版本号只出现在 Release 附件名上（见下面的 RELEASE_EXE_NAME）。
+EXE_NAME = "画迹2存档工具"
 
 # GitHub Release 的附件名：平台对中文文件名会自动改名，所以一律用 ASCII，
 # **跟仓库名保持一致 + 版本号**（本地 dist\ 里的中文名不影响，内容同一个文件）。
@@ -164,9 +167,11 @@ def gen_changelog():
 
 
 def sweep_old_exes(keep):
-    """把 dist 里**其它版本**的主程序删掉（留着容易点错版本）。
+    """把 dist 里**旧命名的**主程序删掉（留着容易点错版本）。
 
-    只删 `画迹2存档工具v*.exe`，不碰宿主 XJCodec32.exe。
+    历史产物名带版本号（`画迹2存档工具v0.5.4.exe`），现在固定叫
+    `画迹2存档工具.exe` —— 打包时顺手清掉以前留下的那些。
+    只认 `画迹2存档工具` 前缀，不碰宿主 XJCodec32.exe。
     """
     try:
         names = sorted(os.listdir(DIST))
@@ -179,9 +184,9 @@ def sweep_old_exes(keep):
             continue
         try:
             os.remove(os.path.join(DIST, n))
-            log("  清掉旧版本主程序：%s" % n)
+            log("  清掉旧命名的主程序：%s" % n)
         except OSError:
-            log("  ! 旧版本主程序删不掉（可能正开着）：%s" % n)
+            log("  ! 旧主程序删不掉（可能正开着）：%s" % n)
 
 
 # --------------------------------------------------------------------------

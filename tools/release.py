@@ -6,7 +6,7 @@ r"""发 GitHub Release：按 `build.py` 里的命名规则准备好附件，再�
     python tools/release.py --dry           # 只打印要做什么，不动手
 
 附件命名（**唯一来源在 tools/build.py**，别在这儿手敲）：
-    huaji2-save-editor_v0.5.4.exe   主程序（本地是中文名 画迹2存档工具v0.5.4.exe）
+    huaji2-save-editor_v0.5.4.exe   主程序（本地产物固定叫 画迹2存档工具.exe，不带版本号）
     XJCodec32.exe                   32 位加解密宿主，缺了读不了存档
     USAGE.txt                       使用说明
 

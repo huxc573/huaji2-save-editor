@@ -89,15 +89,17 @@ python tools\release.py
 python tools\release.py --upload-only   :: Release 已存在，只重传附件
 ```
 
-打包产物在 `dist\`：`画迹2存档工具v0.5.4.exe` + `XJCodec32.exe`（**必须挨着 exe**，
+打包产物在 `dist\`：`画迹2存档工具.exe` + `XJCodec32.exe`（**必须挨着 exe**，
 或放 `dll\` 子目录）+ `使用说明.txt` / `CHANGELOG.md`。`XJ_SELFTEST=1` 跑一次会写
 `selftest_result.txt` 自检报告。
 
-> GitHub Release 附件名只能用 ASCII（中文文件名会被平台自动改名），所以发布版附件叫
+> 本地产物名**固定不带版本号**（`dist\画迹2存档工具.exe`），重复打包不会堆版本文件。
+> GitHub Release 附件名只能用 ASCII（中文文件名会被平台自动改名），发布版附件叫
 > `huaji2-save-editor_v0.5.4.exe` + `XJCodec32.exe` + `USAGE.txt`
-> —— **跟仓库名保持一致 + 版本号**，内容分别就是 `dist\画迹2存档工具v0.5.4.exe` /
-> `dist\XJCodec32.exe` / `使用说明.txt`。本地中文名不用改。
-> 命名规则写在 `tools/build.py`（`RELEASE_ASSETS`），发版直接跑 `python tools/release.py`。
+> —— **跟仓库名保持一致 + 版本号**，内容分别就是 `dist\画迹2存档工具.exe` /
+> `dist\XJCodec32.exe` / `使用说明.txt`。
+> 命名规则写在 `tools/build.py`（`EXE_NAME` / `RELEASE_ASSETS`），发版直接跑
+> `python tools/release.py`。
 
 界面会自动定位游戏目录和存档；找不到就设环境变量：
 
