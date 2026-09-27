@@ -29,7 +29,7 @@ v0.2 已经把三个密钥全部逆向出来，所以**现在是真的能用**�
 | **运行时内容（孵化蛋/礼包）自动生成或从同款克隆**，可指定“孵出哪只” | ✅ |
 | **`@attr` 键类型与游戏一致**（外层字符串键 `"data"`，旧档一键置换） | ✅ |
 | **存档管理：备份（可填备注）/ 恢复选中 / 恢复最新 / 编辑备注 / 删除选中 / 删除无备注 / 删除非最新** | ✅ |
-| **召唤兽：等级·气血·魔法·六项资质·忠诚·寿命·成长·五维** + 预设 | ✅ |
+| **召唤兽：等级·气血·魔法·六项资质·五行·忠诚·寿命·成长·五维** + 预设（「全员忠诚满」一键全角色） | ✅ |
 | **新增召唤兽（按 `Game_Baby.new` 规则）· 放生 · 设为出战 · 改名 · 技能** | ✅ |
 | **召唤兽技能克隆**：从存档里任意一只（别的角色身上的也行）整套复制，默认覆盖、可选合并 | ✅ |
 | **机器码：看本机 / 存档记录的机器码，一键追加或替换（换机器玩）**（独立页签） | ✅ |
@@ -78,7 +78,7 @@ python tools\build_host.py
 python tools\run_tests.py
 
 :: 4) 开图形界面
-python src\xj_viewer.py
+python src/huaji2_save_editor.py
 
 :: 5) 打包成 exe（需要 PyInstaller；会自动找仓库旁的 .venv）
 python tools\build.py
@@ -110,11 +110,11 @@ set XJ_GAME=D:\Life\Game\Local\MH\画迹\【画迹2：缘起凡尘】 [尝鲜版
 命令行也能用：
 
 ```bat
-python src\xj_save.py            :: 存档概览 + 防作弊校验状态
-python src\xj_save.py repair     :: 一键修好所有 Lock 并写回
-python src\xj_db.py              :: 列出 10 张 Data 表 + 行数
-python src\xj_db.py --out csv    :: 数据表转 CSV（utf-8-sig，Excel 直接开）
-python tools\decrypt_all.py      :: 把各文件解密到 tools\_plain\
+python src\save.py            :: 存档概览 + 防作弊校验状态
+python src\save.py repair     :: 一键修好所有 Lock 并写回
+python src\datatables.py              :: 列出 10 张 Data 表 + 行数
+python src\datatables.py --out csv    :: 数据表转 CSV（utf-8-sig，Excel 直接开）
+python tools\re\decrypt_all.py      :: 把各文件解密到 tools\_plain\
 ```
 
 ---
@@ -222,7 +222,7 @@ v0.4.7 起 Ctrl+S **保存前会自动体检**，有问题会弹窗并问你要�
 老版本用过的 `huxji2-save-editor` / `huaji2-save-editor` 目录里的备份
 **照样列得出来、照样能恢复/删除**，只是新备份不再往里写。
 这一页只做文件复制/删除、**不解析存档**，存档已经改坏到打不开时也能靠它救回来。
-核心逻辑：`src\xj_backup.py`（测试：`tools\test_backup.py`）。
+核心逻辑：`src\backup.py`（测试：`tests\test_backup.py`）。
 
 ---
 
@@ -305,18 +305,36 @@ end
 
 ```
 src\
-  xj_viewer.py      tkinter 界面（8 个页签，照画迹1 的编辑器重排）
-  xj_db.py          Data\*.rvdata2 → CSV（10 张表 + 嵌套字段翻人话）
-  xj_save.py        存档语义层（金钱、角色、开关变量、Lock 防作弊校验修复）
-  xj_model.py       打开/摘要/写回
-  xj_edit.py        区间补丁 + 自包含序列化
-  xj_marshal.py     Ruby Marshal 4.8 解析 / 序列化
-  xj_codec.py       加解密（调用 32 位宿主，自动选密钥）
-  xj_codec32.cs     32 位宿主源码（LoadLibrary + 调用 main.dll 导出）
-  XJCodec32.exe     编译产物
-  xj_env.py         游戏目录 / 存档路径定位
-tests\              test_marshal / test_codec / test_model / test_gui / test_gui_quick
-tools\              逆向与验证脚本 + run_tests.py（一键回归）/ test_db_csv.py
+  huaji2_save_editor.py  主程序：tkinter 界面（9 个页签，照画迹1 的编辑器重排）
+  doctree.py             文档树：打开 → 解析 → 摘要 / 浏览 / 改值 → 写回
+  save.py                存档语义层：按游戏自己的数据结构提供「人话」接口
+  game.py                游戏内容层：金钱 / 背包 / 经验 / 召唤兽 / 防作弊体检
+  babies.py              召唤兽：新建 / 删除 / 出战 / 技能 / 改名
+  codec.py               加解密（驱动 32 位宿主，自动选密钥）
+  marshal_ruby.py        Ruby Marshal 4.8 解析 / 序列化
+  patchwriter.py         区间补丁：只改「动过的字段」的字节区间
+  datatables.py          Data\*.rvdata2 → CSV（10 张表 + 嵌套字段翻人话）
+  paths.py               游戏目录 / 存档路径定位
+  fieldnames.py          字段名的中文注释表
+  nodetext.py            节点 → 人能看懂的文字（数据树与界面共用）
+  itemattr.py            物品的运行时内容（@attr）
+  backup.py              存档备份 / 恢复
+  changelog.py           内置更新日志（由 tools/build.py 生成）
+  tables\                游戏常量表（exp / sect / baby_aptitude，由 tools/gen_*.py 生成）
+  native\                XJCodec32.exe + codec32.cs（32 位宿主源码与编译产物）
+tests\              全部回归测试（17 组）：
+  test_marshal  test_codec  test_model  test_roundtrip  test_semantic_equal
+  test_game_layer  test_backup  test_baby  test_save_layer  test_db_csv
+  test_gui  test_gui_quick  test_actor_tab  test_save_files  test_dist
+  smoke.py（全档冒烟）  verify_all.py（整档重写自检）
+  probe_*.py          界面体检探针（只碰副本存档，跑完删）
+tools\              日常工具
+  run_tests.py        一键回归；build.py / build_host.py / release.py 打包发版
+  gen_exp_table.py / gen_sect_table.py / gen_baby_data.py   生成 src\tables\
+  clear_cheat.py      命令行清作弊标记    cleanup.py 清可重跑的中间产物
+  normalize_eol.py    统一 LF    gitcheck.py 查行尾    pack_only.py 只打包不重编宿主
+  re\                 逆向考古脚本（一次性探针，留着备查，平时不用）
+probes\              最早的 32 位宿主 / 加密算法探针（编号 00–23，按顺序读）
 csv\                数据表导出的 CSV（gitignore，随时可重导）
 docs\
   存档格式.md        文件位置 / 密钥 / 结构 / Lock 校验 / Data 表 / 解析的坑

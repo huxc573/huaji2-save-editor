@@ -44,7 +44,7 @@ def main():
         if os.path.exists(p) and os.path.getsize(p) > 400 * 1024:
             big.append("%s (%d KB)" % (f, os.path.getsize(p) // 1024))
     out.append("大于 400KB 的文件: %s" % (big or "无"))
-    out.append("含 XJCodec32.exe: %s" % ("src/XJCodec32.exe" in files))
+    out.append("含 XJCodec32.exe: %s" % ("src/native/XJCodec32.exe" in files))
 
     with open(os.path.join(HERE, "_gitcheck.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(out))

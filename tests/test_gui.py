@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""界面冒烟测试：把窗口、8 个页签、懒加载数据树、数据表预览都建一遍，不进 mainloop。
+"""界面冒烟测试：把窗口、10 个页签、懒加载数据树、数据表预览都建一遍，不进 mainloop。
 
 不碰真存档（只读 Data\\*.rvdata2 和明文样本 Battle.bt2）。
 
@@ -49,10 +49,13 @@ def kill_timers(root):
 TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_saves", "存档管理"),
         ("tab_tree", "全部解析数据"),
         ("tab_actor", "角色 / 属性"), ("tab_party", "背包 / 物品"),
-        ("tab_baby", "召唤兽"), ("tab_switch", "开关 / 变量"),
+        ("tab_baby", "召唤兽"),
         ("tab_machine", "机器码"),
         ("tab_db", "数据表 (CSV)"), ("tab_help", "说明 / 机制"),
         ("tab_log", "更新日志"))
+# ⚠ v0.5.4 起「开关 / 变量」页并入「概览 / 快捷修改」，页签 11 → 10 个。
+# 这条断言当时没跟着改，而 GUI 组一直被没 tkinter 的解释器整组跳过，
+# 所以直到 2026-09-20 换成 3.12 跑才暴露（同 test_gui_quick 那批老断言）。
 
 
 def main():
@@ -66,13 +69,13 @@ def main():
         print("  [--] 无图形环境（%s），跳过界面冒烟" % e)
         return 0
 
-    import xj_db
-    import xj_env
-    import xj_viewer
+    import datatables
+    import paths
+    import huaji2_save_editor
 
     # 弹窗换成"记录"：窗口是 withdraw 的，真弹出模态框会看不见、把测试挂死
     dialogs = []
-    xj_viewer.messagebox = type("MB", (), {
+    huaji2_save_editor.messagebox = type("MB", (), {
         "showinfo": staticmethod(lambda *a, **k: dialogs.append(("info", a))),
         "showerror": staticmethod(lambda *a, **k: dialogs.append(("error", a))),
         "showwarning": staticmethod(lambda *a, **k: dialogs.append(("warn", a))),
@@ -80,7 +83,7 @@ def main():
 
     root = tk.Tk()
     root.withdraw()
-    app = xj_viewer.App(root, save_path=None)
+    app = huaji2_save_editor.App(root, save_path=None)
     kill_timers(root)
     root.update()
 
@@ -89,12 +92,12 @@ def main():
     for attr, name in TABS:
         check(getattr(app, attr).winfo_exists() == 1, "页签存在：%s" % name)
     check("画迹2" in root.title(), "窗口标题 = %s" % root.title())
-    check(xj_viewer.VERSION.startswith("v"), "版本号 = %s" % xj_viewer.VERSION)
+    check(huaji2_save_editor.VERSION.startswith("v"), "版本号 = %s" % huaji2_save_editor.VERSION)
 
     # ---- 数据表页
-    check(len(app.lst_db.get(0, "end")) == len(xj_db.ALL_KEYS),
-          "数据表页列出 %d 张表" % len(xj_db.ALL_KEYS))
-    check(app.var_db_out.get() == xj_db.DEFAULT_OUT,
+    check(len(app.lst_db.get(0, "end")) == len(datatables.ALL_KEYS),
+          "数据表页列出 %d 张表" % len(datatables.ALL_KEYS))
+    check(app.var_db_out.get() == datatables.DEFAULT_OUT,
           "CSV 默认目录 = %s" % app.var_db_out.get())
     try:
         app.lst_db.selection_clear(0, "end")
@@ -107,15 +110,15 @@ def main():
         print("  [--] 数据表预览跳过：%s" % e)
 
     # ---- 说明 / 更新日志
-    check("防作弊" in xj_viewer.HELP_TEXT and "CSV" in xj_viewer.HELP_TEXT,
-          "说明页含防作弊 + CSV 说明（%d 字）" % len(xj_viewer.HELP_TEXT))
-    check(len(xj_viewer.CHANGELOG.strip()) > 0,
-          "更新日志已读取（%d 字）" % len(xj_viewer.CHANGELOG.strip()))
-    check("画迹1" in xj_viewer.HELP_TEXT, "说明里提到了与画迹1的关系")
+    check("防作弊" in huaji2_save_editor.HELP_TEXT and "CSV" in huaji2_save_editor.HELP_TEXT,
+          "说明页含防作弊 + CSV 说明（%d 字）" % len(huaji2_save_editor.HELP_TEXT))
+    check(len(huaji2_save_editor.CHANGELOG.strip()) > 0,
+          "更新日志已读取（%d 字）" % len(huaji2_save_editor.CHANGELOG.strip()))
+    check("画迹1" in huaji2_save_editor.HELP_TEXT, "说明里提到了与画迹1的关系")
 
     # ---- 明文样本 → 数据树懒加载
     sample = None
-    game = xj_env.find_game_dir()
+    game = paths.find_game_dir()
     if game:
         ad = os.path.join(game, "Logs", "Battle")
         if os.path.isdir(ad):

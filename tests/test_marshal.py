@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""xj_marshal 回归测试：解析 / 序列化 / 重编码。
+"""marshal_ruby 回归测试：解析 / 序列化 / 重编码。
 
 测试样本优先用游戏自带的**明文** Marshal 文件：
   * Logs/Battle/<时间>/Battle.bt2   （VX Ace / Ruby 1.9 风格，含 i / : / [ / { / I / l）
@@ -16,8 +16,8 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.stdout.reconfigure(errors="replace")
 
-import xj_env  # noqa: E402
-import xj_marshal as M  # noqa: E402
+import paths  # noqa: E402
+import marshal_ruby as M  # noqa: E402
 
 OK = 0
 NG = 0
@@ -34,7 +34,7 @@ def check(cond, msg):
 
 
 def samples():
-    game = xj_env.find_game_dir()
+    game = paths.find_game_dir()
     out = []
     if game:
         p = os.path.join(game, "Data", "main.rvdata2")

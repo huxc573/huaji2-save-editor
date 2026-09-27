@@ -11,7 +11,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GAME = os.path.normpath(os.path.join(HERE, "..", "..", "..", ".."))
 DLL = os.path.join(GAME, "System", "main.dll")
 HOST = os.path.join(HERE, "xjhost32.exe")
-WORK = os.path.join(HERE, "_w17")_OUT = []
+WORK = os.path.join(HERE, "_w17")
+_OUT = []
 
 
 def print(*a):  # noqa: A001

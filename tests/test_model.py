@@ -17,10 +17,10 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.stdout.reconfigure(errors="replace")
 
-import xj_env  # noqa: E402
-import xj_edit  # noqa: E402
-import xj_marshal as M  # noqa: E402
-import xj_model  # noqa: E402
+import paths  # noqa: E402
+import patchwriter  # noqa: E402
+import marshal_ruby as M  # noqa: E402
+import doctree  # noqa: E402
 
 OK = 0
 NG = 0
@@ -37,7 +37,7 @@ def check(cond, msg):
 
 
 def plaintext_sample():
-    game = xj_env.find_game_dir()
+    game = paths.find_game_dir()
     if not game:
         return None
     ad = os.path.join(game, "Logs", "Battle")
@@ -60,7 +60,7 @@ def main():
     v = h.pairs[0][1]
     hp = h.pairs[0][0]
     check(hp.name == 'a' and v.value == 1, "定位到 :a => 1")
-    eng = xj_edit.PatchEngine(buf)
+    eng = patchwriter.PatchEngine(buf)
     eng.set_scalar(v, 100)
     new = eng.apply()
     check(len(new) == len(buf), "改标量后字节数不变（同宽度）")
@@ -76,7 +76,7 @@ def main():
     check(len(new) == len(buf), "重复改同宽度仍然等长")
 
     print("\n== 内置：变宽标量 ==")
-    eng = xj_edit.PatchEngine(buf)
+    eng = patchwriter.PatchEngine(buf)
     eng.set_scalar(v, 70000)
     new = eng.apply()
     h3 = M.parse_stream(new)[0]['node']
@@ -89,14 +89,14 @@ def main():
     if not p:
         print("  [--] 没有找到明文样本（跳过）")
     else:
-        doc = xj_model.Doc(p)
+        doc = doctree.Doc(p)
         check(len(doc.objects) >= 1, "解析出 %d 个顶层对象" % len(doc.objects))
         check("顶层对象数" in doc.summary(), "摘要正常")
         # 找一个整数标量改掉再存到临时文件
-        tmp = tempfile.mkdtemp(prefix="xj_model_")
+        tmp = tempfile.mkdtemp(prefix="doctree_")
         dst = os.path.join(tmp, "out.rvdata2")
         shutil.copyfile(p, dst)
-        d2 = xj_model.Doc(dst)
+        d2 = doctree.Doc(dst)
         target = find_int(d2.top_level()[0], 3)
         if target is None:
             print("  [--] 样本里没找到可改的整数（跳过）")
@@ -104,7 +104,7 @@ def main():
             old = target.value
             d2.set_value(target, old + 1)
             d2.save(dst, backup=False)
-            d3 = xj_model.Doc(dst)
+            d3 = doctree.Doc(dst)
             t2 = find_int(d3.top_level()[0], 3)
             check(t2 is not None and t2.value == old + 1,
                   "改值写回并重新读回（%s -> %s）" % (old, old + 1))

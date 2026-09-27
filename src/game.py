@@ -1,0 +1,2368 @@
+# -*- coding: utf-8 -*-
+"""游戏内容编辑层：金钱 / 背包 / 经验 / 召唤兽 / 防作弊体检。
+
+层级：doctree.py（文档树） → save.py（存档语义） → **game.py（本文）**。
+
+和 `save.SaveDoc` 的分工：
+  * `save` 管**存档骨架**（分区、Lock、开关变量、角色基础字段）；
+  * 这里管**游戏玩法数据**（背包 4 页×20 格、召唤兽资质、经验、以及游戏的
+    `$jiance` 周期性反作弊检查 和 `Change` 物品计数校验）。
+
+防作弊（v0.4 新发现，见 docs/逆向过程.md）：
+
+1. **周期检查**（脚本 29455 行起，每 300 帧一次）：
+       $jiance = [MAX_LEVEL_ACTOR*761205, MAX_LEVEL_BABY*761205,
+                  MAX_GOLD*654321, MAX_WAREHOUSE[1]*159753]
+       任一角色 level > 60               → 作弊
+       某角色当前召唤兽 level > 65        → 作弊
+       $game_party.gold > 30,000,000      → 作弊
+       $game_party.hash[:warehouse_page]>3→ 作弊
+       a.attr.point_num > a.level*10+500  → 作弊   （point_num = 体质+法力+力量+耐力+敏捷）
+   一旦被判定作弊：`$game_system.cheated = Graphics.frame_count`，
+   游戏内 20 分钟后弹警告、25 分钟后 `msgbox "存档异常！" + exit`。
+   ⇒ 改数值时**必须**守住这些上限；本模块提供"体检 + 一键按规则修复 + 清除作弊标记"。
+
+2. **物品计数校验**：游戏给物品记了一笔"累计获得数量"，
+   存在 `$game_system.security[:items][id]`（`Change` 对象，逐位数字 AES-ECB 加密）。
+   改背包数量后如果不同步，游戏下次**合法获得**同一件物品时会发现对不上 → 记作弊。
+   ⇒ 本模块改数量/加物品时自动同步（AES 实现在 `aes`，密钥来自游戏脚本第 1142 行）。
+"""
+import os
+import random
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import aes  # noqa: E402
+from tables import exp  # noqa: E402   # 升级经验表（游戏脚本里的 $exps，tools/gen_exp_table.py 生成）
+import marshal_ruby as M  # noqa: E402
+import fieldnames  # noqa: E402
+import itemattr  # noqa: E402
+from tables import sect  # noqa: E402   # 门派表（游戏脚本里的 $sects，tools/gen_sect_table.py 生成）
+from save import _deref, _as_str, ivar, hash_get, hash_put_pairs  # noqa: E402
+
+# 游戏里的上限（Config::Game + $jiance）
+MAX_LEVEL_ACTOR = fieldnames.MAX_LEVEL_ACTOR
+MAX_LEVEL_BABY = fieldnames.MAX_LEVEL_BABY
+MAX_GOLD = fieldnames.MAX_GOLD
+# 改金钱一旦超过上限，不压到"贴着上限"，而是压到上限的 5/6（= 25,000,000）：
+# 离 30,000,000 的判定线留出余量，游戏里再正常获得金钱也不会一脚踩过线。
+SAFE_GOLD = MAX_GOLD * 5 // 6       # 留 1/6 安全余量，避免贴着上限被周期检查
+MAX_ITEM = fieldnames.MAX_ITEM
+MAX_WAREHOUSE_PAGE = 3
+MAX_BABY_LIFE = fieldnames.MAX_BABY_LIFE
+MAX_BABY_LOYALTY = fieldnames.MAX_BABY_LOYALTY
+#: 低于它不能参战（`Config::Baby::ALLOW_LOYALTY`）—— 和 100 那个上限是两回事
+BABY_ALLOW_LOYALTY = fieldnames.BABY_ALLOW_LOYALTY
+#: 召唤兽五行的全部合法值（唯一来源 `fieldnames.BABY_FIVE`）
+BABY_FIVE = fieldnames.BABY_FIVE
+MAX_PACK_PAGE = fieldnames.PACK_PAGES
+PACK_PAGE_SIZE = fieldnames.PACK_PAGE_SIZE
+
+KINDS = (("Items", "@items", "道具", "Items"),
+         ("Weapons", "@weapons", "武器", "Weapons"),
+         ("Armors", "@armors", "防具", "Armors"))
+
+
+# --------------------------------------------------------------------------
+# 节点小工具
+# --------------------------------------------------------------------------
+def clone_node(node):
+    """深拷贝一棵子树（把 '@N' 链接全部展开成独立副本，再重新解析）。"""
+    data = M.serialize(node, table=None)
+    return M.parse_stream(b"\x04\x08" + data)[-1]["node"]
+
+
+def int_node(value):
+    return M.IntNode(int(value))
+
+
+def str_node(text):
+    """带 `:E => true` 的字符串（游戏里字符串都是这么存的）。"""
+    inner = M.StrNode(text.encode("utf-8"))
+    wrap = M.IVarNode()
+    wrap.inner = inner
+    wrap.ivars = [("E", M.BoolNode(True))]
+    return wrap
+
+
+def hex_str_node(hexstr):
+    """`Change.@value` 里那种"二进制编码的十六进制串"。"""
+    inner = M.StrNode(hexstr.encode("ascii"))
+    wrap = M.IVarNode()
+    wrap.inner = inner
+    wrap.ivars = [("E", M.BoolNode(True))]
+    return wrap
+
+
+def nil_node():
+    return M.NilNode()
+
+
+def exp_for_level(level, kind="actor"):
+    """升到下一级所需的经验 —— **查表**（游戏脚本里的 `$exps`），不是公式算的。
+
+    游戏脚本：
+        def exp_for_level(lv)  = $exps[:actor][lv - 1]
+        def next_level_exp     = exp_for_level(@level + 1) == $exps[:actor][@level]
+    所以**下标就是当前等级**：40 级 → `ACTOR_EXP[40]`（= 332296，和游戏里显示的一致）。
+
+    ⚠ 别拿 `@limit_exp` 当升级所需经验，那是「累计获得经验」的计数器。
+
+    kind: "actor"（角色）/ "baby"（召唤兽）。越界（满级 / 等级异常）返回 None。
+    """
+    tbl = exp.BABY_EXP if kind == "baby" else exp.ACTOR_EXP
+    try:
+        lv = int(level)
+    except (TypeError, ValueError):
+        return None
+    if lv < 0 or lv >= len(tbl):
+        return None
+    return tbl[lv]
+
+
+def get_int(node, default=0):
+    v = M.value_of(_deref(node))
+    try:
+        return default if v is None else int(v)
+    except (TypeError, ValueError):
+        # 寿命这种字段可能是符号 `:infinite`（神兽永生）
+        return default
+
+
+def get_float(node, default=0.0):
+    v = M.value_of(_deref(node))
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def is_ruby_false(value):
+    """这个值在 Ruby 里算不算“假”？
+
+    Ruby 只有 `false` 和 `nil` 是假值 —— **整数 0 是真值**。
+    所以判断 `@cheated` 这类开关时不能只写 `bool(value)`：
+    曾经把 false 写成整数 0，游戏 `if $game_system.cheated` 照样成立，
+    20 分钟后还是开始惩罚（画面转圈），25 分钟后弹「存档异常」退出。
+    """
+    return value is False or value is None
+
+
+def set_ivar(obj, name, node):
+    """替换对象的某个 ivar 的值节点（保持位置）。"""
+    obj = _deref(obj)
+    for i, (k, _v) in enumerate(obj.ivars):
+        if k == name:
+            obj.ivars[i] = (k, node)
+            return True
+    return False
+
+
+class GameEditor(object):
+    """针对一份 SaveDoc 的游戏数据编辑。"""
+
+    def __init__(self, sv):
+        self.sv = sv
+        self.doc = sv.doc
+
+    # ==================================================== 金钱 / 上限
+    def set_gold(self, value):
+        """改金钱的统一入口（界面层都该走这里，而不是直接 sv.set_gold）。
+
+        三件事一次做齐，缺一个都会被游戏判作弊：
+          1. 超过 MAX_GOLD（30,000,000）→ 自动改成 SAFE_GOLD（上限的 5/6，
+             留安全余量），返回 (实际写入值, 是否被钳)；
+          2. sv.set_gold 同步 Lock 的 @master 校验和；
+          3. sync_gold_security 把游戏的金钱账 security[:gold] 对齐 ——
+             以前只做了第 2 步，游戏里一花钱/赚钱就因账实不符被记 'NE!'。
+        """
+        value = int(value)
+        clamped = False
+        if value > MAX_GOLD:
+            value = SAFE_GOLD
+            clamped = True
+        self.sv.set_gold(value)
+        self.sync_gold_security()
+        return value, clamped
+
+    def limit_gold(self):
+        return get_int(ivar(self.sv.section("party"), "@limit_gold"))
+
+    def set_limit_gold(self, value):
+        node = _deref(ivar(self.sv.section("party"), "@limit_gold"))
+        if node is None:
+            raise KeyError("存档里没有 @limit_gold")
+        self.doc.set_value(node, int(value))
+        return int(value)
+
+    def warehouse_page(self):
+        h = self._hash()
+        return get_int(hash_get(h, "warehouse_page"))
+
+    def set_warehouse_page(self, value):
+        h = self._hash()
+        node = _deref(hash_get(h, "warehouse_page"))
+        if node is None:
+            raise KeyError("没有 warehouse_page")
+        self.doc.set_value(node, int(value))
+
+    # ==================================================== 祈福池
+    # 祈福池窗口里 4 个储备量，存在 $game_party.hash 里（符号键）：
+    # 左键物品加人物储备(actor_*)，右键加宠物储备(baby_*)。
+    # 这 4 个值不在游戏防作弊检查范围内，直接写即可。
+    BLESSING_KEYS = (
+        ("actor_hp_pool", "角色气血储备"),
+        ("actor_mp_pool", "角色魔法储备"),
+        ("baby_hp_pool", "宠物气血储备"),
+        ("baby_mp_pool", "宠物魔法储备"),
+    )
+
+    def blessing_rows(self):
+        """祈福池 4 个储备量：[(key, 显示名, 当前值), ...]。"""
+        h = self._hash()
+        return [(key, cn, get_int(hash_get(h, key)))
+                for key, cn in self.BLESSING_KEYS]
+
+    def set_blessing(self, key, value):
+        """改某个祈福池储备量（负数钳 0），返回实际写入值。"""
+        h = self._hash()
+        node = _deref(hash_get(h, key))
+        if node is None:
+            raise KeyError("祈福池字段不存在：%s" % key)
+        value = max(0, int(value))
+        self.doc.set_value(node, value)
+        return value
+
+    def _hash(self):
+        """$game_party.hash（Key 是符号，这里用字符串键取）。"""
+        return _deref(ivar(self.sv.section("party"), "@hash"))
+
+    # ==================================================== 背包
+    def container(self, kind="Items"):
+        """返回容器 HashNode（key = 槽号，value = [对象, 数量]）。"""
+        for key, ivname, _cn, _db in KINDS:
+            if key == kind:
+                node = _deref(ivar(self.sv.section("party"), ivname))
+                if isinstance(node, M.HashNode):
+                    return node
+                raise KeyError("存档里没有 %s" % ivname)
+        raise KeyError("不认识的背包类型 %r" % kind)
+
+    def slot_key(self, page, index):
+        return page * PACK_PAGE_SIZE + index
+
+    def _pair_index(self, h, slot):
+        for i, (k, _v) in enumerate(h.pairs):
+            if M.value_of(_deref(k)) == slot:
+                return i
+        return -1
+
+    def bag(self, kind="Items", page=None):
+        """背包内容：[(槽号, 翻页, 页内格, id, 名称, 数量), ...]，空槽不列。
+
+        page=None 表示整本背包（4 页 × 20 格），给了 page 就只看那一页。
+        名称按**物件自己的类**选表（背包里混装着道具/武器/防具）。
+        """
+        h = self.container(kind)
+        out = []
+        for k, v in h.pairs:
+            slot = M.value_of(_deref(k))
+            if not isinstance(slot, int):
+                continue
+            p, idx = divmod(slot, PACK_PAGE_SIZE)
+            if page is not None and p != page:
+                continue
+            arr = _deref(v)
+            if not isinstance(arr, M.ArrayNode) or not arr.items:
+                continue
+            item = _deref(arr.items[0])
+            iid = get_int(ivar(item, "@id"), -1) if item is not None else -1
+            nm = self.item_display_name(item, "?") if item is not None else "?"
+            count = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+            out.append((slot, p, idx, iid, nm, count))
+        out.sort()
+        return out
+
+    def templates(self, kind="Items", keyword=None, limit=500):
+        """物品模板表：[(id, 名称, 说明), ...]（从 Data\\<kind>.rvdata2 读）。
+
+        仿画迹1：右边一个可搜索的模板列表，选中后写进背包格子。
+        """
+        import datatables
+        _root, items = datatables.load(kind)
+        kw = (keyword or "").strip().lower()
+        out = []
+        for i, node in items:
+            nm = datatables.s(node, "@name") or ("#%d" % i)
+            desc = (datatables.s(node, "@description") or "").strip().replace("\r\n", "\n")
+            if kw and kw not in nm.lower() and kw not in str(i) \
+                    and kw not in desc.lower():
+                continue
+            out.append((i, nm, desc))
+            if len(out) >= limit:
+                break
+        return out
+
+    def set_all_counts(self, kind="Items", count=99, page=None):
+        """把（某一页/整本）已有的格子数量批量改成 count（仿画迹1 的批量改）。"""
+        count = max(0, min(int(count), MAX_ITEM))
+        n = 0
+        for slot, _p, _i, iid, _nm, cur in self.bag(kind, page):
+            if cur == count:
+                continue
+            self.set_count(kind, slot, count)
+            n += 1
+        return n
+
+    def pack_report(self, kinds=None):
+        """背包体检（仿画迹1 的 pack_scan_bad）。
+
+        返回 [(kind, 槽号, 名称, 问题, 能否修, extra), ...]，extra 里带上修复要用到的
+        附加信息（比如重复格子指向哪个槽）。检查项：
+
+          * 格子号不是整数（数据坏了）
+          * 值不是 `[物品, 数量]`（结构不对）
+          * 只有数量没有物品对象
+          * 物品 id 在 `Data\\<kind>.rvdata2` 里查不到
+          * 数量是 0 / 超过单格上限 99
+          * 同一件东西占了多个格子（游戏按 id 取数量，重复会算不清）
+        """
+        out = []
+        for key, _iv, cn, db in KINDS:
+            if kinds and key not in kinds:
+                continue
+            try:
+                h = self.container(key)
+            except KeyError:
+                continue
+            names = self._name_map(key)
+            seen = {}
+            for k, v in h.pairs:
+                slot = M.value_of(_deref(k))
+                if not isinstance(slot, int):
+                    out.append((key, slot, cn, "格子号不是整数（%r）"
+                                % (slot,), True, {}))
+                    continue
+                arr = _deref(v)
+                if arr is None or isinstance(arr, M.NilNode):
+                    continue
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    out.append((key, slot, cn, "结构不对（不是 [物品, 数量]）",
+                                True, {}))
+                    continue
+                item = _deref(arr.items[0])
+                if item is None or isinstance(item, M.NilNode):
+                    out.append((key, slot, "（空）", "只有数量、没有物品对象",
+                                True, {}))
+                    continue
+                iid = get_int(ivar(item, "@id"), -1)
+                cnt = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+                nm = names.get(iid) or ("id=%d" % iid)
+                if iid < 0 or names.get(iid) is None:
+                    out.append((key, slot, nm,
+                                "物品 id=%s 在 %s.rvdata2 里不存在" % (iid, db),
+                                True, {"id": iid}))
+                if cnt <= 0:
+                    out.append((key, slot, nm, "数量是 %d" % cnt, True,
+                                {"id": iid, "count": cnt}))
+                elif cnt > MAX_ITEM:
+                    out.append((key, slot, nm, "数量 %d 超过单格上限 %d"
+                                % (cnt, MAX_ITEM), True,
+                                {"id": iid, "count": cnt}))
+                if iid in seen:
+                    out.append((key, slot, nm, "和 %d 号格子重复（同一物品占两格）"
+                                % seen[iid], True,
+                                {"id": iid, "count": cnt, "dup_of": seen[iid]}))
+                else:
+                    seen[iid] = slot
+                # 孵化蛋/礼包这类“运行时才填内容”的东西：@attr 空的话一用就报
+                # `undefined method '[]' for nil:NilClass`
+                need_pay, _nm = self.item_needs_payload(key, iid)
+                if need_pay:
+                    pt, _pd = self.item_payload(item)
+                    if not pt:
+                        out.append((key, slot, nm,
+                                    "缺“运行时内容”（@attr 是空的）——"
+                                    "游戏里一用就报 NoMethodError",
+                                    True, {"id": iid, "payload": True}))
+                    elif not self.payload_key_ok(item):
+                        out.append((key, slot, nm,
+                                    "运行时内容的键写成了符号（老版本工具的写法）"
+                                    "——游戏只认字符串键 \"data\"，所以游戏里读不到",
+                                    True, {"id": iid, "payload": True}))
+        return out
+
+    def pack_fix(self, rows=None):
+        """按体检结果修（仿画迹1 的 pack_fix_all）：
+
+          * 重复格子 → 把数量并到前一个格子，再清掉这一格
+          * 数量 0 / 结构坏 / id 无效 → 清空那一格
+          * 数量超上限 → 截断到 99
+        返回 [(kind, slot, 修了什么), ...]。
+        """
+        rows = rows if rows is not None else self.pack_report()
+        done = []
+        for row in rows:
+            kind, slot, name, why, _fix, extra = row
+            if not isinstance(slot, int):
+                continue
+            if extra.get("payload"):
+                it = self._item_node(kind, slot)
+                if it is None:
+                    continue
+                before, _b = self.item_payload(it)
+                self._fix_payload(it, kind, extra.get("id", -1))
+                after, _a = self.item_payload(it)
+                if after and not before:
+                    self.doc.mark_structural()
+                    done.append((kind, slot, "%s 补上了运行时内容（%s）"
+                                 % (name, after)))
+                continue
+            cnt = extra.get("count")
+            if extra.get("dup_of") is not None:
+                keep = extra["dup_of"]
+                cur = dict((s, c) for s, _p, _i, _id, _n, c in self.bag(kind))
+                total = cur.get(keep, 0) + (cnt or 0)
+                if total > MAX_ITEM:            # 上限就留一格 99、多余丢掉
+                    total = MAX_ITEM
+                self.set_count(kind, keep, total)
+                self.clear_slot(kind, slot)
+                done.append((kind, slot, "%s 并到 %d 号格子（现在 %d 个）"
+                             % (name, keep, total)))
+                continue
+            if "超过" in why:
+                self.set_count(kind, slot, MAX_ITEM)
+                done.append((kind, slot, "%s 数量 %s → %d"
+                             % (name, cnt, MAX_ITEM)))
+                continue
+            if self.clear_slot(kind, slot):
+                done.append((kind, slot, "%s 已清空（%s）" % (name, why)))
+        if done:
+            self.resync_security()
+        return done
+
+    # ==================================================== 机器码（存档绑定）
+    def config_hash(self):
+        """`$game_system.config`（Hash）。"""
+        return _deref(ivar(self.sv.section("system"), "@config"))
+
+    def machine_ids(self):
+        """存档里记录的机器码列表（`config[:hard_disk_code]`，是个数组）。
+
+        游戏启动时会 `include?(current)` 比对，不在里面就 msgbox “存档异常”。
+        所以换机器玩的话，把新机器码加进去就行。
+        """
+        arr = _deref(hash_get(self.config_hash(), "hard_disk_code"))
+        out = []
+        if isinstance(arr, M.ArrayNode):
+            for x in arr.items:
+                s = _as_str(x)
+                if s is not None:
+                    out.append(str(s))
+        return out
+
+    def _machine_array(self, create=True):
+        h = self.config_hash()
+        if not isinstance(h, M.HashNode):
+            raise KeyError("存档里没有 $game_system.config")
+        arr = _deref(hash_get(h, "hard_disk_code"))
+        if isinstance(arr, M.ArrayNode):
+            return arr
+        if not create:
+            return None
+        arr = M.ArrayNode([])
+        for i, (k, v) in enumerate(h.pairs):
+            if M.value_of(k) == "hard_disk_code":
+                h.pairs[i] = (k, arr)
+                return arr
+        h.pairs.append((M.SymbolNode("hard_disk_code"), arr))
+        return arr
+
+    def set_machine_ids(self, ids):
+        """整组替换（结构性改动）。"""
+        arr = self._machine_array()
+        arr.items = [str_node(str(x)) for x in ids if str(x).strip()]
+        self.doc.mark_structural()
+        return self.machine_ids()
+
+    def add_machine_id(self, mid):
+        """追加一个机器码（已存在就不动）——换机器时最安全的做法。"""
+        mid = str(mid).strip()
+        if not mid:
+            raise ValueError("机器码是空的")
+        have = self.machine_ids()
+        if mid in have:
+            return have
+        arr = self._machine_array()
+        arr.items.append(str_node(mid))
+        self.doc.mark_structural()
+        return self.machine_ids()
+
+    def machine_id_now(self):
+        """本机机器码（调 main.dll!get_hard_disk_character）。"""
+        import codec
+        return codec.try_machine_id()
+
+    def machine_status(self):
+        """返回 (本机机器码 或 None, 出错原因, 存档记录列表, 本机是否在档)。"""
+        now, err = self.machine_id_now()
+        ids = self.machine_ids()
+        return now, err, ids, bool(now and now in ids)
+        h = self.container(kind)
+        nm = self._name_map(kind)
+        out = []
+        for k, v in h.pairs:
+            slot = M.value_of(_deref(k))
+            if not isinstance(slot, int):
+                continue
+            p, idx = divmod(slot, PACK_PAGE_SIZE)
+            if page is not None and p != page:
+                continue
+            arr = _deref(v)
+            if not isinstance(arr, M.ArrayNode) or not arr.items:
+                continue
+            item = _deref(arr.items[0])
+            iid = get_int(ivar(item, "@id"), -1) if item is not None else -1
+            count = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+            out.append((slot, p, idx, iid, nm.get(iid, "?"), count))
+        out.sort()
+        return out
+
+    def empty_slots(self, kind="Items", page=None):
+        """空槽号：键是整数槽号、值**有货**的才算占用（置 nil 的槽当空的）。
+
+        和 `bag()` / 游戏 `has_vacancy?` 一致 —— 被「清空」的格子还能再装东西。
+        """
+        h = self.container(kind)
+        used = set()
+        for k, v in h.pairs:
+            slot = M.value_of(_deref(k))
+            if isinstance(slot, int):
+                arr = _deref(v)
+                if isinstance(arr, M.ArrayNode) and arr.items:
+                    used.add(slot)
+        pages = [page] if page is not None else range(MAX_PACK_PAGE)
+        out = []
+        for p in pages:
+            for i in range(PACK_PAGE_SIZE):
+                s = self.slot_key(p, i)
+                if s not in used:
+                    out.append(s)
+        return out
+
+    def _name_map(self, kind):
+        import datatables
+        try:
+            return datatables.name_map(kind)
+        except Exception:
+            return {}
+
+    #: 存档里的物件类名 → Data 表
+    CLASS_TO_DB = {"RPG::Item": "Items", "RPG::Weapon": "Weapons",
+                   "RPG::Armor": "Armors"}
+
+    def item_display_name(self, node, fallback=None):
+        """一个背包物件的显示名。
+
+        关键：**背包里混装三种对象**（道具/武器/防具，召唤兽装备也是武器防具），
+        所以不能拿容器的名字表去查 —— 得按对象自己的类选表：
+        `RPG::Weapon` → Weapons.rvdata2、`RPG::Armor` → Armors.rvdata2 ……
+        依次降级：类对应的表 → 对象自带的 @name → 三张表都试 → fallback。
+        """
+        n = _deref(node)
+        if n is None:
+            return fallback
+        iid = get_int(ivar(n, "@id"), -1)
+        cls = getattr(n, "cls", "") or ""
+        keys = []
+        if cls in self.CLASS_TO_DB:
+            keys.append(self.CLASS_TO_DB[cls])
+        keys += [k for k in ("Items", "Weapons", "Armors") if k not in keys]
+        for k in keys:
+            nm = self._name_map(k).get(iid)
+            if nm:
+                return nm
+        own = _as_str(ivar(n, "@name"))
+        return own or fallback
+
+    def item_name(self, kind, item_id):
+        return self._name_map(kind).get(item_id, "?")
+
+    def _desc_map(self, kind):
+        """Data 表的 {id: (名称, 完整说明)}（懒加载缓存，悬浮提示用）。"""
+        if not getattr(self, "_desc_cache", None):
+            self._desc_cache = {}
+        if kind not in self._desc_cache:
+            import datatables
+            m = {}
+            try:
+                _root, items = datatables.load(kind)
+                for i, node in items:
+                    nm = datatables.s(node, "@name") or ("#%d" % i)
+                    desc = (datatables.s(node, "@description") or "").strip()
+                    m[i] = (nm, desc)
+            except Exception:
+                pass
+            self._desc_cache[kind] = m
+        return self._desc_cache[kind]
+
+    def item_description(self, node):
+        """背包物件的完整说明（按对象自己的类选 Items/Weapons/Armors 表，
+        选表逻辑与 item_display_name 一致；查不到再退回对象自带 @description）。"""
+        n = _deref(node)
+        if n is None:
+            return ""
+        iid = get_int(ivar(n, "@id"), -1)
+        cls = getattr(n, "cls", "") or ""
+        keys = []
+        if cls in self.CLASS_TO_DB:
+            keys.append(self.CLASS_TO_DB[cls])
+        keys += [k for k in ("Items", "Weapons", "Armors") if k not in keys]
+        for k in keys:
+            pair = self._desc_map(k).get(iid)
+            if pair and pair[1]:
+                return pair[1]
+        return (_as_str(ivar(n, "@description")) or "").strip()
+
+    def set_count(self, kind, slot, count):
+        """改某一格的数量（标量改动，安全）+ 同步物品计数校验。"""
+        h = self.container(kind)
+        i = self._pair_index(h, slot)
+        if i < 0:
+            raise KeyError("第 %d 格是空的" % slot)
+        arr = _deref(h.pairs[i][1])
+        if not isinstance(arr, M.ArrayNode) or len(arr.items) < 2:
+            raise KeyError("第 %d 格结构不对" % slot)
+        item = _deref(arr.items[0])
+        iid = get_int(ivar(item, "@id"), -1)
+        count = max(0, min(int(count), 99 * 99))
+        self.doc.set_value(_deref(arr.items[1]), count)
+        if kind == "Items":
+            self.sync_security_item(iid)
+        return count
+
+    def clear_slot(self, kind, slot):
+        """清空格子（把值置 nil，游戏就当它空的；不需要删对象）。
+
+        置 nil 后游戏自己的 `has_vacancy?` 就会把这个槽当空的，
+        而且不减少对象个数 —— 少踩一个“编号错位”的坑。
+        """
+        h = self.container(kind)
+        i = self._pair_index(h, slot)
+        if i < 0:
+            return False
+        arr = _deref(h.pairs[i][1])
+        iid = -1
+        if isinstance(arr, M.ArrayNode) and arr.items:
+            iid = get_int(ivar(_deref(arr.items[0]), "@id"), -1)
+        h.pairs[i] = (h.pairs[i][0], nil_node())
+        self.doc.mark_structural()
+        if kind == "Items" and iid >= 0:
+            self.sync_security_item(iid)
+        return True
+
+    def add_item(self, kind, slot, item_id, count=1, kid=None, clone_like=True):
+        """往空格子里加一件物品（结构性改动）。
+
+        优先克隆**存档里同款**（带运行时内容）；没有才用 Data 模板新建。
+        只允许往**空槽**加：这样不会覆盖玩家已有的东西。
+        """
+        h = self.container(kind)
+        if self._pair_index(h, slot) >= 0:
+            arr = _deref(h.pairs[self._pair_index(h, slot)][1])
+            if isinstance(arr, M.ArrayNode) and arr.items:
+                raise ValueError("第 %d 格已经有东西了" % slot)
+        like = self.find_like(kind, item_id) if clone_like else None
+        node = self.make_item(kind, item_id, kid=kid, like=like)
+        arr = M.ArrayNode([node, int_node(count)])
+        i = self._pair_index(h, slot)
+        key = int_node(slot)
+        if i >= 0:
+            h.pairs[i] = (h.pairs[i][0], arr)
+        else:
+            pos = len(h.pairs)
+            for j, (k, _v) in enumerate(h.pairs):
+                kv = M.value_of(_deref(k))
+                if isinstance(kv, int) and kv > slot:
+                    pos = j
+                    break
+            h.pairs.insert(pos, (key, arr))
+        if kind == "Items":
+            self.sync_security_item(item_id)
+        self.doc.mark_structural()
+        return node
+
+    def slot_info(self, kind, slot):
+        """某一格的内容：`(物品id, 数量)`；空格/坏格返回 None。"""
+        for s, _p, _i, iid, _nm, cnt in self.bag(kind):
+            if s == slot:
+                return (iid, cnt)
+        return None
+
+    def set_item(self, kind, slot, item_id, count=None, kid=None,
+                 clone_like=True):
+        """把某一格**换成**另一件物品（从 Data 模板新建对象，仿画迹1 的"写入槽位"）。
+
+        count=None 表示沿用原来那一格的数量（原来是空的就是 1）。
+        这是结构性改动（保存时会整档重写），并且会自动同步物品计数校验。
+        """
+        old = self.slot_info(kind, slot)
+        if count is None:
+            count = old[1] if old else 1
+        count = max(0, min(int(count), MAX_ITEM))
+        try:
+            self.make_item(kind, item_id, kid=kid,
+                           like=self.find_like(kind, item_id) if clone_like
+                           else None)      # 先确认能造出来，别改到一半失败
+        except KeyError:
+            raise
+        if old is not None:
+            self.clear_slot(kind, slot)         # 先腾空（置 nil，不删 key）
+        self.add_item(kind, slot, item_id, count, kid=kid, clone_like=clone_like)
+        return count
+
+    def make_item(self, kind, item_id, kid=None, like=None):
+        """造一个物品对象。
+
+        优先 `like`：**存档里已经有的同一件东西**（连 `@attr` 里的运行时内容
+        一起克隆）——游戏自己发的孵化蛋/礼包里的内容就是现抽的，
+        从模板凭空造会缺东西（用起来直接 NoMethodError）。
+        没参照物时才用 Data 模板 + 补上游戏自加的 5 个 ivar，
+        并且对“运行时才填内容”的家族（孵化蛋/礼包/图纸…）现生成一份。
+
+        kid：孵化类物品的“孵出/开出什么”id；不给就随机（自己按游戏的范围抽）。
+        """
+        import datatables
+        if like is not None:
+            node = clone_node(like)
+            self._fix_payload(node, kind, item_id, kid)
+            return node
+        _root, items = datatables.load(kind)
+        tpl = None
+        for i, n in items:
+            if i == item_id:
+                tpl = n
+                break
+        if tpl is None:
+            raise KeyError("%s 里没有 id=%d" % (kind, item_id))
+        node = clone_node(tpl)
+        extra = self._extra_ivars(kind)
+        have = set(k for k, _ in node.ivars)
+        for k, v in extra:
+            if k not in have:
+                node.ivars.append((k, v))
+        self._fix_payload(node, kind, item_id, kid)
+        return node
+
+    def item_payload(self, node):
+        """读一个物件 `@attr` 里的运行时内容：`(type, data)`，没有则 (None, None)。"""
+        a = _deref(ivar(node, "@attr"))
+        d = _deref(hash_get(a, "data")) if a is not None else None
+        if not isinstance(d, M.HashNode):
+            return None, None
+        t = M.value_of(_deref(hash_get(d, "type")))
+        inner = _deref(hash_get(d, "data"))
+        return t, inner
+
+    def item_needs_payload(self, kind, item_id):
+        """这件东西是不是“游戏运行时才生成内容”（孵化蛋、各类礼包…）。"""
+        import datatables
+        nm = datatables.name_map(kind).get(item_id, "")
+        return itemattr.needs_payload(nm), nm
+
+    def baby_note_map(self):
+        """`{备注里的 data 值: [召唤兽 id, ...]}`（从 Data\\Actors 的 @note 里拓）。"""
+        import re
+        import datatables
+        out = {}
+        try:
+            _r, items = datatables.load("Actors")
+        except Exception:
+            return out
+        for i, node in items:
+            note = datatables.s(node, "@note") or ""
+            m = re.search(r"data\s*=\s*:([^\s|\r\n]+)", note)
+            if m:
+                out.setdefault(m.group(1), []).append(i)
+        return out
+
+    def payload_template(self, kind, item_id):
+        """从存档里任意一件**有内容**的同款物品上把 `@attr` 整份抄下来。"""
+        for key, _iv, _cn, _db in KINDS:
+            try:
+                h = self.container(key)
+            except KeyError:
+                continue
+            for _k, v in h.pairs:
+                arr = _deref(v)
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    continue
+                it = _deref(arr.items[0])
+                if it is None or get_int(ivar(it, "@id"), -1) != int(item_id):
+                    continue
+                t, _d = self.item_payload(it)
+                if t:
+                    return clone_node(ivar(it, "@attr"))
+        return None
+
+    def payload_key_ok(self, node):
+        """`@attr` 的外层键是不是**字符串** "data"（游戏只认这个）。
+
+        老版本工具误写成了符号键 `:data`：工具自己能读（兼容两种），
+        但游戏 `item.data` 读的是字符串键 → 读不到 → 用的时候直接报
+        `undefined method '[]' for nil:NilClass`。
+        """
+        a = _deref(ivar(node, "@attr"))
+        if not isinstance(a, M.HashNode) or not a.pairs:
+            return False
+        for k, _v in a.pairs:
+            kk = _deref(k)
+            if isinstance(kk, M.StrNode):
+                return True
+        return False
+
+    def _fix_payload(self, node, kind, item_id, kid=None, force=False):
+        """给物品补上 `@attr`（游戏运行时才生成的那部分）。
+
+        优先级：现成的内容（不动）→ 存档里同款的内容（整份抄）→ 按游戏
+        脚本里的规则现生成（见 `itemattr`）。
+        force=True 时不看“同款”，直接按规则重抽一份（“重抽内容”按钮用）。
+        """
+        cur_t, cur_d = self.item_payload(node)
+        if cur_t and kid is None and not force:
+            if self.payload_key_ok(node):
+                return node            # 存档里本来就有内容，而且键类型对
+            # 内容在，但键是符号（老版本工具的写法）→ 重写成字符串键，内容一个不动
+            inner = M.HashNode([(self._sym("type"), self._sym(cur_t)),
+                                (self._sym("data"),
+                                 cur_d if cur_d is not None else nil_node())],
+                               default=None)
+            attr = M.HashNode([(self._str_key("data"), inner)], default=None)
+            if not set_ivar(node, "@attr", attr):
+                node.ivars.append(("@attr", attr))
+            return node
+        need, nm = self.item_needs_payload(kind, item_id)
+        if not need and kid is None:
+            return node
+        sib = None if force else self.payload_template(kind, item_id)
+        if sib is not None and kid is None:
+            if not set_ivar(node, "@attr", sib):
+                node.ivars.append(("@attr", sib))
+            return node
+        spec = itemattr.build(nm, item_id, ctx=self.baby_note_map)
+        if spec is None:
+            return node
+        typ, data = spec
+        if kid is not None and "id" in data:
+            data["id"] = int(kid)
+        attr = M.HashNode([], default=None)
+        # ⚠ 这里的**外层键必须是字符串 "data"**：游戏写的就是 `@attr["data"]`，
+        # 读的时候是 `item.data[:data][:id]`。早期工具写成了符号键 :data，
+        # 于是“内容列”读不出来、游戏用蛋时 `item.data` 为 nil 直接报
+        # NoMethodError: undefined method '[]' for nil:NilClass。
+        attr.pairs.append((self._str_key("data"), self._payload_node(typ, data)))
+        if not set_ivar(node, "@attr", attr):
+            node.ivars.append(("@attr", attr))
+        return node
+
+    @staticmethod
+    def _str_key(text):
+        """字符串键（不加 I/E 包装，和游戏写的一样）。"""
+        return M.StrNode(text.encode("utf-8"))
+
+    def set_payload(self, kind, slot, kid=None, force=True):
+        """给某一格的东西重新生成/指定“运行时内容”（孵化蛋、要诀之类的）。
+
+        kid：孵化类物品要孵出哪只（不给就按游戏范围随机抽一个）。
+        """
+        it = self._item_node(kind, slot)
+        if it is None:
+            raise KeyError("第 %d 格是空的" % slot)
+        iid = get_int(ivar(it, "@id"), -1)
+        need, nm = self.item_needs_payload(kind, iid)
+        if not need:
+            raise ValueError("%s 不需要运行时内容" % (nm or ("id=%d" % iid)))
+        self._fix_payload(it, kind, iid, kid=kid, force=force)
+        self.doc.mark_structural()
+        return self.item_payload(it)
+
+    def payload_summary(self, node):
+        """一句话描述物件的运行时内容（背包列表“内容”列用），空代表没有。"""
+        t, d = self.item_payload(node)
+        if not t:
+            return ""
+        kid = M.value_of(_deref(hash_get(d, "id"))) if d is not None else None
+        if t == "baby_egg":
+            acts = self._name_map("Actors")
+            return "蛋→%s(%s)" % (acts.get(kid, "?"), kid)
+        if t == "skill_book":
+            sk = self._name_map("Skills")
+            return "技能书→%s(%s)" % (sk.get(kid, "?"), kid)
+        if t == "formation":
+            key = M.value_of(_deref(hash_get(d, "key"))) if d is not None else None
+            return "阵型→%s" % (key or "?")
+        if t == "guide_book":
+            return "指南书→%s" % self._plain_text(d)
+        if t in ("iron", "god_eye_bead", "stone"):
+            return "%s→等级%s" % (t, M.value_of(_deref(hash_get(d, "lv")))
+                                    if d is not None else "?")
+        return "%s→%s" % (t, self._plain_text(d))
+
+    @staticmethod
+    def _plain_text(node):
+        """把一小捻节点渲染成一行字（只给界面显示用）。"""
+        n = _deref(node)
+        if n is None or isinstance(n, M.NilNode):
+            return "nil"
+        if isinstance(n, M.HashNode):
+            return "{" + ", ".join("%s:%s" % (GameEditor._plain_text(k),
+                                                GameEditor._plain_text(v))
+                                    for k, v in n.pairs) + "}"
+        if isinstance(n, M.ArrayNode):
+            return "[" + ", ".join(GameEditor._plain_text(x) for x in n.items) \
+                + "]"
+        if isinstance(n, M.SymbolNode):
+            return str(n.name)
+        v = M.value_of(n)
+        if isinstance(v, bytes):
+            return v.decode("utf-8", "replace")
+        return str(v)
+
+    @staticmethod
+    def _sym(name):
+        return M.SymbolNode(name)
+
+    def _payload_node(self, typ, data):
+        """把 `(type, data)` 转成 `{:type => ..., :data => {...}}` 节点。"""
+        pairs = [(self._sym("type"), self._sym(typ)),
+                 (self._sym("data"), self._plain_node(data))]
+        return M.HashNode(pairs, default=None)
+
+    def _plain_node(self, value):
+        """Python 值 → Marshal 节点（只支持这几个基本类型，够用）。"""
+        if isinstance(value, itemattr.Sym):
+            return self._sym(value.name)
+        if isinstance(value, bool):
+            return M.BoolNode(value)
+        if isinstance(value, int):
+            return int_node(value)
+        if isinstance(value, float):
+            return M.FloatNode(value)
+        if isinstance(value, bytes):
+            return str_node(value)
+        if isinstance(value, str):
+            return str_node(value)
+        if isinstance(value, dict):
+            return M.HashNode([(self._sym(k), self._plain_node(v))
+                               for k, v in value.items()], default=None)
+        if isinstance(value, (list, tuple)):
+            return M.ArrayNode([self._plain_node(x) for x in value])
+        return nil_node()
+
+    def _item_node(self, kind, slot):
+        """取某个格子的物品对象节点（空返回 None）。"""
+        h = self.container(kind)
+        i = self._pair_index(h, slot)
+        if i < 0:
+            return None
+        arr = _deref(h.pairs[i][1])
+        if not isinstance(arr, M.ArrayNode) or not arr.items:
+            return None
+        return _deref(arr.items[0])
+
+    def find_like(self, kind, item_id):
+        """在**同一个容器**里找一件同类的现成物件（用来克隆运行时内容）。"""
+        h = self.container(kind)
+        for _k, v in h.pairs:
+            arr = _deref(v)
+            if not isinstance(arr, M.ArrayNode) or not arr.items:
+                continue
+            it = _deref(arr.items[0])
+            if it is None:
+                continue
+            if get_int(ivar(it, "@id"), -1) == int(item_id):
+                return it
+        return None
+
+    def _extra_ivars(self, kind):
+        """存档物品比模板多的那几个 ivar，给个安全默认值。"""
+        return [
+            ("@result_note", M.HashNode([], default=None)),
+            ("@attr", M.HashNode([], default=None)),
+            ("@update", M.BoolNode(False)),
+            ("@new", M.BoolNode(False)),
+            ("@transaction_code",
+             M.BignumNode(random.getrandbits(127) | 1)),
+        ]
+
+    # ==================================================== 记账校验（Change）
+    # 游戏的 $game_system.security 是一个 Hash，一共 5 类账：
+    #   :gold       单个 Change，@code='$game_party.gold' —— 账必须 == 当前金钱
+    #   :items      {道具id => Change} —— 账必须 == 背包+仓库持有数
+    #   :renqi      {角色id => Change} —— 账必须 == 该角色 @人气
+    #   :gongxian   {角色id => Change} —— 账必须 == 该角色 @贡献
+    #   :variables  {变量id => Change} —— 账必须 == $game_variables[id]
+    # Change 每次数值变动都会 eval(@code) 和自己比，对不上立刻
+    # `keyword << 'NE!'` + `@cheated = 帧号`。改金钱/属性后**必须把账同步**。
+    def security_node(self):
+        sec = _deref(ivar(self.sv.section("system"), "@security"))
+        return sec if isinstance(sec, M.HashNode) else None
+
+    def security_sub(self, key):
+        """取 security 里的子表（:items / :renqi / :gongxian / :variables）。"""
+        sec = self.security_node()
+        if sec is None:
+            return None
+        n = _deref(hash_get(sec, key))
+        return n if isinstance(n, M.HashNode) else None
+
+    def security_hash(self):
+        """兼容旧接口：返回 (@security 节点, items 子表)。"""
+        return self.security_node(), self.security_sub("items")
+
+    @staticmethod
+    def change_value(ch):
+        """解密一个 Change 的 @value；**支持负数**（首位可以是 '-'）。
+
+        游戏的 `Change#show` 是 `load.map{ AES_ECB.decrypt }.join.to_i`，
+        所以每位解出来拼成字符串再 int 即可；空数组 = 0（新建未记账）。
+        """
+        ch = _deref(ch)
+        if not isinstance(ch, M.ObjNode):
+            return None
+        val = _deref(ivar(ch, "@value"))
+        if not isinstance(val, M.ArrayNode):
+            return None
+        chars = []
+        for x in val.items:
+            t = aes.decrypt_token(_as_str(x))
+            if t is None:
+                return None
+            chars.append(t)
+        txt = "".join(chars)
+        if not txt or txt == "-":
+            return 0
+        try:
+            return int(txt)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _change_set(ch, total):
+        """把 Change 的 @value 按数字重写（逐位 AES；负数带 '-' 位）。"""
+        ch = _deref(ch)
+        arr = M.ArrayNode([hex_str_node(aes.encrypt_digit(d))
+                           for d in str(int(total))])
+        if not set_ivar(ch, "@value", arr):
+            ch.ivars.append(("@value", arr))
+
+    def security_total(self, item_id):
+        """游戏记录的"该物品累计获得数量"（读不出来返回 None）。"""
+        items = self.security_sub("items")
+        if items is None:
+            return None
+        ch = _deref(hash_get(items, item_id))
+        return self.change_value(ch) if ch is not None else None
+
+    def _set_security_total(self, ch, total):
+        self._change_set(ch, total)
+
+    # ---------------- 金钱账（security[:gold]）
+    def security_gold(self):
+        """游戏记的金钱账（读不出来返回 None；空账 = 0）。"""
+        sec = self.security_node()
+        if sec is None:
+            return None
+        ch = _deref(hash_get(sec, "gold"))
+        return self.change_value(ch) if ch is not None else None
+
+    def sync_gold_security(self):
+        """把 security[:gold] 的账对齐到当前金钱。返回是否改动了。
+
+        这是"用工具改完金钱、玩一会儿还是被判作弊"的根因：
+        游戏里下一次 gain_gold 时 `Change.new(show+delta, '$game_party.gold')`
+        会立刻 eval 比对，账实不符就记 'NE!'。
+        """
+        want = int(self.sv.gold())
+        sec = self.security_node()
+        if sec is None:
+            return False
+        ch = _deref(hash_get(sec, "gold"))
+        if isinstance(ch, M.ObjNode):
+            if self.change_value(ch) == want:
+                return False
+            self._change_set(ch, want)
+            self.doc.mark_structural()
+            return True
+        # 老档可能没有这笔账 —— 按 init_security 的样子补一个（键是符号 :gold）
+        ch = M.ObjNode("Change")
+        ch.ivars = [("@code", str_node("$game_party.gold")),
+                    ("@value", M.ArrayNode(
+                        [hex_str_node(aes.encrypt_digit(d))
+                         for d in str(want)]))]
+        sec.pairs.append((M.SymbolNode("gold"), ch))
+        self.doc.mark_structural()
+        return True
+
+    # ---------------- 变量账（security[:variables]）
+    def security_variable_rows(self):
+        """[(变量id, 记账值, 实际值), ...]（只列游戏已建账的变量）。"""
+        vh = self.security_sub("variables")
+        out = []
+        if vh is None:
+            return out
+        for k, v in vh.pairs:
+            vid = M.value_of(_deref(k))
+            if not isinstance(vid, int):
+                continue
+            rec = self.change_value(v)
+            want = self.sv.get_variable(vid)
+            out.append((vid, rec, want if isinstance(want, int) else None))
+        out.sort()
+        return out
+
+    def sync_security_variables(self):
+        """把已建账的变量对齐到 $game_variables 当前值。返回改了几条。"""
+        n = 0
+        for _vid, ch, want in self._iter_security_changes("variables"):
+            if isinstance(want, int) and self.change_value(ch) != want:
+                self._change_set(ch, want)
+                n += 1
+        if n:
+            self.doc.mark_structural()
+        return n
+
+    # ---------------- 人气 / 贡献账（security[:renqi|gongxian]）
+    def _actor_attr_int(self, actor, attr_name):
+        obj = _deref(ivar(actor, "@attr"))
+        return get_int(ivar(obj, attr_name)) if obj is not None else None
+
+    def security_actor_rows(self, sec_key, attr_name):
+        """[(角色id, 角色名, 记账值, 实际值), ...]。"""
+        h = self.security_sub(sec_key)
+        out = []
+        if h is None:
+            return out
+        actors = dict(self.sv.actors())
+        for k, v in h.pairs:
+            aid = M.value_of(_deref(k))
+            if not isinstance(aid, int):
+                continue
+            a = actors.get(aid)
+            want = self._actor_attr_int(a, attr_name) if a is not None else None
+            out.append((aid, self.sv.actor_name(a) if a is not None
+                        else ("角色%d" % aid),
+                        self.change_value(v), want))
+        out.sort()
+        return out
+
+    def sync_security_actors(self, sec_key, attr_name):
+        """把某角色类账（人气/贡献）对齐到角色当前属性。返回改了几条。"""
+        h = self.security_sub(sec_key)
+        if h is None:
+            return 0
+        actors = dict(self.sv.actors())
+        n = 0
+        for k, v in h.pairs:
+            aid = M.value_of(_deref(k))
+            a = actors.get(aid) if isinstance(aid, int) else None
+            if a is None:
+                continue
+            want = self._actor_attr_int(a, attr_name)
+            if want is not None and self.change_value(v) != want:
+                self._change_set(v, want)
+                n += 1
+        if n:
+            self.doc.mark_structural()
+        return n
+
+    def _iter_security_changes(self, sec_key):
+        """遍历某子表里的 (键值, Change节点, 实际值) —— 实际值按子表类型取。"""
+        h = self.security_sub(sec_key)
+        if h is None:
+            return
+        actors = dict(self.sv.actors())
+        attr = {"renqi": "@人气", "gongxian": "@贡献"}.get(sec_key)
+        for k, v in h.pairs:
+            kv = M.value_of(_deref(k))
+            if not isinstance(kv, int):
+                continue
+            if sec_key == "variables":
+                want = self.sv.get_variable(kv)
+                want = want if isinstance(want, int) else None
+            elif attr:
+                a = actors.get(kv)
+                want = self._actor_attr_int(a, attr) if a is not None else None
+            else:
+                want = None
+            yield kv, v, want
+
+    def resync_all_security(self):
+        """把 5 类账全部对齐到存档实际状态。返回 [(账名, 改了几条), ...]。"""
+        out = []
+        n_items = self.resync_security()
+        if n_items:
+            out.append(("物品计数", n_items))
+        if self.sync_gold_security():
+            out.append(("金钱", 1))
+        n_var = self.sync_security_variables()
+        if n_var:
+            out.append(("变量", n_var))
+        n_renqi = self.sync_security_actors("renqi", "@人气")
+        if n_renqi:
+            out.append(("人气", n_renqi))
+        n_gx = self.sync_security_actors("gongxian", "@贡献")
+        if n_gx:
+            out.append(("贡献", n_gx))
+        return out
+
+    def bump_security(self, item_id, delta):
+        """兼容旧接口：不再是加 delta，而是直接把计数对齐到实际总数。"""
+        if not delta:
+            return None
+        return self.sync_security_item(item_id)
+
+    def sync_security_item(self, item_id, create=True):
+        """把某件道具的“累计获得数量”对齐到背包（+仓库）里的实际总数。
+
+        游戏只对 `RPG::Item` 记账（`security` 里第一行就 `return` 掉了
+        Weapon/Armor），而且背包里是三种对象混装的，所以这里要按类过滤。
+        本来没有条目的（游戏还没给你发过这件东西），就按游戏自己的模板
+        新建一个：`@code` 是它当场算期望值的 Ruby 片段。
+        """
+        _sec, items = self.security_hash()
+        if items is None:
+            return None
+        total = self.item_counts().get(item_id, 0)
+        ch = _deref(hash_get(items, item_id))
+        if isinstance(ch, M.ObjNode):
+            self._set_security_total(ch, total)
+            self.doc.mark_structural()
+            return total
+        if not create or total <= 0:
+            return None
+        ch = self._make_change(item_id, total)
+        pos = len(items.pairs)
+        for j, (k, _v) in enumerate(items.pairs):
+            kv = M.value_of(_deref(k))
+            if isinstance(kv, int) and kv > item_id:
+                pos = j
+                break
+        items.pairs.insert(pos, (int_node(item_id), ch))
+        self.doc.mark_structural()
+        return total
+
+    #: 游戏建 Change 时用的那段 Ruby 片段（照抄脚本 8946 行，空白无所谓）
+    CHANGE_CODE = ("proc{|i| $game_party.item_number(i) + "
+                   "$game_party.item_number(i, $game_party.warehouse) "
+                   "}.call(%d)")
+
+    def _make_change(self, item_id, total):
+        ch = M.ObjNode("Change")
+        ch.ivars = [("@code", str_node(self.CHANGE_CODE % item_id)),
+                    ("@value", M.ArrayNode(
+                        [hex_str_node(aes.encrypt_digit(d))
+                         for d in str(int(total))]))]
+        return ch
+
+    def item_counts(self, include_warehouse=True):
+        """{道具id: 数量} —— **只算 RPG::Item**（背包里混着武器/防具）。"""
+        out = {}
+
+        def eat(h):
+            if not isinstance(h, M.HashNode):
+                return
+            for _k, v in h.pairs:
+                arr = _deref(v)
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    continue
+                obj = _deref(arr.items[0])
+                if obj is None or getattr(obj, "cls", "") != "RPG::Item":
+                    continue
+                iid = get_int(ivar(obj, "@id"), -1)
+                cnt = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+                out[iid] = out.get(iid, 0) + cnt
+
+        eat(self.container("Items"))
+        if include_warehouse:
+            eat(_deref(hash_get(self._hash(), "warehouse")))
+        return out
+
+    def resync_security(self):
+        """按背包里的实际数量，把 `security[:items]` 全部对齐一遍。"""
+        _sec, items = self.security_hash()
+        if items is None:
+            return 0
+        actual = self.item_counts()
+        n = 0
+        for k, v in items.pairs:
+            iid = M.value_of(_deref(k))
+            ch = _deref(v)
+            if not isinstance(iid, int) or ch is None:
+                continue
+            want = actual.get(iid, 0)
+            cur = self.security_total(iid)
+            if cur != want:
+                self._set_security_total(ch, want)
+                n += 1
+        if n:
+            self.doc.mark_structural()
+        return n
+
+    def security_rows(self):
+        """[(item_id, 名称, 游戏记录数量, 背包实际数量), ...]"""
+        _sec, items = self.security_hash()
+        out = []
+        if items is None:
+            return out
+        actual = self.item_counts()
+        nm = self._name_map("Items")
+        for k, v in items.pairs:
+            iid = M.value_of(_deref(k))
+            if not isinstance(iid, int):
+                continue
+            out.append((iid, nm.get(iid, "?"), self.security_total(iid),
+                        actual.get(iid, 0)))
+        out.sort()
+        return out
+
+    # ==================================================== 经验
+    def exp(self, actor):
+        """角色「本级经验」= `@exp[@class_id]`。
+
+        ⚠ `@exp` 是个 Hash（**职业id → 经验**），游戏读的是 `@exp[@class_id]`，
+        不是"Hash 里第一项"——这俩平时碰巧一样（没转过职的存档只有一项），
+        但转职过的角色会同时留着旧职业那条，取第一项就取错了。
+        """
+        h = _deref(ivar(actor, "@exp"))
+        if not isinstance(h, M.HashNode) or not h.pairs:
+            return 0
+        want = M.value_of(_deref(ivar(actor, "@class_id")))
+        picked = None
+        for k, v in h.pairs:
+            if want is not None and M.value_of(_deref(k)) == want:
+                picked = _deref(v)
+                break
+        if picked is None:
+            picked = _deref(h.pairs[0][1])
+        return M.value_of(picked) or 0
+
+    def set_actor_level(self, actor, value):
+        """改角色等级，自动触发潜能/五维调整（和召唤兽一样的规则）。"""
+        old_lv = get_int(ivar(actor, "@level"), 0)
+        self.sv.set_actor_field(actor, "@level", int(value))
+        attr = _deref(ivar(actor, "@attr"))
+        self._apply_level_delta(attr, int(value) - old_lv)
+
+    def set_actor_level_full(self, actor, level, sync_exp=True):
+        """改等级 + 把 @exp 对齐到该等级的门槛（`init_exp` 的语义）。
+
+        为什么必须一起改：游戏升级走的是 `gain_exp` → `change_exp`，
+        而 `change_exp` 里**没有**升级逻辑，等级只在玩家点「升级」按钮
+        （`level_up?` 判定后调 `actor.level_up`）时才 +1。
+        满级角色 gain_exp 第一行就 return，所以只改 @exp 在游戏里
+        永远看不出变化 —— 等级要动，就得直接改 @level。
+
+        返回 (等级, 是否写了 exp)；level 会被夹到 1..MAX_LEVEL_ACTOR。
+        """
+        lv = int(level)
+        if lv < 1:
+            lv = 1
+        if lv > MAX_LEVEL_ACTOR:
+            lv = MAX_LEVEL_ACTOR
+        self.set_actor_level(actor, lv)
+        wrote = None
+        if sync_exp:
+            wrote = self.sync_exp_to_level(actor, lv)
+        return lv, wrote
+
+    def actor_exp_full(self, actor):
+        """「经验拉满」：等级顶到满级 + `@exp` 对齐到满级门槛，一次到位。
+
+        ⚠ 为什么不能**只**写 `@exp`（2026-09-20 再核了一遍脚本，结论没变）：
+        `Game_Actor#change_exp`(5960) 只做 `@exp[@class_id] = [exp,0].max; refresh`
+        —— **没有**升级循环。人物想升级只有两条路：
+          a) 地图 HUD 的「升级」按钮（`Window_Actor#update_btns` 索引 11，
+             `enabled = actor.level_up?`，点了才 `actor.level_up`，**一次一级**）；
+          b) 事件指令 316（`Game_Interpreter#command_316` → `actor.change_level`）。
+        战斗结算 `BattleManager.gain_exp`(1845) → `$game_party.battle_members`
+        → `Game_Actor#gain_exp`(5991) → `change_exp`，到此为止，等级不动。
+        （只有召唤兽 `Game_Baby#change_exp`(7001) 第 7014 行有
+         `level_up while ...` 会自己连升，所以"改完经验打一场自动升级"
+         **只对召唤兽成立，且只到主人+5**，见 baby_exp_full。）
+
+        所以「拉满」= 直接给满级 + 对齐经验，返回 (等级, 写进 @exp 的值)。
+        潜能/五维由 `set_actor_level` 里的 `_apply_level_delta` 一并补。
+        """
+        return self.set_actor_level_full(actor, MAX_LEVEL_ACTOR, sync_exp=True)
+
+    def set_exp(self, actor, value):
+        node = self.exp_node(actor)
+        if node is None:
+            raise KeyError("这个角色没有 @exp")
+        self.doc.set_value(node, int(value))
+        return int(value)
+
+    def sync_exp_to_level(self, actor, level):
+        """把 @exp 设成 level 对应的「本级起始经验」。
+        游戏里 `init_exp` 就是 `@exp[@class_id] = current_level_exp`
+        （= `exp_for_level(@level)`），升级时 `exp - next_level_exp` 会减到门槛重来。
+        ⚠ 游戏**只在 gain_exp 时才会动等级**（编辑器里 `level_up?` → 玩家点按钮
+        → `actor.level_up`），光改 @exp 不会让等级变；而且满级角色 gain_exp
+        直接 return，改 exp 完全没反应。所以「调等级」必须同时把 exp 对齐，
+        否则会出现「60 级但获得经验 0」这种读出来怪怪的档。
+        返回写进去的值 / None（满级或其他取不到门槛的情况）。
+        """
+        tbl = exp_for_level(level, "actor")
+        if tbl is None:
+            return None
+        return self.set_exp(actor, tbl)
+
+    def exp_node(self, actor):
+        """`@exp[@class_id]` 对应的那个节点（要写值就往这儿写）。"""
+        h = _deref(ivar(actor, "@exp"))
+        if not isinstance(h, M.HashNode) or not h.pairs:
+            return None
+        want = M.value_of(_deref(ivar(actor, "@class_id")))
+        for k, v in h.pairs:
+            if want is not None and M.value_of(_deref(k)) == want:
+                return _deref(v)
+        return _deref(h.pairs[0][1])
+
+    def exp_key(self, actor):
+        h = _deref(ivar(actor, "@exp"))
+        if isinstance(h, M.HashNode) and h.pairs:
+            return M.value_of(_deref(h.pairs[0][0]))
+        return None
+
+    # ---------------- 「累计获得经验」= 经验封顶开关（以前叫"升级所需经验"）
+    # 游戏脚本 Game_Actor#gain_exp：
+    #     @limit_exp ||= 0
+    #     if @limit_exp > 202123741
+    #       $tip.say("体验版本, #{name}经验累计获得已达上限：202273024", 1)
+    #       return          # ← 直接返回，这一级的经验一个字节都不给
+    #     end
+    #     @limit_exp += exp
+    # 也就是说它**既是累计计数器，又是"还发不发经验"的开关**：
+    # 一旦超过 202123741，再获得的经验会被**全部丢弃**（等级也涨不上去）。
+    LIMIT_EXP_MAX = 202123741
+
+    def limit_exp(self, actor):
+        """累计获得经验（0 = 该角色没有这个 ivar，也就是从没拿过经验）。"""
+        return get_int(ivar(actor, "@limit_exp"), 0)
+
+    def limit_exp_on(self, actor):
+        """这个角色还有没有"经验额度"（False = 封顶了，再打也不给经验）。
+
+        游戏脚本 `Game_Actor#gain_exp` 裁判的是 **写入前** 的值：
+            if @limit_exp > 202123741  → 直接 return（这一级的经验一个字节都不给）
+            else @limit_exp += exp
+        所以：值 ≤ 202123741 时还有额度；一旦越过这条线，**后续获得的经验全部作废**。
+        """
+        node = _deref(ivar(actor, "@limit_exp"))
+        if node is None:
+            return True                 # 没这个 ivar 的角色不会被判封顶
+        return self.limit_exp(actor) <= self.LIMIT_EXP_MAX
+
+    def limit_exp_room(self, actor):
+        """还剩多少经验额度才到线（提前提醒用）。"""
+        return max(0, self.LIMIT_EXP_MAX - self.limit_exp(actor))
+
+    def set_limit_exp(self, actor, value):
+        """写累计获得经验。**只允许 0..202123741**，超了游戏就再也不发经验了。
+
+        返回：写入的值 / None（角色没有这个 ivar，跳过）/ False（输入不合法）。
+        """
+        v = int(value)
+        if v < 0 or v > self.LIMIT_EXP_MAX:
+            return False
+        node = _deref(ivar(actor, "@limit_exp"))
+        if node is None:
+            # 没拿过经验的角色压根没这个 ivar。硬加一个属于结构性改动
+            # （整档重写 + 对象链接重排），为改个计数器不值得冒这个险。
+            return None
+        self.doc.set_value(node, v)
+        return v
+
+    def reset_limit_exp(self):
+        """把所有角色的累计获得经验清零 —— 体验版「经验已达上限」的解法。
+
+        返回 [(角色名, 原值), …]。零值本来就没这个 ivar，不用动。
+        """
+        out = []
+        for _aid, actor in self.sv.actors():
+            node = _deref(ivar(actor, "@limit_exp"))
+            if node is None:
+                continue
+            old = self.limit_exp(actor)
+            if old == 0:
+                continue
+            self.doc.set_value(node, 0)
+            out.append((self.sv.actor_name(actor), old))
+        return out
+
+    # ---- 升级所需经验：**查表**，不是公式
+    def actor_level(self, actor):
+        return get_int(ivar(actor, "@level"), 0)
+
+    def next_level_exp(self, actor):
+        """升到下一级所需的经验（游戏界面上显示的那个数）。
+
+        游戏里 `next_level_exp = exp_for_level(@level + 1) = $exps[:actor][@level]`
+        —— 是**查表**得来的，跟存档字段无关；满级或等级越界返回 None。
+        """
+        return exp_for_level(self.actor_level(actor), "actor")
+
+    def baby_next_level_exp(self, baby):
+        """召唤兽的升级所需经验（同一套表，用 :baby 那张）。"""
+        return exp_for_level(get_int(ivar(baby, "@level"), 0), "baby")
+
+    def add_exp(self, actor, delta):
+        return self.set_exp(actor, self.exp(actor) + int(delta))
+
+    # ==================================================== 角色技能（@skills）
+    # 2026-09-20 加的一层：角色技能可视化编辑要用。
+    # 游戏脚本里确认过的几件事（都跟召唤兽不一样，别照抄 jxbaby 的写法）：
+    #   * `Game_Actor#learn_skill` 只去重 + `sort!`，**没有数量上限**
+    #     （召唤兽 `Game_Baby#learn_skill` 才有 `@skills.length < 12`）；
+    #   * 游戏里「实际能用」的技能 = `(@skills | added_skills | equip_skills(:skill)).sort`
+    #     —— 这里只编 `@skills`（= `original_skills`），装备/升级给的技能不写回去；
+    #   * `@shortcut_key_skill`（F1~F9 绑定）读的时候有
+    #     `actor.skill_learn?(get_skill(id))` 守卫 → 删技能**不用**同步清理快捷键。
+    def actor_skills(self, actor):
+        """角色已学技能 id 列表（存档里的 `@skills`，游戏里叫 `original_skills`）。
+
+        ⚠ 这是**原始技能**那一份，不等于游戏里实际能用的技能（还有装备/added
+        两个来源，游戏运行时才并起来）。要改就改这一份。
+        """
+        return [int(s) for s in self.sv.skills(actor)]
+
+    def actor_set_skills(self, actor, ids):
+        """整份写 `@skills`（去重 + 升序，和游戏 `learn_skill` 的 `sort!` 对齐）。
+
+        **角色技能没有数量上限** —— 不像 `babies.set_skills` 那样截断到 12。
+        数组元素个数会变 → 必须 `mark_structural()`，保存时整档重写。
+        """
+        ids = sorted({int(s) for s in ids})
+        arr = M.ArrayNode([int_node(s) for s in ids])
+        if not set_ivar(actor, "@skills", arr):
+            # set_ivar 只替换已存在的 ivar；老角色没这个字段就追加一个
+            actor.ivars.append(("@skills", arr))
+        self.doc.mark_structural()
+        return ids
+
+    def actor_learn_skill(self, actor, skill_id):
+        """学一个技能（已经有了就原样返回，不重复加）。"""
+        ids = self.actor_skills(actor)
+        sid = int(skill_id)
+        if sid in ids:
+            return ids
+        ids.append(sid)
+        return self.actor_set_skills(actor, ids)
+
+    def actor_forget_skill(self, actor, skill_id):
+        """忘掉一个技能（没有这个技能也不报错）。"""
+        sid = int(skill_id)
+        return self.actor_set_skills(
+            actor, [s for s in self.actor_skills(actor) if s != sid])
+
+    def actor_clear_skills(self, actor):
+        return self.actor_set_skills(actor, [])
+
+    def valid_skill_ids(self):
+        """{技能 id: 名字}（Data\\Skills 表，带缓存）—— 挑技能 / 校验用。"""
+        if getattr(self, "_skill_ids", None) is None:
+            import datatables
+            try:
+                _r, items = datatables.load("Skills")
+                self._skill_ids = dict(
+                    (i, datatables.s(n, "@name") or "") for i, n in items)
+            except Exception:
+                self._skill_ids = {}
+        return self._skill_ids
+
+    # ==================================================== 门派（存档 @sect_id）
+    # ⚠ 门派**不是** Data 表 —— 是游戏脚本里硬编码的 `$sects`（表见 `sect`）。
+    #   正常游戏里角色能学的技能 = 本门派那 10 个：走 `Window_Actor_Skill` 的
+    #   「门派」页，攒 `@sect_data[:门派][id]` 攒满 `max` 才 `learn_skill` 写进 `@skills`。
+    #   辅助技能（强身术/冥想/…）和修炼只加属性，**不进 `@skills`**。
+    def actor_sect_id(self, actor):
+        """角色的门派 id（存档 `@sect_id`）；没这个字段返回 None。
+
+        `0` = 无门派（`Game_Actor#setup` 里的初值，之后由事件改写）。
+        """
+        n = ivar(actor, "@sect_id")
+        if n is None:
+            return None
+        v = get_int(_deref(n), -1)
+        return None if v < 0 else v
+
+    def actor_sect_name(self, actor):
+        """角色门派的中文名（认不出的 id → None）。"""
+        sid = self.actor_sect_id(actor)
+        return sect.sect_name(sid) if sid is not None else None
+
+    def sect_skills(self, actor):
+        """该角色**本门派**的技能 id 列表（无门派 / 认不出 → 空列表）。"""
+        sid = self.actor_sect_id(actor)
+        return list(sect.sect_skill_ids(sid)) if sid is not None else []
+
+    def actor_class_learnings(self, actor):
+        """角色**职业自带**的技能 id（`Data\\Classes[class_id].@learnings` 里
+        等级已经够的那些）—— 游戏 `init_skills` 就是照这个发技能的。
+
+        ⚠ 门派技能不从这里来（那是「门派」页点名学会的），别把两者混一起：
+          角色 `@skills` = 职业自带（如 id 9「牛刀小试」）+ 本门派技能。
+        """
+        import datatables
+        cid = get_int(_deref(ivar(actor, "@class_id")), 0)
+        lv = self.actor_level(actor)
+        cache = getattr(self, "_cls_learn_cache", None)
+        if cache is None:
+            cache = self._cls_learn_cache = {}
+        key = (cid, lv)
+        if key in cache:
+            return cache[key]
+        out = []
+        try:
+            _r, classes = datatables.load("Classes")
+            for i, node in classes:
+                if i != cid:
+                    continue
+                arr = _deref(ivar(node, "@learnings"))
+                if isinstance(arr, M.ArrayNode):
+                    for it in arr.items:
+                        f = _deref(it)
+                        if f is None:
+                            continue
+                        sid = get_int(ivar(f, "@skill_id"), 0)
+                        slv = get_int(ivar(f, "@level"), 0)
+                        if sid and slv <= lv:
+                            out.append(sid)
+                break
+        except Exception:
+            out = []
+        out = sorted(set(out))
+        cache[key] = out
+        return out
+
+    def off_sect_skills(self, actor):
+        """角色已学、但**既不是本门派、也不是职业自带**的技能。
+
+        ⚠ 别把它当成「改出来的」证据（2026-09-20 拿真档核过）：游戏里
+        **换门派**是完全可能的 —— `@sect_id` 是 `attr_accessor`（脚本 5484，
+        初值 0 见 5512），脚本里再没赋过值，也就是说它由**剧情事件的脚本**
+        直接写；而 `Game_Actor#learn_skill`(6017) 只 push + 排序，**从不清理**
+        换门派前学过的技能。所以玩家身上出现"非当前门派"技能是正常的
+        （实测李修远：门派五庄观，`@skills` 里却留着 247/253/254 三个普陀山技能，
+        而 `@sect_data[:门派]` 里根本没有它们）。
+        另外剧情事件（指令 319 → `Game_Actor#learn_skill`）也能直接发技能。
+
+        所以这里只当「不属于当前门派体系的技能」列出来给个信息，
+        不下"作弊"结论。返回 [(技能 id, 名字), ...]。
+        """
+        allowed = set(self.sect_skills(actor)) | set(self.actor_class_learnings(actor))
+        names = self.valid_skill_ids()
+        return [(s, names.get(s, "")) for s in self.actor_skills(actor)
+                if s not in allowed]
+
+    # ==================================================== 召唤兽
+    def babies(self, actor):
+        arr = _deref(ivar(actor, "@babys"))
+        out = []
+        if isinstance(arr, M.ArrayNode):
+            for i, b in enumerate(arr.items):
+                bb = _deref(b)
+                if isinstance(bb, M.ObjNode):
+                    out.append((i, bb))
+        return out
+
+    def active_baby(self, actor):
+        b = _deref(ivar(actor, "@baby"))
+        return b if isinstance(b, M.ObjNode) else None
+
+    def baby_name(self, baby):
+        a = _deref(ivar(baby, "@attr"))
+        if isinstance(a, M.ObjNode):
+            n = _as_str(ivar(a, "@name"))
+            if n:
+                return n
+        return _as_str(ivar(baby, "@name")) or "?"
+
+    def baby_attr(self, baby):
+        a = _deref(ivar(baby, "@attr"))
+        return a if isinstance(a, M.ObjNode) else None
+
+    #: (键, 说明, ivar 路径, 类型)
+    BABY_FIELDS = (
+        ("level", "等级（上限 65）", "@level", "int"),
+        ("hp", "气血（HP）", "@hp", "int"),
+        ("mp", "魔法（MP）", "@mp", "int"),
+        ("tp", "TP", "@tp", "int"),
+        ("exp", "当前经验", "@exp#", "int"),
+        # ⚠ 门槛是 `Config::Baby::ALLOW_LOYALTY` = **60**，不是 100（以前写错过）。
+        # 100 只是上限：`add_loyalty` / `dec_loyalty` 都 `limit(0, max_loyalty)`。
+        ("loyalty", "忠诚度（<%d 不能参战）" % BABY_ALLOW_LOYALTY,
+         "@attr.@loyalty", "float"),
+        ("life", "寿命（上限 12000）", "@attr.@life", "int"),
+        ("grow", "成长", "@attr.@grow", "float"),
+        ("atk", "攻击资质", "@attr.@atk", "int"),
+        ("def", "防御资质", "@attr.@def", "int"),
+        ("hpq", "体力资质", "@attr.@hp", "int"),
+        ("mpq", "法力资质", "@attr.@mp", "int"),
+        ("agi", "速度资质", "@attr.@agi", "int"),
+        ("eva", "躲闪资质", "@attr.@eva", "int"),
+        # 五行（2026-09-27 新增）：炼妖合宠时和另一只比「相生 / 相克」——
+        # 游戏 `Window_Demon#implement` 按生/克/无 给不同的结果概率
+        # （生 60/30/7/3、克 35/35/28/2、无 50/38/8/4）。
+        # ⚠ 存档里是 **String**（Marshal `"`），值只能是 fieldnames.BABY_FIVE。
+        ("five", "五行", "@attr.@five", "str"),
+        ("体质", "体质", "@attr.@体质", "int"),
+        ("法力", "法力", "@attr.@法力", "int"),
+        ("力量", "力量", "@attr.@力量", "int"),
+        ("耐力", "耐力", "@attr.@耐力", "int"),
+        ("敏捷", "敏捷", "@attr.@敏捷", "int"),
+        ("潜能", "潜能", "@attr.@潜能", "int"),
+    )
+
+    @classmethod
+    def baby_field_type(cls, key):
+        """给界面用：这个字段是 `int` / `float` / `str`（五行）。认不出返回 None。"""
+        for k, _label, _path, typ in cls.BABY_FIELDS:
+            if k == key:
+                return typ
+        return None
+
+    def _resolve(self, baby, path):
+        if path == "@exp#":
+            return self._exp_node(baby)
+        node = baby
+        for part in path.split("."):
+            node = _deref(ivar(node, part))
+            if node is None:
+                return None
+        return node
+
+    def _exp_node(self, baby):
+        h = _deref(ivar(baby, "@exp"))
+        if isinstance(h, M.HashNode) and h.pairs:
+            return _deref(h.pairs[0][1])
+        return None
+
+    def baby_value(self, baby, key):
+        for k, _label, path, typ in self.BABY_FIELDS:
+            if k == key:
+                node = self._resolve(baby, path)
+                if node is None:
+                    return None
+                n = _deref(node)
+                if typ == "str":
+                    # 五行（@five）= Marshal String（StrNode.data 存的是字节）
+                    return _as_str(node)
+                if isinstance(n, M.SymbolNode):
+                    return n.name          # 神兽的寿命是 :infinite（永生）
+                return (get_float(node) if typ == "float" else get_int(node))
+        return None
+
+    def _resolve_parent(self, baby, path):
+        """返回 (父节点, ivar 名)——换整个节点时用（比如把 :infinite 换成数字）。"""
+        parts = path.split(".")
+        node = baby
+        for p in parts[:-1]:
+            node = _deref(ivar(node, p))
+            if node is None:
+                return None, parts[-1]
+        return node, parts[-1]
+
+    def _apply_level_delta(self, attr_node, delta):
+        """level 改了后，潜能/五维跟着调整（照抄游戏 `Game_Actor_Attr#level_up`）。
+
+        游戏脚本（5371）：
+            def level_up
+              @体质 += 1; @法力 += 1; @力量 += 1; @耐力 += 1; @敏捷 += 1
+              @潜能 += 5
+            end
+        降级：洗点（五维 + 潜能全清零 = 超级金柳露语义）。
+
+        ⚠ 2026-09-20 修 bug：以前这里写的是 `ivar(attr_node, k[1:])`（把 `@` 去掉了），
+        而 `save.ivar(obj, name)` 是**按名字精确比对** `k == name`（名字自带 `@`）
+        —— 于是每次都返回 None 直接 continue，**这段逻辑从来没生效过**：
+        点「满级」等级变了，潜能/五维一个点都没加（真档实测：60 级仍是 潜能 0 / 五维 79）。
+        现在传完整名字 `@xxx`。
+        """
+        if delta == 0 or attr_node is None:
+            return
+        if delta > 0:
+            for k in ("@潜能", "@体质", "@法力", "@力量", "@耐力", "@敏捷"):
+                n = ivar(attr_node, k)          # ⚠ 必须带 `@`（见 docstring）
+                if n is None: continue
+                cur = get_int(n, 0)
+                add = delta * 5 if k == "@潜能" else delta
+                self.doc.set_value(n, cur + add)
+        else:
+            for k in ("@潜能", "@体质", "@法力", "@力量", "@耐力", "@敏捷"):
+                n = ivar(attr_node, k)          # ⚠ 必须带 `@`
+                if n is None: continue
+                self.doc.set_value(n, 0)
+
+    def baby_exp_full(self, baby):
+        """「经验拉满」：召唤兽等级顶到 65 + `@exp` 对齐 65 级门槛。
+
+        ⚠ 召唤兽确实会**自己**升级（`Game_Baby#change_exp` 第 7014 行
+        `level_up(must) while !max_level? && self.exp >= next_level_exp && ...`），
+        但有两条硬天花板，光写 `@exp` 顶不到 65：
+          * 第 7006 行 `!must and @level - 5 >= @master.level` → 直接拒收经验
+            （`$tip.say` 提示"超出主人 5 级，无法获得经验"）；
+          * 第 7014 行循环条件同样卡 `@level - 5 < @master.level`。
+        也就是说经验升级最多到「主人等级 + 5」。主人不满级就顶不到 65。
+        另外战斗结算走的是 `BattleManager.gain_exp`(1845)，只遍历
+        `$game_party.battle_members`，**根本不发经验给召唤兽**。
+        所以这里同样直接写等级 + 经验。
+
+        返回 (等级, 写进 @exp 的值 / None)。
+        """
+        self.set_baby(baby, "level", MAX_LEVEL_BABY)
+        wrote = None
+        tbl = exp_for_level(MAX_LEVEL_BABY, "baby")
+        node = self._exp_node(baby)
+        if tbl is not None and node is not None:
+            self.doc.set_value(node, int(tbl))
+            wrote = int(tbl)
+        return MAX_LEVEL_BABY, wrote
+
+    def set_baby(self, baby, key, value):
+        old_lv = None
+        if key == "level":
+            old_lv = self.baby_value(baby, "level")
+        for k, _label, path, typ in self.BABY_FIELDS:
+            if k != key:
+                continue
+            node = self._resolve(baby, path)
+            if node is None:
+                raise KeyError("召唤兽没有 %s（%s）" % (k, path))
+            if typ == "str":
+                # 五行：只能是 金木水火土（游戏 `$baby` 表的 `five` proc）
+                s = str(value).strip()
+                if s not in BABY_FIVE:
+                    raise ValueError("五行只能是 %s（给的是 %r）"
+                                     % ("、".join(BABY_FIVE), value))
+                if isinstance(_deref(node), M.StrNode):
+                    self.doc.set_value(node, s)
+                else:
+                    # 万一不是字符串节点（没见过的档）：整个换掉
+                    parent, leaf = self._resolve_parent(baby, path)
+                    if parent is None or not set_ivar(parent, leaf, str_node(s)):
+                        raise KeyError("改不了 %s（%s）" % (k, path))
+                    self.doc.mark_structural()
+                return s
+            if isinstance(_deref(node), M.SymbolNode):
+                # 例如神兽的 @life = :infinite：整个换成数字节点
+                parent, leaf = self._resolve_parent(baby, path)
+                if parent is None or not set_ivar(parent, leaf, int_node(int(value))):
+                    raise KeyError("改不了 %s（%s）" % (k, path))
+                self.doc.mark_structural()
+                return value
+            if typ == "float":
+                self.doc.set_value(node, float(value))
+            else:
+                self.doc.set_value(node, int(value))
+            # level 改了 → 潜能/五维自动跟着调整
+            if old_lv is not None:
+                try:
+                    new_lv = int(value)
+                    attr = _deref(ivar(baby, "@attr"))
+                    self._apply_level_delta(attr, new_lv - old_lv)
+                except Exception:
+                    pass
+            return value
+        raise KeyError("不认识的召唤兽字段 %r" % key)
+
+    def set_loyalty_all(self):
+        """一键：把**所有角色**身上的**所有召唤兽**忠诚拉到上限。返回 (几只, 几个角色)。
+
+        游戏里忠诚只有**一个作用** —— `Game_Baby_Attr#is_loyalty?`：
+            @loyalty >= Config::Baby::ALLOW_LOYALTY(60)
+        决定这只能不能参战（战斗前检查、召唤兽界面的「出战」都查它）。
+        **没有任何属性 / 成长 / 经验加成**；`$jiance`（反作弊）也完全不看忠诚
+        （它只查角色等级、出战宠等级、金钱、仓库页），所以一次全改不会带出副作用。
+
+        ⚠ 上限 100 是游戏硬规定：`add_loyalty` / `dec_loyalty` 里都
+        `@loyalty = @loyalty.limit(0, max_loyalty)`，而 `max_loyalty` 就是
+        `Config::Game::MAX_BABY_LOYALTY = 100`。写更高也没意义 —— 打完一场战斗
+        结束扣 0.25 时会被**一次性夹回 100**（战斗里死了扣 2）。
+        """
+        touched = 0
+        actors = 0
+        for _aid, actor in self.sv.actors():
+            hit = False
+            for _i, baby in self.babies(actor):
+                try:
+                    cur = self.baby_value(baby, "loyalty")
+                except Exception:
+                    cur = None
+                if cur is None:
+                    continue
+                try:
+                    same = abs(float(cur) - float(MAX_BABY_LOYALTY)) < 1e-9
+                except (TypeError, ValueError):
+                    same = False
+                if same:
+                    continue
+                try:
+                    self.set_baby(baby, "loyalty", MAX_BABY_LOYALTY)
+                except Exception:
+                    continue
+                touched += 1
+                hit = True
+            if hit:
+                actors += 1
+        return touched, actors
+
+    def baby_preset(self, baby, what):
+        """常用预设：经验拉满 / 回满 / 忠诚满 / 寿命满 / 资质 ±。
+
+        ⚠ 没有「满级」预设了（2026-09-20 去掉）：等级不再单独改，
+        要满级就用 `expfull` —— 它连着等级一起写。
+        """
+        did = []
+        if what == "expfull":
+            lv, wrote = self.baby_exp_full(baby)
+            did.append("等级→%d、经验→%s"
+                       % (lv, "满级门槛" if wrote is not None else "（取不到门槛）"))
+        elif what == "heal":
+            for k, v in (("hp", 99999), ("mp", 99999), ("tp", 200)):
+                if self.baby_value(baby, k) is not None:
+                    self.set_baby(baby, k, v)
+            did.append("回满气血/魔法")
+        elif what == "loyalty":
+            self.set_baby(baby, "loyalty", MAX_BABY_LOYALTY)
+            did.append("忠诚→%d" % MAX_BABY_LOYALTY)
+        elif what == "life":
+            self.set_baby(baby, "life", MAX_BABY_LIFE)
+            did.append("寿命→%d" % MAX_BABY_LIFE)
+        elif what == "qual":
+            for k in ("atk", "def", "hpq", "mpq", "agi", "eva"):
+                v = self.baby_value(baby, k)
+                if v is not None:
+                    self.set_baby(baby, k, v + 100)
+            did.append("六项资质 +100")
+        elif what == "qual500":
+            for k in ("atk", "def", "hpq", "mpq", "agi", "eva"):
+                v = self.baby_value(baby, k)
+                if v is not None:
+                    self.set_baby(baby, k, v + 500)
+            did.append("六项资质 +500")
+        elif what == "grow":
+            v = self.baby_value(baby, "grow")
+            if v is not None:
+                self.set_baby(baby, "grow", round(v + 0.1, 2))
+                did.append("成长 +0.1")
+        # ⚠ 键名是 `five10` 不是 `five`（2026-09-27 改）：`five` 现在是
+        #   BABY_FIELDS 里的**字段键**（五行 `@attr.@five`）。两者虽不同命名空间
+        #   （一个是预设名、一个是字段名）不冲突，但同一个 `"five"` 两种含义
+        #   迟早看错，所以预设改叫 five10（＝五维各 +10）。
+        elif what == "five10":
+            for k in ("体质", "法力", "力量", "耐力", "敏捷"):
+                v = self.baby_value(baby, k)
+                if v is not None:
+                    self.set_baby(baby, k, v + 10)
+            did.append("五维 +10")
+        elif what == "reset_attr":
+            r = self.baby_reset_attr(baby)          # 洗点（宠物版，见下方定义）
+            if r is None:
+                did.append("没有 @attr，跳过")
+            else:
+                did.append("洗点：五维→%d/维、潜能→%d" % (r[0], r[1]))
+        return did
+
+    def baby_skills(self, baby):
+        arr = _deref(ivar(baby, "@skills"))
+        if not isinstance(arr, M.ArrayNode):
+            return []
+        import datatables
+        try:
+            nm = datatables.name_map("Skills")
+        except Exception:
+            nm = {}
+        return [(M.value_of(_deref(x)), nm.get(M.value_of(_deref(x)), "?"))
+                for x in arr.items]
+
+    # ---- 重置潜力/属性 ＝ 游戏里「拜师」那一下的洗点
+    # 照抄游戏脚本 `Game_Actor_Attr#reset_point`（0000_000015.rb:5331）：
+    #     @体质..@敏捷 = 20 + @master.level - 1
+    #     @潜能        = @master.level * 5
+    # 整份主脚本只有**一个**调用点：Map019 门派地图「确定拜师」事件的
+    # `$game_player.actor.attr.reset_point`（Map013 配套文案「拜师后属性点会自动重置」）。
+    #
+    # 语义是**洗点**，不是"回出厂值"：`@潜能` 是未分配点池，`apply_point` 把
+    # `@xx_temp` 从潜能搬进五维 → `五维和 + 潜能` 守恒，reset_point 只是把它们
+    # 整体搬回潜能。（`initialize`(5247) 是固定 `五维=20`，**不等于**本公式。）
+    # 真档实证（Lv60）：仙灵儿「五维全 79 / 潜能 300」就是洗点后的样子，
+    # 李修远「79/79/354/79/104 / 潜能 0」是 300 点全砸力量。
+    #
+    # ⚠ 五维和会**下降**（李修远 695 → 395），永远碰不到反作弊线
+    #    （等级*10+500 = 1100），不会留痕迹。
+    # ⚠ 只动 @attr 里这 6 个字段：装备加成是 `get_equip_attr` 现算的、不写档；
+    #    @人气/@贡献/@体力/@活力 与本功能无关。
+    def actor_reset_attr(self, actor):
+        """把角色的五维/潜能洗回「全部来自等级自然成长」的状态。
+
+        返回 (五维基准值, 潜能值) / None（角色没有 @attr）。
+        """
+        lv = self.actor_level(actor)
+        attr = _deref(ivar(actor, "@attr"))
+        if attr is None:
+            return None
+        base = 20 + lv - 1
+        for k in ("@体质", "@法力", "@力量", "@耐力", "@敏捷"):
+            node = _deref(ivar(attr, k))
+            if node is not None:
+                self.doc.set_value(node, base)
+        pot = lv * 5
+        node = _deref(ivar(attr, "@潜能"))
+        if node is not None:
+            self.doc.set_value(node, pot)
+        # `@xx_temp` 是加点界面上的"预览值"（游戏 `apply_point` 后由
+        # `clear_point` 归零）。真档全是 0，但存档里确实留着 —— 顺手归零，
+        # 否则 `get_体质(temp=true)` 会把它加进去，界面算出来的五维比 base 高一截。
+        for k in ("@体质_temp", "@法力_temp", "@力量_temp",
+                  "@耐力_temp", "@敏捷_temp"):
+            node = _deref(ivar(attr, k))
+            if node is not None:
+                self.doc.set_value(node, 0)
+        return base, pot
+
+    # ---- 重置潜力/属性（召唤兽版）＝ 洗点：把加点全搬回潜能
+    # ⚠ 游戏里**没有**宠物洗点：`Game_Baby_Attr` 只有 add_point / dec_point /
+    #   clear_point / apply_point（加点界面的「＋/－/取消/确定」），宠物面板 17 个
+    #   按钮里没有「重置」；`reset_point` 是**角色**独有的（`Game_Actor_Attr`，
+    #   全局唯一触发点是拜师事件）。`Game_Baby#setup(actor_id, reset=)` 那个
+    #   reset 只是「别覆盖已改过的名字」，跟属性无关。
+    #
+    # 但宠物侧有一个守恒量，可以照抄角色 `reset_point` 的语义：
+    #     五维和 + 潜能 = T（常数）
+    #   * `apply_point`（脚本 6475）只是把点从 `@潜能` 搬进五维：`@潜能 -= temp_point_num`
+    #   * `level_up`（6412）两边同加：五维各 +1、`@潜能 += 5`
+    #   → 从 `initialize`（6208）那一刻起 T 就不变了。代入自然值：
+    #         T = 50 + 10*等级 + R      R = 出生时 5 次 `rand(11)` 之和
+    #     · 神兽：五维 = 20+等级（= 普通掷满），所以 R = 50
+    #     · 普通：R ∈ [0, 50]
+    #   真档实证（Lv65）：小仙灵 五维和 425 + 潜能 325 = 750；小丫丫 750 + 0 = 750
+    #   —— 两只都是 750 = 50 + 10*65 + 50。
+    #
+    # 所以「洗回自然」= 潜能 → 等级*5，五维 → (T - 等级*5) 在 5 维间均分：
+    #   * 神兽：(T-5L)/5 = 20+等级，和 `initialize` **逐字一致**（幂等：
+    #     没加过点的神兽洗完一动不动）
+    #   * 普通：得到「10+等级+平均掷点」—— 出生那一下随机**没写进存档、
+    #     无法还原**，所以每维最多和真自然值差 ±10（这是本功能唯一的妥协）
+    #   ⚠ 结果 `五维和 + 潜能` 一分不少 —— 和角色 `reset_point` 一样是
+    #     「把点搬回潜能」，可以在游戏里重新分配，不白送战力。
+    #   ⚠ 反作弊查不到：`$jiance`（29479）只查**角色** `point_num > 等级*10+500`，
+    #     召唤兽的五维/潜能压根没有校验。
+    def baby_reset_attr(self, baby):
+        """把召唤兽已分配的加点全部退回潜能（五维回到自然成长量）。
+
+        返回 (五维基准值, 潜能值) / None（这只没有 @attr）。
+        """
+        attr = self.baby_attr(baby)
+        if attr is None:
+            return None
+        lv = get_int(ivar(baby, "@level"), 1)
+        keys = ("@体质", "@法力", "@力量", "@耐力", "@敏捷")
+        cur = [_deref(ivar(attr, k)) for k in keys]
+        total = sum(get_int(n, 0) for n in cur if n is not None)
+        pot_node = _deref(ivar(attr, "@潜能"))
+        if pot_node is not None:
+            total += get_int(pot_node, 0)
+
+        pot = lv * 5
+        body = max(0, total - pot)               # 五维该占的总量
+        base, rest = divmod(body, len(keys))     # 余数补给前几维
+        for i, (k, node) in enumerate(zip(keys, cur)):
+            if node is not None:
+                self.doc.set_value(node, base + (1 if i < rest else 0))
+        if pot_node is not None:
+            self.doc.set_value(pot_node, pot)
+        # `@xx_temp` 是加点界面上的「预览值」（游戏 `clear_point` 归零）。
+        # 不清掉的话 `get_体质(temp=true)` 会比 base 高一截，界面显示对不上。
+        for k in ("@体质_temp", "@法力_temp", "@力量_temp",
+                  "@耐力_temp", "@敏捷_temp"):
+            node = _deref(ivar(attr, k))
+            if node is not None:
+                self.doc.set_value(node, 0)
+        return base, pot
+
+    # ==================================================== 防作弊体检
+    def point_num(self, actor):
+        """五维之和（游戏的反作弊就是这么算的：不含潜能）。"""
+        total = 0
+        for k in ("@体质", "@法力", "@力量", "@耐力", "@敏捷"):
+            total += get_int(ivar(_deref(ivar(actor, "@attr")), k))
+        return total
+
+    def anti_cheat_report(self):
+        """返回 [(项目, 当前, 上限, 是否超限, 说明), ...]。
+
+        覆盖游戏的全部作弊触发点：
+          ① Lock 校验和（@master）；
+          ② $jiance 周期检查（等级/召唤兽等级/金钱/仓库页/五维）；
+          ③ Change 记账（金钱/物品/变量/人气/贡献，对不上记 'NE!'）；
+          ④ @cheated 作弊标记 + @keyword；
+          ⑤ 机器码绑定。
+        """
+        rows = []
+
+        def row(name, cur, limit, why):
+            rows.append((name, cur, limit, cur is not None and cur > limit, why))
+
+        def eq_row(name, cur, want, why):
+            rows.append((name, cur, want,
+                         cur is None or cur != want, why))
+
+        # ① Lock 校验和
+        bad_locks = self.sv.check_locks()
+        rows.append(("Lock 校验和（金钱等关键数值）",
+                     "不一致 %d 处" % len(bad_locks) if bad_locks else "一致",
+                     "一致", bool(bad_locks),
+                     ("关键数值包在 Lock 里（@master = 值*91+45+种子/800），"
+                      "直接改值会对不上：%r" % (bad_locks[:3],))
+                     if bad_locks else "所有 Lock 的 @master 都对得上"))
+
+        # ② $jiance 周期检查
+        gold = self.sv.gold()
+        row("金钱", gold, MAX_GOLD, "游戏每 300 帧检查一次，超了算作弊；"
+                                    "工具改钱超过上限会自动压到 %d" % SAFE_GOLD)
+        row("仓库页号 warehouse_page", self.warehouse_page(), MAX_WAREHOUSE_PAGE,
+            "同上")
+        for aid, a in self.sv.actors():
+            nm = self.sv.actor_name(a) or ("角色%d" % aid)
+            row("%s 等级" % nm, get_int(ivar(a, "@level")), MAX_LEVEL_ACTOR,
+                "上限来自 Config::Game::MAX_LEVEL_ACTOR")
+            pn = self.point_num(a)
+            lim = get_int(ivar(a, "@level")) * 10 + 500
+            rows.append(("%s 五维总点数" % nm, pn, lim, pn > lim,
+                         "上限 = 等级*10+500（体质+法力+力量+耐力+敏捷）"))
+            for i, b in self.babies(a):
+                row("%s 的召唤兽「%s」等级" % (nm, self.baby_name(b)),
+                    get_int(ivar(b, "@level")), MAX_LEVEL_BABY,
+                    "上限来自 Config::Game::MAX_LEVEL_BABY")
+
+        # ③ Change 记账
+        # 金钱账：最容易漏 —— 以前工具改钱不同步它，玩一会儿必被记 'NE!'
+        rec_gold = self.security_gold()
+        eq_row("金钱记账 security[:gold]", rec_gold, gold,
+               "游戏里一花钱/赚钱就会拿这笔账和实际金钱比对，"
+               "对不上立刻判作弊（改金钱时必须同步）")
+        for vid, rec, want in self.security_variable_rows():
+            if rec is not None and want is not None and rec != want:
+                rows.append(("变量记账：$game_variables[%d]" % vid,
+                             rec, want, True,
+                             "游戏改变量时会逐笔核对这笔账，"
+                             "修复会把账对齐到当前值 %d" % want))
+        for sec_key, cn, attr in (("renqi", "人气", "@人气"),
+                                  ("gongxian", "贡献", "@贡献")):
+            for aid, nm, rec, want in self.security_actor_rows(sec_key, attr):
+                if rec is not None and want is not None and rec != want:
+                    rows.append(("%s记账：%s (角色%d)" % (cn, nm, aid),
+                                 rec, want, True,
+                                 "游戏加/减%s时会核对这笔账，修复会对齐到当前值 %d"
+                                 % (cn, want)))
+        for iid, nm, rec, act in self.security_rows():
+            if rec is not None and rec != act:
+                rows.append(("物品计数校验：%s (id=%d)" % (nm, iid), act, rec,
+                             True,
+                             "游戏记录的 %d / 背包实际 %d —— 不一致时建议点"
+                             "「同步物品计数校验」（正常玩着玩着也可能不一致，"
+                             "游戏自己用掉道具时不一定同步）" % (rec, act)))
+
+        # ④ 作弊标记
+        ch = M.value_of(_deref(ivar(self.sv.section("system"), "@cheated")))
+        rows.append(("作弊标记 @cheated", ch, "false", not is_ruby_false(ch),
+                     "非 false 表示游戏已经判定作弊："
+                     "20 分钟后警告、25 分钟后强制退出"
+                     + ("（注意 Ruby 里 0 也算真值 → 必须写成 false）"
+                        if ch == 0 else "")))
+        kw = _deref(ivar(self.sv.section("system"), "@keyword"))
+        kws = [_as_str(x) for x in kw.items] if isinstance(kw, M.ArrayNode) else []
+        rows.append(("作弊记录 @keyword", "、".join(kws) or "（空）", "（空）",
+                     bool(kws),
+                     "VNE=超限检查 / NE!=记账对不上 / 其余是内存修改器检测，"
+                     "全部清掉才算干净"))
+
+        # ⑤ 机器码
+        now, err, ids, ok = self.machine_status()
+        if err:
+            rows.append(("机器码（本机）", "—", "—", False,
+                         "读不到：%s" % err.splitlines()[0][:70]))
+        elif not ok:
+            rows.append(("机器码 %s 不在存档记录里" % now, "不在", "在", True,
+                         "存档记录的机器码：%s —— 游戏启动时会 include? 比对，"
+                         "对不上就弹「存档异常」（换机器玩就会碰到）"
+                         % ("、".join(ids) or "（空）")))
+        else:
+            rows.append(("机器码 %s 已在存档记录里" % now, "在", "在", False,
+                         "存档记录的机器码：%s" % "、".join(ids)))
+        return rows
+
+    def fix_anti_cheat(self, clamp=True, clear_flag=True, resync=True):
+        """按游戏规则把越界的东西压回上限，并（可选）清掉作弊标记。"""
+        done = []
+        if clamp:
+            gold = self.sv.gold()
+            if gold > MAX_GOLD:
+                self.set_gold(SAFE_GOLD)         # 含 Lock @master + 金钱账同步
+                done.append("金钱 %d → %d（上限 %d 的 2/3 安全值）"
+                            % (gold, SAFE_GOLD, MAX_GOLD))
+            wp = self.warehouse_page()
+            if wp > MAX_WAREHOUSE_PAGE:
+                self.set_warehouse_page(MAX_WAREHOUSE_PAGE)
+                done.append("仓库页号 %d → %d" % (wp, MAX_WAREHOUSE_PAGE))
+            for aid, a in self.sv.actors():
+                lv = get_int(ivar(a, "@level"))
+                if lv > MAX_LEVEL_ACTOR:
+                    self.doc.set_value(_deref(ivar(a, "@level")), MAX_LEVEL_ACTOR)
+                    done.append("角色%d 等级 %d → %d" % (aid, lv, MAX_LEVEL_ACTOR))
+                lim = get_int(ivar(a, "@level")) * 10 + 500
+                pn = self.point_num(a)
+                if pn > lim:
+                    over = pn - lim
+                    obj = _deref(ivar(a, "@attr"))
+                    for k in ("@潜能", "@敏捷", "@耐力", "@力量", "@法力",
+                              "@体质"):
+                        if over <= 0:
+                            break
+                        cur = get_int(ivar(obj, k))
+                        cut = min(cur, over)
+                        if cut > 0:
+                            self.doc.set_value(_deref(ivar(obj, k)), cur - cut)
+                            over -= cut
+                    done.append("角色%d 五维超限 %d 点，已扣回" % (aid, pn - lim))
+                for i, b in self.babies(a):
+                    blv = get_int(ivar(b, "@level"))
+                    if blv > MAX_LEVEL_BABY:
+                        self.doc.set_value(_deref(ivar(b, "@level")),
+                                           MAX_LEVEL_BABY)
+                        done.append("召唤兽「%s」等级 %d → %d"
+                                    % (self.baby_name(b), blv, MAX_LEVEL_BABY))
+                    life = get_int(ivar(self.baby_attr(b), "@life"))
+                    if life > MAX_BABY_LIFE:
+                        self.doc.set_value(
+                            _deref(ivar(self.baby_attr(b), "@life")),
+                            MAX_BABY_LIFE)
+                        done.append("召唤兽「%s」寿命 %d → %d"
+                                    % (self.baby_name(b), life, MAX_BABY_LIFE))
+        if resync:
+            # 五类 Change 账全部对齐（金钱/物品/变量/人气/贡献）
+            for cn, n in self.resync_all_security():
+                done.append("同步了%s记账 %d 条" % (cn, n))
+            # Lock 校验和（改五维/金钱可能留下的不一致，理论上入口都同步了，
+            # 这里再兜底全扫一遍）
+            n_lock = self.sv.repair_locks()
+            if n_lock:
+                done.append("重算 %d 处 Lock 校验和" % n_lock)
+            # 机器码：换机器玩时，把本机机器码追加进存档
+            now, err, ids, ok = self.machine_status()
+            if now and not ok:
+                self.add_machine_id(now)
+                done.append("机器码 %s 已加进存档（原来只有 %s）"
+                            % (now, "、".join(ids) or "空"))
+        if clear_flag:
+            n = self.clear_cheat_flag()
+            if n:
+                done.append("已清除作弊标记（%s）" % "、".join(n))
+        return done
+
+    def clear_cheat_flag(self):
+        """把 `@cheated` 置成真正的 Ruby `false`，并清空 `@keyword` 作弊记录。
+
+        ⚠ 必须写成 Marshal 的 `F`（false），不能写成整数 0 ——
+        Ruby 里 `0` 是**真值**，游戏 `if $game_system.cheated` 照样成立，
+        20 分钟后还是会开始“惩罚”，25 分钟后弹「存档异常」。
+
+        @keyword 里记的全是作弊事件，脚本里只有三处往里写：
+        'VNE'（$jiance 超限）、'NE!'（Change 记账对不上）、
+        SHIELD 查到的内存修改器窗口标题 —— 没有别的正常用途，整个清空。
+        """
+        done = []
+        sysn = self.sv.section("system")
+        node = _deref(ivar(sysn, "@cheated"))
+        if node is not None:
+            cur = M.value_of(node)
+            if not is_ruby_false(cur):
+                self.doc.set_value(node, False)
+                done.append("@cheated: %r → false" % (cur,))
+        kw = _deref(ivar(sysn, "@keyword"))
+        if isinstance(kw, M.ArrayNode) and kw.items:
+            old = [_as_str(x) for x in kw.items]
+            kw.items = []
+            self.doc.mark_structural()
+            done.append("keyword 清空 %d 条（%s）"
+                        % (len(old), "、".join(x or "?" for x in old)[:40]))
+        return done
+
+
+# --------------------------------------------------------------------------
+# 存档文件层面：扫描 / 批量修复（作弊标记、超限项、物品计数校验）
+# --------------------------------------------------------------------------
+def save_files(save_path):
+    r"""游戏目录下**所有可能被游戏读到的存档**：
+
+        <游戏根>\save.rvdata2      （主存档）
+        <游戏根>\save*.rvdata2     （其它存档，如果有）
+        <游戏根>\AutoSave\*.rvdata2（自动存档，读它一样会被惩罚）
+    """
+    import os
+    main = os.path.abspath(save_path)
+    root = os.path.dirname(main)
+    out = [main]
+    try:
+        for n in sorted(os.listdir(root)):
+            p = os.path.join(root, n)
+            if n.lower().endswith(".rvdata2") and os.path.isfile(p) and p != main:
+                out.append(p)
+    except OSError:
+        pass
+    d = os.path.join(root, "AutoSave")
+    if os.path.isdir(d):
+        try:
+            for n in sorted(os.listdir(d)):
+                if n.lower().endswith(".rvdata2"):
+                    out.append(os.path.join(d, n))
+        except OSError:
+            pass
+    return out
+
+
+def fix_save_file(path, backup=True, dry_run=False, note="按规则修复 + 清作弊标记"):
+    """打开一个存档文件 → 全量防作弊修复 → 写回。
+
+    fix_anti_cheat 已覆盖：Lock 校验和、周期超限（金钱压到 2/3 安全值等）、
+    五类 Change 记账（金钱/物品/变量/人气/贡献）、@cheated/@keyword、机器码。
+
+    返回 ``(有没有问题, 做了哪些, 超限项列表)``；`dry_run=True` 只看不改。
+    """
+    # ⚠ 起别名：本函数的 backup 参数（bool）会遮蔽同名模块
+    import backup as backup_mod
+    import save
+    sv = save.SaveDoc(path)
+    g = GameEditor(sv)
+    rows = g.anti_cheat_report()
+    over = [r for r in rows if r[3]]
+    if not over or dry_run:
+        return bool(over), [], over
+    if backup:
+        try:
+            backup_mod.backup(path, backup_mod.KIND_MANUAL, note=note)
+        except Exception:
+            pass
+    done = []
+    try:
+        done = g.fix_anti_cheat()
+    except Exception:
+        done = []
+    if done:
+        sv.doc.save()
+    return True, done, over

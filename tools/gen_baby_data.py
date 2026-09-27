@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""从游戏脚本里把 `$baby` 资质配置表抽出来，生成 `src/xj_baby_data.py`。
+"""从游戏脚本里把 `$baby` 资质配置表抽出来，生成 `src/tables/baby_aptitude.py`。
 
 为什么要生成：`$baby` 表（每种召唤兽的 type/allow_lv/六项资质上限/成长/寿命）
 只存在于 `Data\\Scripts.rvdata2` 的 Ruby 代码里，运行时解析脚本太重；
-一次性抽成 Python 常量最省事（和 `src/xj_changelog.py` 一个套路）。
+一次性抽成 Python 常量最省事（和 `src/changelog.py` 一个套路）。
 
 用法：python tools/gen_baby_data.py
 """
@@ -15,7 +15,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SD = os.path.join(HERE, "_scripts")
-OUT = os.path.join(ROOT, "src", "xj_baby_data.py")
+OUT = os.path.join(ROOT, "src", "tables", "baby_aptitude.py")
 
 sys.stdout.reconfigure(errors="replace")
 
@@ -28,7 +28,7 @@ def main():
     fs = [os.path.join(SD, n) for n in sorted(os.listdir(SD))
           if n.endswith(".rb")]
     if not fs:
-        print("没有 %s，先跑 python tools/dump_scripts.py" % SD)
+        print("没有 %s，先跑 python tools/re/dump_scripts.py" % SD)
         return 1
     fs.sort(key=os.path.getsize, reverse=True)
     raw = open(fs[0], "rb").read()

@@ -20,20 +20,19 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.stdout.reconfigure(errors="replace")
 
-import xj_backup      # noqa: E402
-import xj_env         # noqa: E402
-import xj_game        # noqa: E402
-import xj_save        # noqa: E402
+import paths  # noqa: E402
+import game   # noqa: E402
+import save   # noqa: E402
 
 
 def all_saves():
     """主存档 + 游戏根下别的 save*.rvdata2 + AutoSave\\*.rvdata2。"""
-    return xj_game.save_files(xj_env.save_path())
+    return game.save_files(paths.save_path())
 
 
 def fix_one(path, dry=False, quiet=False):
     """返回 (是否有问题, 处理了几项)。"""
-    bad, done, over = xj_game.fix_save_file(path, dry_run=dry,
+    bad, done, over = game.fix_save_file(path, dry_run=dry,
                                             note="clear_cheat.py 动手前")
     if not quiet:
         if not bad:
@@ -52,7 +51,7 @@ def main():
     dry = "--dry-run" in sys.argv
     every = "--all" in sys.argv
     paths = all_saves() if every else \
-        [argv[0] if argv else xj_env.save_path()]
+        [argv[0] if argv else paths.save_path()]
     print("要处理的存档：%d 个%s" % (len(paths), "（只看不改）" if dry else ""))
     n_bad = 0
     for p in paths:

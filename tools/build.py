@@ -11,7 +11,7 @@
 
     画迹2存档工具.exe        PyInstaller 单文件 exe（内含 tcl/tk 脚本库）
     XJCodec32.exe            自带的 32 位加解密宿主（**必须**和 exe 放一起，
-                             或者放 dll/ 子目录；xj_codec 会按顺序找）
+                             或者放 dll/ 子目录；codec 会按顺序找）
     使用说明.txt
 
 **不放进去的东西**：游戏自己的 `System\\main.dll`（有版权，而且运行期就是
@@ -19,7 +19,7 @@
 
 打包踩过的坑：
   * tcl/tk 的脚本库不会被自动收集，必须 `--add-data` 带上，并在 `import tkinter`
-    之前设 `TCL_LIBRARY` / `TK_LIBRARY`（见 `xj_viewer._setup_tcl_env()`）；
+    之前设 `TCL_LIBRARY` / `TK_LIBRARY`（见 `huaji2_save_editor._setup_tcl_env()`）；
   * PyInstaller 用 `subprocess.run(list)` 调，路径里有 `!`、`【】`、`[]` 也没事；
   * 从测试脚本启动 exe 前要清掉 `PYTHONHOME` / `PYTHONPATH` / `VIRTUAL_ENV`，
     否则会以退出码 1 失败（uv/venv 的环境变量会干扰引导）。
@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -35,7 +36,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.5.5"
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
 # 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
 # 版本号只出现在 Release 附件名上（见下面的 RELEASE_EXE_NAME）。
@@ -72,10 +73,10 @@ def build_host():
     csc = next((p for p in CSC if os.path.exists(p)), None)
     if not csc:
         raise SystemExit("找不到 csc.exe（需要 .NET Framework 4.x）")
-    src = os.path.join(SRC, "xj_codec32.cs")
+    src = os.path.join(SRC, "native", "codec32.cs")
     if not os.path.exists(src):
         raise SystemExit("找不到 %s" % src)
-    out = os.path.join(SRC, HOST_NAME)
+    out = os.path.join(SRC, "native", HOST_NAME)
     # 宿主在跑的时候编不进去：先试着删掉旧的
     if os.path.exists(out):
         try:
@@ -121,7 +122,7 @@ def prepare(host_exe, use_dll_dir=False):
             continue
         log("已放入发行目录：%s%s" % ("" if not use_dll_dir else "dll/", name))
     if use_dll_dir:
-        log("（宿主放在 dll/ 子目录：xj_codec 会依次找 exe 目录、dll/、bin/…）")
+        log("（宿主放在 dll/ 子目录：codec 会依次找 exe 目录、dll/、bin/…）")
     sweep_old_exes(EXE_NAME + ".exe")
     return target_dir
 
@@ -143,13 +144,13 @@ def _same_file(a, b):
 
 
 def gen_changelog():
-    """把 CHANGELOG.md **写死进源码**（生成 src/xj_changelog.py）。
+    """把 CHANGELOG.md **写死进源码**（生成 src/changelog.py）。
 
     以前 exe 里的“更新日志”是去读一个外部文件，打包成 onefile 后
     运行时目录是临时解包目录，读不到就成了空白 —— 现在直接把文本编进 exe。
     """
     src = os.path.join(ROOT, "CHANGELOG.md")
-    out = os.path.join(SRC, "xj_changelog.py")
+    out = os.path.join(SRC, "changelog.py")
     if not os.path.exists(src):
         log("  ! 没有 CHANGELOG.md，跳过内置更新日志")
         return
@@ -163,7 +164,7 @@ def gen_changelog():
     # 不钉死的话每次打包生成的这个文件都会变成「整文件重写」的假 diff。
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write(body)
-    log("已生成内置更新日志：src/xj_changelog.py（%d 字）" % len(text))
+    log("已生成内置更新日志：src/changelog.py（%d 字）" % len(text))
 
 
 def sweep_old_exes(keep):
@@ -275,7 +276,7 @@ def build_exe(py):
             "--distpath", DIST, "--workpath", BUILD, "--specpath", BUILD,
             "--paths", SRC]
            + tcl_data_args(py)
-           + [os.path.join(SRC, "xj_viewer.py")])
+           + [os.path.join(SRC, "huaji2_save_editor.py")])
     log("打包中…（第一次会慢一点）")
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
@@ -308,8 +309,8 @@ def selftest(exe):
         if SRC not in sys.path:
             sys.path.insert(0, SRC)
         try:
-            import xj_env
-            game = env.get("XJ_GAME") or xj_env.find_game_dir()
+            import paths
+            game = env.get("XJ_GAME") or paths.find_game_dir()
             if game:
                 env["XJ_GAME"] = game
                 sp = os.path.join(game, "save.rvdata2")
@@ -319,20 +320,49 @@ def selftest(exe):
         except Exception as e:
             log("  ! 没找到游戏目录（%s），自检只能跑空档" % e)
         log("自检：在临时目录跑 %s …" % os.path.basename(exe2))
-        p = subprocess.run([exe2], cwd=work, env=env, timeout=300,
-                           capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+        # ⚠ 不等它「自己退干净」：PyInstaller onefile 的**引导进程**偶尔会卡在
+        #   删 `_MEI` 临时目录那一步（本机安全钩子会拦删除）—— 自检结果文件其实早就
+        #   写好了，进程却一直不退，subprocess.run(timeout=300) 于是白等 5 分钟。
+        #   所以：轮询结果文件 → 到点收尸（连子进程一起），判定只看结果文件。
+        res = os.path.join(work, "selftest_result.txt")
+        outlog = os.path.join(tmp, "selfcheck.log")
+        with open(outlog, "wb") as fh:
+            p = subprocess.Popen([exe2], cwd=work, env=env,
+                                 stdout=fh, stderr=subprocess.STDOUT)
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                if os.path.exists(res) or p.poll() is not None:
+                    break
+                time.sleep(0.5)
+            rc = p.poll()
+            killed = rc is None
+            if killed:
+                kill_tree(p.pid)
+                rc = p.wait()
+                log("  （exe 没自己退，已连子进程一起清掉；判定只看结果文件）")
         txt = ""
         for name in ("selftest_result.txt", "error.log"):
             f = os.path.join(work, name)
             if os.path.exists(f):
                 txt += open(f, encoding="utf-8", errors="replace").read() + "\n"
         log(txt or "(没有自检输出)")
-        log("自检退出码 = %d" % p.returncode)
+        log("自检退出码 = %d%s" % (rc, "（上面是我们 taskkill 的，不代表失败）"
+                                 if killed else ""))
         kill_leftover(os.path.basename(exe2))
         return 0 if "结果: OK" in txt else 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def kill_tree(pid):
+    """把一棵进程树干掉（onefile 的引导进程 + 它拉起的真正程序）。"""
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid)],
+                       capture_output=True, text=True, timeout=30)
+    except Exception:
+        pass
 
 
 def kill_leftover(name):

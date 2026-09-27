@@ -1,7 +1,7 @@
 # 授权范围与例外
 
-本仓库的 **MIT 协议只覆盖仓库里自己写的代码与文档**（`src/xj_*.py`、
-`src/xj_codec32.cs`、`tools/`、`tests/`、`probes/`、`docs/`、`README.md` 等）。
+本仓库的 **MIT 协议只覆盖仓库里自己写的代码与文档**（`src/`（含 `tables/`、
+`native/`）、`tools/`、`tests/`、`probes/`、`docs/`、`README.md` 等）。
 
 ## 不包含、也不分发的东西
 
@@ -23,7 +23,7 @@
 
 ## 关于 `XJCodec32.exe`
 
-`src/XJCodec32.exe` 由本仓库的 `src/xj_codec32.cs` 用系统自带的
+`src/native/XJCodec32.exe` 由本仓库的 `src/native/codec32.cs` 用系统自带的
 `csc.exe` 编译而成（`tools/build_host.py` 可复现）。
 它**不含任何第三方代码**，只在运行时把 `main.dll` 里的加解密函数借出来用。
 
