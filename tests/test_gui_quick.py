@@ -93,7 +93,9 @@ def main():
     open(LOG, "w", encoding="utf-8").close()
     import faulthandler
     faulthandler.enable()
-    faulthandler.dump_traceback_later(60, exit=True)
+    # ⚠ 看门狗：本组空载约 36s；游戏（Game.exe）在跑时磁盘被占，实测会超过 60s
+    #   → 60s 会假红（2026-09-27 连吃两次）。180s 仍然能抓住真的死循环/挂死。
+    faulthandler.dump_traceback_later(180, exit=True)
     try:
         import tkinter as tk
         # 探针 root 直接留用：先建一个再销毁会让 ttk 抛
@@ -353,19 +355,18 @@ def main():
             check("召唤兽页**没有**门派下拉（召唤兽没门派）",
                   getattr(app, "cb_baby_sect", None) is None)
             vals = list(app.cb_actor_sect["values"])
-            check("门派下拉 = 12 个门派（「全部技能」「无门派」都已删）",
-                  len(vals) == 12
-                  and "全部技能" not in vals and "无门派" not in vals,
+            check("门派下拉 = 13 项（无门派 + 12 门派；「全部技能」仍然没有）",
+                  len(vals) == 13
+                  and "全部技能" not in vals and "无门派" in vals,
                   "%r" % (vals,))
-            check("门派下拉里的门派名都来自 sect（不含无门派）",
-                  set(vals) == set(sect.sect_name(s)
-                                   for s in sect.SECT_ORDER if s),
+            check("门派下拉里的名字都来自 sect（含 0 无门派）",
+                  set(vals) == set(sect.sect_name(s) for s in sect.SECTS),
                   "%r" % (vals,))
 
             sid_a = app.g.actor_sect_id(a)
             sname_a = app.g.actor_sect_name(a)
-            want = set(i for i in sect.sect_skill_ids(sid_a)
-                       if names_a.get(i))
+            # ⚠ 这里原来还算了个 `want`（本门派技能）只为下面当搜索关键词 —— 已删：
+            #   第一个角色可能无门派 → 空集 → IndexError（见下面搜索框那段）。
             # ⚠ 川 2026-09-20 改：门派下拉从右边技能区搬到左栏「门派技能」
             #   （两处都按门派筛等于重复）。右边一览恢复成「全部技能」。
             allnamed = set(i for i in names_a if names_a[i])
@@ -414,18 +415,23 @@ def main():
                 app.load_actor()
                 root.update()
             # 技能一览的搜索框仍然独立可用
-            _kw = names_a[sorted(want)[0]][:1]
-            app.var_actor_skill_search.set(" ")
-            app.skp_actor.fill()
-            app.var_actor_skill_search.set(_kw)
-            app.skp_actor.fill()
-            _c = app.skp_actor.choices
-            check("技能一览的搜索框仍能用",
-                  _c and all(_kw in names_a[int(v[1:v.index(" ")])]
-                             for v in _c),
-                  "%r" % (_c[:3],))
-            app.var_actor_skill_search.set("")
-            app.skp_actor.fill()
+            # ⚠ 别拿「本门派技能」当关键词：真档里第一个角色可能**没有门派**
+            #   （2026-09-27 真档就是：李修远 @sect_id=0）→ `want` 是空集，
+            #   `sorted(want)[0]` 直接 IndexError（测试自己脆，不是功能坏了）。
+            _pool = sorted(i for i in names_a if names_a[i])
+            if _pool:
+                _kw = names_a[_pool[0]][:1]
+                app.var_actor_skill_search.set(" ")
+                app.skp_actor.fill()
+                app.var_actor_skill_search.set(_kw)
+                app.skp_actor.fill()
+                _c = app.skp_actor.choices
+                check("技能一览的搜索框仍能用",
+                      _c and all(_kw in names_a[int(v[1:v.index(" ")])]
+                                 for v in _c),
+                      "%r" % (_c[:3],))
+                app.var_actor_skill_search.set("")
+                app.skp_actor.fill()
 
             # 换角色 → 门派下拉自动跟着切
             if len(kids) >= 2:
@@ -440,10 +446,13 @@ def main():
                 app.tv_actor.selection_set(kids[0])
                 app.load_actor()
                 root.update()
-                check("切回原角色后门派又跟着回来",
-                      app.var_actor_sect.get()
-                      == (sname_a if app.g.sect_skills(a) else ""),
-                      "%r" % (app.var_actor_sect.get(),))
+                # ⚠ 2026-09-27：无门派角色现在也同步成「无门派」（下拉里有了这一项），
+                #   所以期望值是**门派名**本身 —— 原来写 `sect_skills(a)` 非空才期望
+                #   门派名、否则期望空串，那是下拉还没有「无门派」时的老约定。
+                if sname_a in huaji2_save_editor.sect_choice_labels():
+                    check("切回原角色后门派又跟着回来（无门派也会同步成「无门派」）",
+                          app.var_actor_sect.get() == sname_a,
+                          "%r" % (app.var_actor_sect.get(),))
             # 属性概览里看得见门派
             _ov = app.txt_actor.get("1.0", "end")
             check("属性概览里写了门派", "门派：" in _ov and sname_a in _ov,
@@ -1058,6 +1067,27 @@ def main():
             root.update()
             check("打开非存档文件不崩（面板优雅降级）", app.sv is None)
             check("数据树仍可用", len(app.tree.get_children("")) >= 1)
+            # ⚠ 验「非存档文件不许走存档管理」：老版本只看 `self.doc`，「立即备份」
+            #   会把那个文件复制到它旁边、还建出 `.huaji2-save-editor` 备份目录。
+            #   2026-09-27 查实：游戏目录 `Logs\Battle\<旧日志>\` 里被这么堆了
+            #   177 份垃圾备份（从 09-13 攒到今天），文件本身还被写坏过。
+            _junk = os.path.join(os.path.dirname(sample), ".huaji2-save-editor")
+            _had = os.path.isdir(_junk)
+            _mark = len(dialogs)
+            app.saves_backup()
+            root.update()
+            check("非存档文件 → 「立即备份」被拦下、不在它旁边建备份目录",
+                  os.path.isdir(_junk) == _had and len(dialogs) > _mark,
+                  "备份目录存在=%s，弹框+%d" % (os.path.isdir(_junk),
+                                            len(dialogs) - _mark))
+            # ⚠ 这一段的 app 必须切回副本：否则后面整段「存档管理」会继续在
+            #   游戏目录里那份 Battle.bt2 上操作（建备份、写坏文件、扫描它旁边）。
+            app.load(copy, quiet=True)
+            root.update()
+            check("马上切回副本（别让备份段跑到游戏目录里乱写）",
+                  app.doc is not None
+                  and os.path.abspath(app.doc.path) == os.path.abspath(copy),
+                  app.doc.path if app.doc else "(no doc)")
         else:
             say("（没有 Battle.bt2 样本，跳过）")
 
@@ -1148,13 +1178,36 @@ def main():
         finally:
             huaji2_save_editor.NoteDialog = real_note_dlg
             root.wait_window = real_wait2
+        # ⚠ 到这儿通常还躺着「保存前自动备份」那类自动档（save_save 一定会留一份），
+        #   而「删除非最新」的契约是**自动档只留最新一份、手动档一份不动**。
+        #   先按契约验一次「只清自动档」，再把自动档清干净 —— 否则下一步那条
+        #   "全手动就不删"的断言会误判成"它删了手动档"。
+        if any(r["kind"] != "manual" for r in app.save_rows):
+            _n_manual = sum(1 for r in app.save_rows if r["kind"] == "manual")
+            _n_before = len(app.save_rows)
+            app.saves_delete_old()
+            root.update()
+            check("界面「删除非最新」只清自动档、手动档一份不少",
+                  sum(1 for r in app.save_rows if r["kind"] == "manual")
+                  == _n_manual and len(app.save_rows) <= _n_manual + 1,
+                  "%d -> %d（手动 %d 份）" % (_n_before, len(app.save_rows),
+                                              _n_manual))
+        for _ in range(20):                      # 清掉剩下的自动档
+            _auto = [i for i, r in enumerate(app.save_rows)
+                     if r["kind"] != "manual"]
+            if not _auto:
+                break
+            app.tv_saves.selection_set("b%d" % _auto[0])
+            app.saves_delete()
+            root.update()
         n_before_clean = len(app.save_rows)
         app.saves_delete_old()
         root.update()
         check("界面「删除非最新」不碰手动备份（全是手动档就不删）",
               n_before_clean >= 2 and len(app.save_rows) == n_before_clean
               and all(r["kind"] == "manual" for r in app.save_rows),
-              "%d -> %d" % (n_before_clean, len(app.save_rows)))
+              "%d -> %d　档别 %r" % (n_before_clean, len(app.save_rows),
+                                    [r["kind"] for r in app.save_rows]))
         # 删除无备注：手工造一份没备注的，验证只删没备注的、留带备注的
         backup.backup(p, backup.KIND_MANUAL)     # 这份不带备注
         app.saves_refresh()

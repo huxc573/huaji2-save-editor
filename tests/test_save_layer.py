@@ -81,7 +81,25 @@ if actors:
     L.append("  #%d %s" % (aid, s.actor_summary(a)))
 
 # 写回 → 重新打开 → 全部改动还在、校验仍然一致
-s.save(backup=False)
+# ⚠ 性能红线：写回只该解析**一次**新明文。改前这一步解析 3 遍（自检两次 + 末尾
+#   重建 objects），46 万字节的档一次约 0.5s —— 那是「点保存要等 7 秒」的主因。
+#   见 docs/开发指南.md §7。
+import marshal_ruby  # noqa: E402
+_n_parse = [0]
+_real_parse = marshal_ruby.parse_stream
+
+
+def _count_parse(buf, *a, **k):
+    _n_parse[0] += 1
+    return _real_parse(buf, *a, **k)
+
+
+marshal_ruby.parse_stream = _count_parse
+try:
+    s.save(backup=False)
+finally:
+    marshal_ruby.parse_stream = _real_parse
+check("写回只解析一次新明文（性能红线）", _n_parse[0] == 1, "解析 %d 次" % _n_parse[0])
 s2 = save.SaveDoc(copy)
 check("写回后金钱仍为 999999", s2.gold() == 999999, "%r" % s2.gold())
 check("写回后 Lock 校验仍一致", s2.check_locks() == [])

@@ -41,6 +41,7 @@ import marshal_ruby as M  # noqa: E402
 import fieldnames  # noqa: E402
 import itemattr  # noqa: E402
 from tables import sect  # noqa: E402   # 门派表（游戏脚本里的 $sects，tools/gen_sect_table.py 生成）
+from tables import sect_appellation  # noqa: E402   # 门派称谓表（拜师事件里抠的，tools/gen_sect_appellation.py 生成）
 from save import _deref, _as_str, ivar, hash_get, hash_put_pairs  # noqa: E402
 
 # 游戏里的上限（Config::Game + $jiance）
@@ -501,35 +502,19 @@ class GameEditor(object):
         self.doc.mark_structural()
         return self.machine_ids()
 
-    def machine_id_now(self):
-        """本机机器码（调 main.dll!get_hard_disk_character）。"""
-        import codec
-        return codec.try_machine_id()
+    def machine_id_now(self, refresh=False):
+        """本机机器码（调 main.dll!get_hard_disk_character）。
 
-    def machine_status(self):
+        进程内会记住结果（起 exe 约 0.3s）；`refresh=True` 强制重读。
+        """
+        import codec
+        return codec.try_machine_id(refresh=refresh)
+
+    def machine_status(self, refresh=False):
         """返回 (本机机器码 或 None, 出错原因, 存档记录列表, 本机是否在档)。"""
-        now, err = self.machine_id_now()
+        now, err = self.machine_id_now(refresh=refresh)
         ids = self.machine_ids()
         return now, err, ids, bool(now and now in ids)
-        h = self.container(kind)
-        nm = self._name_map(kind)
-        out = []
-        for k, v in h.pairs:
-            slot = M.value_of(_deref(k))
-            if not isinstance(slot, int):
-                continue
-            p, idx = divmod(slot, PACK_PAGE_SIZE)
-            if page is not None and p != page:
-                continue
-            arr = _deref(v)
-            if not isinstance(arr, M.ArrayNode) or not arr.items:
-                continue
-            item = _deref(arr.items[0])
-            iid = get_int(ivar(item, "@id"), -1) if item is not None else -1
-            count = get_int(arr.items[1]) if len(arr.items) > 1 else 1
-            out.append((slot, p, idx, iid, nm.get(iid, "?"), count))
-        out.sort()
-        return out
 
     def empty_slots(self, kind="Items", page=None):
         """空槽号：键是整数槽号、值**有货**的才算占用（置 nil 的槽当空的）。
@@ -1610,6 +1595,30 @@ class GameEditor(object):
         sid = self.actor_sect_id(actor)
         return list(sect.sect_skill_ids(sid)) if sid is not None else []
 
+    def set_actor_sect(self, actor, sect_id):
+        """改角色门派：**只写 `@sect_id`**，返回写进去的 id。
+
+        为什么只写这一个字段（2026-09-27 查过脚本，见 `docs/门派修改可行性.md`）：
+          * 门派在存档里就这一个整数，脚本里读它 11 处、**一处都没写**（换门派是
+            事件脚本干的）→ 写它等于照游戏自己的机制办；
+          * `@sect_data`（`:门派` 攒次数 / `:辅助` / `:修炼`）**与门派无关**，不用动；
+            留着旧门派的计数无害，切回去还能接着原来的进度；
+          * `@skills` 也不用动：`Game_Actor#learn_skill`(6017) 只 push+sort!、
+            **从不清理**，游戏里换门派后旧门派技能本来就留着；
+          * `$jiance` 不查门派、不查技能 → 不算作弊。
+
+        ⚠ 只允许 `0..12`：`$sects` 是**没有 default 的普通 Hash**，写 13/负数这种
+          不存在的 id，游戏一开菜单就 `$sects[id][:name]` → `nil[:name]` 崩
+          （35285 / 37033 是所有角色一起画，所以是**全员崩菜单**）。
+          另外 `0`（无门派）会让游戏里快捷技能栏不可用、门派技能页隐藏 —— 能用，
+          但那是**减功能**，界面上要不要给这个入口另说。
+        """
+        v = int(sect_id)
+        if v not in sect.SECTS:
+            raise ValueError("门派 id 只能是 0..12（收到 %r）" % (sect_id,))
+        self.sv.set_actor_field(actor, "@sect_id", v)
+        return v
+
     def actor_class_learnings(self, actor):
         """角色**职业自带**的技能 id（`Data\\Classes[class_id].@learnings` 里
         等级已经够的那些）—— 游戏 `init_skills` 就是照这个发技能的。
@@ -1648,6 +1657,117 @@ class GameEditor(object):
         out = sorted(set(out))
         cache[key] = out
         return out
+
+    def actor_reset_skills_to_class(self, actor):
+        """把 `@skills` 重置成**职业自带技能**（天生技能），返回留下的 id 列表。
+
+        就是游戏 `Game_Actor#clear_skills`(5756) + `init_skills`(5747) 的结果：
+        `@skills = []` → 再按 `self.class.learnings` 里 `@level` 已经够的那些补回来。
+        「清空门派」用它把角色退回「没门派、只会天生技能」的状态。
+
+        ⚠ 这会**丢掉**所有非天生技能 —— 门派技能、技能书/剧情给的技能一视同仁。
+          游戏自己换门派时**不**这么做（`learn_skill` 只 push + 排序、从不清理），
+          所以界面上必须明确告知，别让人以为这是游戏行为。
+        """
+        keep = self.actor_class_learnings(actor)
+        self.actor_set_skills(actor, keep)
+        return keep
+
+    # ---------------------------------------------------- 门派称谓（@appellations）
+    # 游戏里叫「称谓」：`@appellations = [[称谓...], 下标]`，下标 -1 = 不显示任何称谓。
+    # 游戏侧：5549 初始化 `[[], -1]` / 5569 add_appellation / 5574 remove_appellation
+    # （顺手把下标打成 -1）/ 5576 get_appellation / 5578 set_appellation。
+    # ⚠ 门派称谓（「五庄观弟子」这种）**不是表**，是拜师事件里硬编码的
+    #   `add_appellation('五庄观弟子')`，12 个门派各一处 —— 见 `sect_appellation`。
+    def actor_appellations(self, actor):
+        """角色的称谓列表 + 当前显示下标（读不到就 `[]` / `-1`）。"""
+        arr = _deref(ivar(actor, "@appellations"))
+        if not isinstance(arr, M.ArrayNode) or len(arr.items) < 2:
+            return [], -1
+        out = []
+        lst = _deref(arr.items[0])
+        if isinstance(lst, M.ArrayNode):
+            for it in lst.items:
+                t = _as_str(it)
+                if t:
+                    out.append(t)
+        try:
+            idx = int(M.value_of(_deref(arr.items[1])))
+        except (TypeError, ValueError):
+            idx = -1
+        return out, (idx if 0 <= idx < len(out) else -1)
+
+    def set_actor_appellations(self, actor, names, index=-1):
+        """整份写 `@appellations`（`[[称谓...], 下标]`），返回 `(names, index)`。
+
+        ⚠ 数组元素个数会变 → `mark_structural()`（保存时整档重写）。
+        """
+        names = [str(n) for n in names]
+        arr = M.ArrayNode([M.ArrayNode([str_node(n) for n in names]),
+                           M.IntNode(int(index))])
+        if not set_ivar(actor, "@appellations", arr):
+            # 老档没有这个字段就追加一个（和 actor_set_skills 一个路子）
+            actor.ivars.append(("@appellations", arr))
+        self.doc.mark_structural()
+        return names, int(index)
+
+    def sect_appellation_name(self, sect_id):
+        """某个门派的**称谓**（「五庄观弟子」这种）；无门派 / 认不出 → None。
+
+        界面只从这里取名，别去 `tables.sect_appellation` 里翻 —— 免得两边口径不一。
+        """
+        return sect_appellation.sect_appellation(sect_id)
+
+    def sect_appellations_of(self, actor):
+        """角色身上那些**门派称谓**：`[(称谓, 门派 id), ...]`。"""
+        names, _idx = self.actor_appellations(actor)
+        out = []
+        for n in names:
+            sid = sect_appellation.sect_of_appellation(n)
+            if sid is not None:
+                out.append((n, sid))
+        return out
+
+    def set_actor_sect_appellation(self, actor, sect_id):
+        """换门派时同步称谓：**回收**所有门派称谓，再按新门派补上那一个。
+
+        返回 `(removed, added, names, index)`。
+        * `sect_id` 为 0（无门派）→ 只回收、不补，下标打成 -1（游戏
+          `remove_appellation` 也是把下标打成 -1）；
+        * 换门派时如果原来显示的就是门派称谓 → 直接改成显示新称谓。
+
+        ⚠ 游戏自己**只加不删**：全 Data 扫过，`add_appellation` 有调用、
+          `remove_appellation` 一处调用都没有；而且游戏不让改门派
+          （拜师对话写着「拜师后不可更改」）。所以「回收旧称谓」是工具额外做的，
+          界面上得写明。
+        """
+        try:
+            sid = int(sect_id or 0)
+        except (TypeError, ValueError):
+            sid = 0
+        names, idx = self.actor_appellations(actor)
+        cur = names[idx] if 0 <= idx < len(names) else None
+        removed = [n for n in names
+                   if sect_appellation.sect_of_appellation(n) is not None]
+        kept = [n for n in names if n not in set(removed)]
+        want = sect_appellation.sect_appellation(sid)
+        added = []
+        if want and want not in kept:
+            kept.append(want)
+            added.append(want)
+        if cur is not None and cur not in removed:
+            new_idx = kept.index(cur)
+        elif want and want in kept:
+            new_idx = kept.index(want)
+        else:
+            new_idx = -1
+        # ⚠ 判「有没有变」要看**结果**，别只看 removed/added：门派称谓正好是
+        #   新门派那个时（如已经是「地府弟子」再转一次地府），removed 和 added
+        #   都非空但结果一模一样 —— 那种情况写下去纯属白标 structural。
+        if kept == names and new_idx == idx:
+            return [], [], names, idx
+        self.set_actor_appellations(actor, kept, new_idx)
+        return removed, added, kept, new_idx
 
     def off_sect_skills(self, actor):
         """角色已学、但**既不是本门派、也不是职业自带**的技能。

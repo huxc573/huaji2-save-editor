@@ -16,12 +16,15 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import paths  # noqa: E402
 import game  # noqa: E402
 from tables import sect  # noqa: E402
+from tables import sect_appellation  # noqa: E402
 # ⚠ 不能在模块级 import huaji2_save_editor：它 import tkinter，而没有 tkinter 的
 # 解释器（managed 3.13）会在 main() 之前就 ModuleNotFoundError，
 # 优雅跳过就没机会执行了。
 
 WORK = os.path.join(HERE, "_smoke_lim")
 WARNS = []
+#: 桩 messagebox 的「确认框返回值」开关（True = 点「是」）
+MB_STUB = {"answer": True}
 BAD = [0]
 CHECKED = [0]
 
@@ -102,7 +105,9 @@ def main():
         "showinfo": staticmethod(lambda *a, **k: WARNS.append(("info", a))),
         "showerror": staticmethod(lambda *a, **k: WARNS.append(("error", a))),
         "showwarning": staticmethod(lambda *a, **k: WARNS.append(("warn", a))),
-        "askyesno": staticmethod(lambda *a, **k: WARNS.append(("ask", a)) or True),
+        # 可切换的确认框返回值（`MB_STUB["answer"]`）：验证「弹窗点否 → 什么都不写」
+        "askyesno": staticmethod(lambda *a, **k: WARNS.append(("ask", a))
+                                  or MB_STUB["answer"]),
     })
 
     os.makedirs(WORK, exist_ok=True)
@@ -567,6 +572,302 @@ def main():
               [d1.get(k) for k in OTHERS] == [d0.get(k) for k in OTHERS],
               "%r → %r" % ([d0.get(k) for k in OTHERS],
                            [d1.get(k) for k in OTHERS]))
+
+    # ---- 10) 改门派（2026-09-27 新增：「转门派」按钮 = 只写 @sect_id）
+    #   查证见 `docs/门派修改可行性.md`：门派就一个整数，`@skills`/`@sect_data`
+    #   都不动（游戏里换门派也这样，learn_skill 从不清理旧技能）。
+    print("\n--- 10) 改门派 ---")
+    _guard_real_save(app, paths.save_path())
+    WARNS.clear()
+    _btnw2 = {}
+
+    def _collect_btn2(w):
+        for c in w.winfo_children():
+            if c.winfo_class() == "TButton":
+                _btnw2.setdefault(c.cget("text"), c)
+            _collect_btn2(c)
+
+    _collect_btn2(app.tab_actor)
+    check("角色页有「转门派」按钮", "转门派" in _btnw2, "、".join(_btnw2))
+    check("它和「一键学习」同一行（左栏竖向 pack，多一行就有被裁的风险）",
+          "转门派" in _btnw2 and "一键学习" in _btnw2
+          and _btnw2["转门派"].master is _btnw2["一键学习"].master)
+    check("下拉共 13 项、含「无门派」（2026-09-27 川要求放进去）",
+          len(huaji2_save_editor.sect_choice_labels()) == 13
+          and "无门派" in huaji2_save_editor.sect_choice_labels(),
+          "、".join(huaji2_save_editor.sect_choice_labels()[:3]) + "…")
+
+    rid10 = None
+    for iid in app.tv_actor.get_children():
+        app.tv_actor.selection_set(iid)
+        app.load_actor()
+        root.update()
+        if app.g.sect_skills(app.current_actor()):
+            rid10 = iid
+            break
+    if rid10 is None:
+        check("找一个有门派的角色", False)
+    else:
+        app.tv_actor.selection_set(rid10)
+        app.load_actor()
+        root.update()
+        a = app.current_actor()
+        old_id = app.g.actor_sect_id(a)
+        new_id = 11 if old_id != 11 else 3
+        old_sk = tuple(app.g.actor_skills(a))
+        old_lv = app.g.actor_level(a)
+        old_five = dict(app.sv.attr_items(a))
+        app.doc.dirty = False
+        app.var_actor_sect.set(sect.sect_name(new_id))
+        WARNS.clear()
+        app.actor_set_sect()                    # 桩 askyesno 恒 True
+        root.update()
+        check("点「转门派」→ @sect_id 变成下拉那个门派",
+              app.g.actor_sect_id(a) == new_id,
+              "%s(%s) → %s(%s)" % (old_id, sect.sect_name(old_id), new_id,
+                                   sect.sect_name(new_id)))
+        check("→ 标脏（保存不再说「没有改动」）", app.doc.dirty)
+        check("→ 属性文本那行显示新门派",
+              sect.sect_name(new_id) in app.txt_actor.get("1.0", "end"),
+              sect.sect_name(new_id))
+        check("→ 角色列表「门派」列跟着变",
+              app.tv_actor.item(rid10, "values")[3] == sect.sect_name(new_id),
+              app.tv_actor.item(rid10, "values")[3])
+        check("→ 下拉停在用户选的门派上（没被抢回旧的）",
+              app.var_actor_sect.get() == sect.sect_name(new_id),
+              app.var_actor_sect.get())
+        check("→ @skills 一个都没变（游戏也不清理旧门派技能）",
+              tuple(app.g.actor_skills(a)) == old_sk, "%d 个" % len(old_sk))
+        check("→ 等级/五维也没动",
+              app.g.actor_level(a) == old_lv
+              and dict(app.sv.attr_items(a)) == old_five, "Lv%s" % old_lv)
+        check("→ 本门派技能清单换成新门派那 10 个",
+              list(app._learn_sids) == list(sect.sect_skill_ids(new_id)),
+              "%d 个" % len(app._learn_sids))
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_set_sect()                    # 同一个门派再点一次
+        root.update()
+        check("同一门派再点一次 → 只说「无需改动」、不标脏",
+              (not app.doc.dirty) and "无需" in app.var_status.get(),
+              app.var_status.get()[:50])
+        try:
+            app.g.set_actor_sect(a, 13)
+            _raised = False
+        except ValueError:
+            _raised = True
+        check("⚠ 越界 13 被挡下来（真写进去游戏会崩菜单）",
+              _raised and app.g.actor_sect_id(a) == new_id,
+              "抛 ValueError=%s" % _raised)
+        check("能改回原门派（可逆）",
+              app.g.set_actor_sect(a, old_id) == old_id
+              and app.g.actor_sect_id(a) == old_id, str(app.g.actor_sect_id(a)))
+
+        # ---- 10.05) 称谓（@appellations）：2026-09-27 川指出「转门派/清空门派
+        #   并没有转换对应称谓或者回收称谓」。存档里 = `[[称谓...], 下标]`。
+        stale_name = sect_appellation.sect_appellation(1 if old_id != 1 else 2)
+        app.g.set_actor_appellations(a, [stale_name, "内测人员"], 0)
+        app.load_actor()
+        root.update()
+        _txt10 = app.txt_actor.get("1.0", "end")
+        check("属性文本里有「称谓：」那一行", "称谓：" in _txt10,
+              "、".join(l for l in _txt10.split("\n") if "称谓" in l))
+        check("→ 称谓和门派对不上时直接提醒（川报的就是这个）",
+              "不是当前门派的" in _txt10,
+              "、".join(l for l in _txt10.split("\n") if "称谓" in l)[:60])
+        app.doc.dirty = False
+        WARNS.clear()
+        app.var_actor_sect.set(sect.sect_name(new_id))
+        app.actor_set_sect()
+        root.update()
+        _ap, _ai = app.g.actor_appellations(a)
+        _want = sect_appellation.sect_appellation(new_id)
+        check("点「转门派」→ 回收旧门派称谓、发新门派那个",
+              stale_name not in _ap and _want in _ap, "%s" % (_ap,))
+        check("→ 非门派称谓（内测人员）不被误删", "内测人员" in _ap, "%s" % (_ap,))
+        check("→ 原来显示的就是门派称谓 → 下标跟到新称谓上",
+              _ap[_ai] == _want if 0 <= _ai < len(_ap) else False,
+              "idx=%s %s" % (_ai, _ap))
+        check("→ 标脏", app.doc.dirty)
+        check("→ 确认框里写了称谓怎么变",
+              any(w[0] == "ask" and "称谓" in w[1][1] for w in WARNS),
+              "、".join(w[1][1].replace("\n", " / ") for w in WARNS
+                        if w[0] == "ask")[:70])
+        # 真档里就有这种：门派对、称谓错（秦媚儿：女儿村 却挂着「地府弟子」）
+        _sid_now = app.g.actor_sect_id(a)
+        app.g.set_actor_appellations(a, ["地府弟子"], 0)
+        app.doc.dirty = False
+        WARNS.clear()
+        app.var_actor_sect.set(sect.sect_name(_sid_now))
+        app.actor_set_sect()
+        root.update()
+        check("门派对、称谓错 → 点「转门派」也能对齐（不被「已无需改动」挡掉）",
+              app.g.actor_appellations(a) == ([_want], 0) and app.doc.dirty,
+              "%r" % (app.g.actor_appellations(a),))
+        check("→ @sect_id 没被白写回同一个值以外的东西",
+              app.g.actor_sect_id(a) == _sid_now, str(app.g.actor_sect_id(a)))
+        app.g.set_actor_sect(a, old_id)        # 还原，后面 10.1 从原门派开
+        app.load_actor()
+        root.update()
+
+        # ---- 10.1) 清空门派（2026-09-27）：写 @sect_id = 0 **并且**把技能重置成
+        #   职业天生技能（= 游戏 `clear_skills` + `init_skills`）。
+        #   ⚠ 和「转门派」是**两条不同的路**（川 260927 22:5x 定）：
+        #   清技能只归这个按钮；下拉里选「无门派」+「转门派」只改门派、技能不动。
+        check("「清空门派」按钮在同一行（不再多占一行高度）",
+              "清空门派" in _btnw2 and "转门派" in _btnw2
+              and _btnw2["清空门派"].master is _btnw2["转门派"].master,
+              "、".join(_btnw2))
+        check("下拉里仍然有「无门派」（0 既有按钮也可选下拉）",
+              "无门派" in huaji2_save_editor.sect_choice_labels(),
+              "%d 项" % len(huaji2_save_editor.sect_choice_labels()))
+        app.tv_actor.selection_set(rid10)
+        app.load_actor()
+        root.update()
+        a = app.current_actor()
+        check("清空前：角色是有门派的", app.g.actor_sect_id(a) == old_id,
+              str(app.g.actor_sect_id(a)))
+        innate0 = set(app.g.actor_class_learnings(a))
+        sk0 = tuple(app.g.actor_skills(a))
+        lv0 = app.g.actor_level(a)
+        five0 = dict(app.sv.attr_items(a))
+        extra = [s for s in sect.sect_skill_ids(old_id) if s not in innate0]
+        check("清空前：有非天生技能可清（否则这条用例没意义）",
+              bool(extra) and bool(set(sk0) - innate0),
+              "%d 个技能，其中非天生 %d 个" % (len(sk0), len(set(sk0) - innate0)))
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_clear_sect()                  # 桩 askyesno 恒 True
+        root.update()
+        check("点「清空门派」→ @sect_id 变成 0", app.g.actor_sect_id(a) == 0,
+              "@sect_id=%s" % app.g.actor_sect_id(a))
+        check("→ 标脏", app.doc.dirty)
+        check("→ 属性文本显示「无门派」",
+              "无门派" in app.txt_actor.get("1.0", "end"),
+              "、".join(l for l in app.txt_actor.get("1.0", "end").split("\n")
+                        if "门派" in l))
+        check("→ 角色列表「门派」列 = 无门派",
+              app.tv_actor.item(rid10, "values")[3] == "无门派",
+              app.tv_actor.item(rid10, "values")[3])
+        check("→ 下拉同步成「无门派」（下拉里有这一项了）",
+              app.var_actor_sect.get() == "无门派",
+              "%r" % app.var_actor_sect.get())
+        check("→ 左栏清单收起 + 提示「这个角色没有门派」",
+              list(app._learn_sids) == [] and "没有门派" in app.var_learn_note.get(),
+              app.var_learn_note.get()[:40])
+        check("→ @skills 被重置成职业天生技能（工具额外做的）",
+              set(app.g.actor_skills(a)) == innate0,
+              "%d 个 → %d 个" % (len(sk0), len(app.g.actor_skills(a))))
+        check("→ 门派称谓也被回收（2026-09-27 第三轮）",
+              not app.g.sect_appellations_of(a)
+              and "地府弟子" not in app.g.actor_appellations(a)[0],
+              "%s" % (app.g.actor_appellations(a),))
+        check("→ 天生技能一个没丢",
+              bool(innate0) and innate0 <= set(app.g.actor_skills(a)),
+              "、".join("#%d" % s for s in sorted(innate0)))
+        check("→ 非天生技能全清（门派技能 / 技能书学的都算）",
+              not (set(sk0) - innate0) & set(app.g.actor_skills(a)),
+              "清了 %d 个" % len(set(sk0) - innate0))
+        _ask = [w for w in WARNS if w[0] == "ask"]
+        _txt = _ask[0][1][1] if _ask else ""
+        check("→ 确认框写明了技能怎么变 + 「游戏自己换门派不会清技能」",
+              "技能" in _txt and "不会清技能" in _txt,
+              _txt.replace("\n", " / ")[:80])
+        check("→ 等级/五维也没动",
+              app.g.actor_level(a) == lv0
+              and dict(app.sv.attr_items(a)) == five0, "Lv%s" % lv0)
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_clear_sect()                  # 已无门派 + 只剩天生 → 再点一次
+        root.update()
+        check("已无门派且技能只剩天生 → 只说「无需改动」、不标脏、不弹窗",
+              (not app.doc.dirty) and "无需" in app.var_status.get()
+              and not WARNS, app.var_status.get()[:50])
+        # 已无门派、但技能里还挂着非天生（真档里就有这种角色）→ 仍然要能清
+        app.g.actor_learn_skill(a, extra[0])
+        app.load_actor()
+        root.update()
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_clear_sect()
+        root.update()
+        check("已经无门派但技能里还有门派技能 → 再点一次能清掉",
+              app.g.actor_sect_id(a) == 0
+              and set(app.g.actor_skills(a)) == innate0 and app.doc.dirty,
+              "%d 个技能" % len(app.g.actor_skills(a)))
+        # 下拉里选「无门派」+「转门派」= **只改门派**，技能一个不动
+        # （川 260927 22:5x 定：「无门派不清技能，清空门派才清技能」→ 两路拆开）
+        app.g.set_actor_sect(a, old_id)
+        app.g.actor_learn_skill(a, extra[0])
+        app.load_actor()
+        root.update()
+        app.var_actor_sect.set("无门派")
+        _sk_drop = tuple(app.g.actor_skills(a))
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_set_sect()
+        root.update()
+        check("下拉选「无门派」+「转门派」→ @sect_id 变成 0",
+              app.g.actor_sect_id(a) == 0 and app.doc.dirty,
+              "@sect_id=%s" % app.g.actor_sect_id(a))
+        check("→ **技能一个不动**（清技能只归「清空门派」）",
+              tuple(app.g.actor_skills(a)) == _sk_drop,
+              "%d 个技能；清空门派那条路会变成 %d 个"
+              % (len(app.g.actor_skills(a)), len(innate0)))
+        check("→ 弹的是「改门派」那个框（不再借「清空门派」的框）",
+              any(w[0] == "ask" and w[1][0] == "改门派" for w in WARNS)
+              and not any(w[0] == "ask" and w[1][0] == "清空门派" for w in WARNS),
+              "、".join(w[1][0] for w in WARNS if w[0] == "ask"))
+        _txt0 = " ".join(w[1][1] for w in WARNS if w[0] == "ask")
+        check("→ 确认框写明「技能一个不动」+ 指路「清空门派」",
+              "技能一个不动" in _txt0 and "清空门派" in _txt0,
+              _txt0.replace("\n", " / ")[:90])
+        check("→ 状态栏也说技能没动、要重置去点「清空门派」",
+              "技能没动" in app.var_status.get()
+              and "清空门派" in app.var_status.get(),
+              app.var_status.get()[:60])
+        # 而「清空门派」这条独立入口：仍然要把技能重置成天生技能
+        app.g.set_actor_sect(a, old_id)
+        app.load_actor()
+        root.update()
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_clear_sect()
+        root.update()
+        check("「清空门派」仍然连技能一起重置（两条路各管各的）",
+              app.g.actor_sect_id(a) == 0
+              and set(app.g.actor_skills(a)) == innate0 and app.doc.dirty,
+              "%d 个技能" % len(app.g.actor_skills(a)))
+        # 弹窗点「否」→ 一个字都不写（技能也必须没动）
+        app.g.set_actor_sect(a, old_id)
+        app.load_actor()
+        root.update()
+        _sk_before = tuple(app.g.actor_skills(a))
+        app.doc.dirty = False
+        WARNS.clear()
+        MB_STUB["answer"] = False
+        app.actor_clear_sect()
+        root.update()
+        MB_STUB["answer"] = True
+        check("弹窗点「否」→ 门派/技能都没动、也没标脏",
+              app.g.actor_sect_id(a) == old_id and not app.doc.dirty
+              and tuple(app.g.actor_skills(a)) == _sk_before,
+              "@sect_id=%s dirty=%s 技能 %d 个"
+              % (app.g.actor_sect_id(a), app.doc.dirty,
+                 len(app.g.actor_skills(a))))
+        # 清空之后还能正常转门派（下拉/按钮都还活着）
+        app.doc.dirty = False
+        WARNS.clear()
+        app.actor_clear_sect()
+        root.update()
+        app.var_actor_sect.set(sect.sect_name(old_id))
+        app.actor_set_sect()
+        root.update()
+        check("清空后还能用「转门派」转回来（技能不再回滚，只改 @sect_id）",
+              app.g.actor_sect_id(a) == old_id and app.doc.dirty
+              and set(app.g.actor_skills(a)) == innate0,
+              "%s → %s / %d 个技能"
+              % (0, app.g.actor_sect_id(a), len(app.g.actor_skills(a))))
 
     app.root.destroy()
     shutil.rmtree(WORK, ignore_errors=True)

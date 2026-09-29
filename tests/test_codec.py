@@ -94,6 +94,30 @@ def main():
         check(False, "错误密钥应当报错")
     except codec.CodecError as e:
         check("输出为空" in str(e), "错误密钥被如实拒绝")
+    # ⚠ 性能红线：取机器码要起一个 32 位宿主（约 0.3s），而保存路径上会被问 3 次
+    #   （存盘前体检 / 概览页 / 机器码页）→ 必须走进程内缓存，只有显式按钮才重读。
+    #   见 docs/开发指南.md §7。
+    n_run = [0]
+    real_run = codec._run
+
+    def _count_run(args, *a, **k):
+        n_run[0] += 1
+        return real_run(args, *a, **k)
+
+    codec._run = _count_run
+    try:
+        codec._MACHINE_CACHE.clear()
+        m1 = codec.machine_id(mian)
+        n_first = n_run[0]
+        m2 = codec.machine_id(mian)
+        m3 = codec.machine_id(mian, refresh=True)
+        check(n_first == 1 and n_run[0] == 2 and m1 == m2 == m3,
+              "机器码走缓存：只起 1 次 exe，refresh=True 才重读"
+              "（第1次 %d 次调用 -> 共 %d 次）" % (n_first, n_run[0]))
+    finally:
+        codec._run = real_run
+        codec._MACHINE_CACHE.clear()
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     print("\n==== 通过 %d, 失败 %d ====" % (OK, NG))

@@ -338,18 +338,17 @@ def actor_sash_pos(h, need, lo=80):
 
 
 def sect_choice_labels():
-    """技能编辑器「门派」下拉的全部选项（12 个门派）。
+    """「门派」下拉的全部选项（**无门派 + 12 个门派**，共 13 项）。
 
     门派**不是** Data 表，来自游戏脚本的 `$sects`（见 `sect`）。
-    ⚠ 两项**不进下拉**（2026-09-20 川要求）：
-      - 「无门派」（id 0）：技能集合是空集，选它列不出任何东西；
-      - 「全部技能」：左栏清单是按门派列的，选「全部」就是几百个技能，没意义，
-        直接没有这一项（未选门派时清单留空 + 给提示）。
+    ⚠ 2026-09-27 川要求把「无门派」也放进来（原来 2026-09-20 排除了它）：
+      这个下拉同时是「当前角色门派」的显示器 —— 无门派角色得有个值显示，
+      而且选它 + 点「转门派」= **只把门派改成无门派**（技能一个不动）。选它时左栏会给一句提示，
+      不再是死空白（见 `rebuild_learn_grid`）。
+    ⚠ 「全部技能」仍然没有这一项（列出来就是几百个技能，没意义）。
     """
     out = []
-    for sid in sect.SECT_ORDER:
-        if sid == 0:
-            continue                # 无门派没有门派技能，筛出来是空 → 不给选项
+    for sid in sorted(sect.SECTS):          # 0 无门派 在最前，然后 1..12
         nm = sect.sect_name(sid)
         if nm:
             out.append(nm)
@@ -706,6 +705,8 @@ class App(object):
             self.tv_guard.heading(c, text=t)
             self.tv_guard.column(c, width=w, anchor="w")
         self._guard_notes = {}
+        # 保存流程里"存盘前体检"算好的那份，交给接下来的面板刷新复用；别处为 None
+        self._guard_rows = None
         self.tv_guard.bind("<Motion>", self._guard_tip_motion)
         self.tv_guard.bind("<Leave>", lambda e: self._tip_hide())
         vs = ttk.Scrollbar(gv, orient="vertical", command=self.tv_guard.yview)
@@ -853,11 +854,34 @@ class App(object):
             return None
         return backup.backup_dir(self.doc.path, create=False)
 
+    def _saves_ready(self):
+        """存档管理能不能动手：既要打开过文件，也要**确实是存档**（`self.sv`）。
+
+        ⚠ 打开一个非存档文件（比如游戏目录里的 `Logs\\Battle\\*.bt2`）时 `self.doc`
+        是有的、`self.sv` 是 None —— 以前只看 `self.doc`，结果「立即备份」会把那个
+        非存档文件复制到它旁边、还在那里建出 `.huaji2-save-editor` 备份目录
+        （2026-09-27 查实：测试就是这么往游戏目录里堆了几百份垃圾的）。
+        """
+        if not self.doc:
+            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+            return False
+        if self.sv is None:
+            messagebox.showwarning("不能操作",
+                                   "当前打开的不是存档文件，\n没法做备份 / 恢复。",
+                                   parent=self.root)
+            return False
+        return True
+
     def saves_refresh(self):
         self.tv_saves.delete(*self.tv_saves.get_children())
         self.save_rows = []
         if not self.doc:
             self.var_saves_info.set("存档管理：还没打开存档")
+            return
+        if self.sv is None:
+            # 非存档文件（如 Logs\Battle\*.bt2）→ 不去它旁边扫备份目录
+            # （既没意义，又可能在游戏目录里慢慢爬）
+            self.var_saves_info.set("存档管理：当前打开的不是存档文件")
             return
         rows = backup.list_backups(self.doc.path)
         self.save_rows = rows
@@ -877,8 +901,7 @@ class App(object):
                sum(r["size"] for r in rows) / 1048576.0))
 
     def saves_backup(self):
-        if not self.doc:
-            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+        if not self._saves_ready():
             return
         try:
             p = backup.backup(self.doc.path, backup.KIND_MANUAL)
@@ -915,7 +938,7 @@ class App(object):
         return out
 
     def saves_restore(self):
-        if not self.doc:
+        if not self._saves_ready():
             return
         rows = self._save_sel()
         if not rows:
@@ -944,7 +967,7 @@ class App(object):
 
     def saves_restore_newest(self):
         """恢复最新＝把**上一次修改之前**的存档换回来（最新的一份备份）。"""
-        if not self.doc:
+        if not self._saves_ready():
             return
         self.saves_refresh()
         r = self.save_rows[0] if self.save_rows else None
@@ -1310,6 +1333,26 @@ class App(object):
         btn_learn.pack(side="left", padx=(6, 0))
         self._bind_tip(btn_learn, "把本门派还没学的技能一次学满\n"
                                   "（下面的勾选框会全部打上勾）。")
+        # 「转门派」：把当前角色的门派改成**下拉里选的那个**（2026-09-27 加）。
+        # ⚠ 故意**不**做成「下拉即改」——那个下拉的既定语义是「只换下面这份清单」，
+        #   顺手改存档会在「只想看看别的门派技能」时把门派改掉。
+        btn_sect = ttk.Button(srow, text="转门派", command=self.actor_set_sect)
+        btn_sect.pack(side="left", padx=(6, 0))
+        self._bind_tip(btn_sect, "把当前角色的门派改成下拉里选的那个。\n"
+                                 "只改门派本身（@sect_id）：\n"
+                                 "已学技能、辅助/修炼、属性都不动。\n"
+                                 "选「无门派」也是一样 —— 技能不动；\n"
+                                 "要连技能一起重置，用「清空门派」。")
+        # 「清空门派」：写 `@sect_id = 0` **并且**把技能重置成职业天生技能
+        # （2026-09-27 川的要求）。⚠ 下拉里也有「无门派」，但两条路**不一样**：
+        # 「转门派」只改门派（技能一个不动），连技能一起重置只有这个按钮
+        # （川 260927 22:5x 明确：「无门派不清技能，清空门派才清技能」）。
+        btn_nosect = ttk.Button(srow, text="清空门派", command=self.actor_clear_sect)
+        btn_nosect.pack(side="left", padx=(6, 0))
+        self._bind_tip(btn_nosect, "把当前角色改成「无门派」（@sect_id=0），\n"
+                                   "并把技能重置成职业天生技能。\n"
+                                   "⚠ 游戏里快捷技能栏、门派技能页会不可用；\n"
+                                   "   门派技能和技能书学的技能都会没。")
         self.var_learn_note = tk.StringVar(value="")
         ttk.Label(self.lf_learn, textvariable=self.var_learn_note,
                   foreground="#8a8a8a", justify="left", wraplength=560
@@ -2799,6 +2842,7 @@ class App(object):
         if not self.doc or not self.doc.dirty:
             messagebox.showinfo("保存", "没有改动。", parent=self.root)
             return
+        self._guard_rows = None
         if not self._pre_save_guard():
             return
         # 保存前先在“存档管理”的目录里留一份（同一份文件 90 秒内只留一次）
@@ -2814,7 +2858,11 @@ class App(object):
             self.sv = None
         self.sync_editor()
         self.clear_dirty()
-        self.refresh_panels()
+        # ⚠ 存盘不改数据，体检表内容与刚才那份完全一样 → 直接给它，别在
+        #   fill_info 里再算一遍（anti_cheat_report 要扫 Lock/记账/物品，约 0.4s）。
+        #   刚 auto-fix 过时 `_guard_rows` 是 None，那时才重算。
+        self.refresh_panels(guard_rows=self._guard_rows)
+        self._guard_rows = None
         messagebox.showinfo(
             "保存", "已写回：\n%s\n\n%s"
             % (p, ("存档管理里也留了一份：%s" % os.path.basename(auto))
@@ -2837,6 +2885,7 @@ class App(object):
             return True
         over = [r for r in rows if r[3]]
         if not over:
+            self._guard_rows = rows        # 没超限：内容待会儿直接喂给面板
             return True
         detail = "\n".join("  · %s：当前 %s（上限 %s）" % (r[0], r[1], r[2])
                            for r in over[:8])
@@ -2848,9 +2897,11 @@ class App(object):
                 "点「是」＝ 现在按规则修好（数值修复 + 清作弊标记 + 同步物品计数）再保存\n"
                 "点「否」＝ 先不修，再问一次要不要照样保存" % detail):
             done = self.guard_autofix(quiet=True)
+            self._guard_rows = None        # 修过了，面板那份得重算
             self.refresh_panels()
             self.set_status("保存前已顺手修好：%s" % "、".join(done or ["（无需处理）"]))
             return True
+        self._guard_rows = rows
         return self.confirm("照样保存？",
                             "带着超限项 / 作弊标记保存？（进战斗可能会崩）")
 
@@ -2873,13 +2924,15 @@ class App(object):
             self.mark_dirty()
         return done
 
-    def refresh_panels(self):
+    def refresh_panels(self, guard_rows=None):
         """把所有面板刷一遍。每步单独兜底，返回出错的步骤名列表。
 
         存档面板和"全部解析数据"互不依赖，一个炸了不该连坐。
+        `guard_rows`：已经算好的体检表（保存流程里刚算过一份），传进来就不再重算。
         """
         bad = []
-        for step, fn in (("概览", self.fill_info), ("数据树", self.fill_tree),
+        for step, fn in (("概览", lambda: self.fill_info(guard_rows)),
+                         ("数据树", self.fill_tree),
                          ("角色", self.fill_actors), ("背包", self.fill_party),
                          ("召唤兽", self.fill_babies),
                          ("开关/变量", self.fill_switches),   # 页签已隐藏，仅刷新内容
@@ -2942,7 +2995,7 @@ class App(object):
             self.err(e)
 
     # ================================================== 1 概览
-    def fill_info(self):
+    def fill_info(self, guard_rows=None):
         if not self.sv:
             if self.doc:
                 self.txt_info.delete("1.0", "end")
@@ -2983,7 +3036,7 @@ class App(object):
                       "点「清除作弊标记」"
             L.append(L2)
         try:
-            self.guard_check()
+            self.guard_check(guard_rows)
         except Exception:
             pass
 
@@ -3095,16 +3148,21 @@ class App(object):
         self.detect_and_fix_cheats()
 
     # ================================================== 防作弊体检
-    def guard_check(self):
-        """把游戏自己的检查规则跑一遍，结果显示在表里。"""
+    def guard_check(self, rows=None):
+        """把游戏自己的检查规则跑一遍，结果显示在表里。
+
+        `rows`：外面已经算好的体检结果（保存流程里刚算过），给了就用它，
+        省掉一次 anti_cheat_report（要扫 Lock / 五类记账 / 逐物品校验）。
+        """
         self.tv_guard.delete(*self.tv_guard.get_children())
         if not self.g:
             return
-        try:
-            rows = self.g.anti_cheat_report()
-        except Exception as e:
-            self.err(e)
-            return
+        if rows is None:
+            try:
+                rows = self.g.anti_cheat_report()
+            except Exception as e:
+                self.err(e)
+                return
         for i, (name, cur, limit, bad, why) in enumerate(rows):
             iid = "g%d" % i
             self._guard_notes[iid] = ("❌ " + why) if bad else why
@@ -3575,6 +3633,8 @@ class App(object):
         sect_id = self.g.actor_sect_id(a)
         sect_nm = self.g.actor_sect_name(a)
         off = self.g.off_sect_skills(a)
+        apps, app_idx = self.g.actor_appellations(a)
+        app_show = apps[app_idx] if 0 <= app_idx < len(apps) else None
         L = ["名字：%s（存档 @name）" % self.sv.actor_name(a),
              "级别：%s（上限 %d）" % (lv, game.MAX_LEVEL_ACTOR),
              "获得经验：%s（本级内）" % cur,
@@ -3582,6 +3642,7 @@ class App(object):
              "累计获得经验：%s%s" % (lim, "　⚠ 已封顶" if gate else ""),
              "门派：%s（@sect_id=%s，本门派技能 %d 个）"
              % (sect_nm or "（认不出）", sect_id, len(self.g.sect_skills(a))),
+             self._appellation_line(a, apps, app_show),
              "防作弊：五维总点数 %d（上限 = 等级*10+500 = %d）"
              % (self.g.point_num(a), lv * 10 + 500),
              "已学技能：%s" % (sk or "（无）"),
@@ -3598,6 +3659,29 @@ class App(object):
         self.txt_actor.delete("1.0", "end")
         self.txt_actor.insert("1.0", "\n".join(L))
         self.load_actor_skills(a)       # 右下角的技能一览（可编辑）
+
+    def _appellation_line(self, a, apps, app_show):
+        """属性文本里的「称谓：…」那一行（游戏里叫称谓，存档字段 `@appellations`）。
+
+        门派称谓（「五庄观弟子」）是拜师事件硬编码发下来的，**跟门派走**；
+        存档里 `[[称谓...], 下标]`，下标 -1 = 不显示。2026-09-27 川指出：
+        光改 `@sect_id` 不会动它，所以这里把「称谓和门派对不上」直接摆出来。
+        """
+        if not apps:
+            return "称谓：（没有）"
+        line = "称谓：%s（共 %d 个：%s）" % (
+            ("显示「%s」" % app_show) if app_show else "不显示（下标 -1）",
+            len(apps), "、".join(apps))
+        sect_id = self.g.actor_sect_id(a)
+        stale = [n for n, s in self.g.sect_appellations_of(a) if s != sect_id]
+        if stale:
+            line += ("　⚠ 「%s」不是当前门派的 —— 用「转门派」/「清空门派」回收"
+                     % "、".join(stale))
+        elif sect_id and not any(self.g.sect_appellations_of(a)):
+            want = self.g.sect_appellation_name(sect_id)
+            if want:
+                line += "　⚠ 缺本门派称谓（可点「转门派」补上）"
+        return line
 
     def _actor_note(self, name, lv, cur, nxt, lim, gate):
         """鼠标移到「属性概览」上要看的那段提醒（满级 / 封顶 / 升级进度）。"""
@@ -3761,10 +3845,11 @@ class App(object):
         var_sect = getattr(self, "var_actor_sect", None)
         if var_sect is not None and a is not getattr(self, "_sect_actor", "\0None"):
             self._sect_actor = a
-            label = ""                 # 无门派 / 没角色 → 留空（下拉里没这一项）
-            # 有本门派技能 → 站到 TA 那个门派上；
+            label = ""                 # 没角色 → 留空
+            # 直接站到 TA 自己的门派上（无门派角色就是「无门派」——
+            # 2026-09-27 起下拉里有这一项了，不再留空）。
             # ⚠ 得确认这名字真在下拉里，别 set 进去一个 Combobox 认不出的值。
-            if a is not None and self.g is not None and self.g.sect_skills(a):
+            if a is not None and self.g is not None:
                 nm = self.g.actor_sect_name(a)
                 if nm in sect_choice_labels():
                     label = nm
@@ -3807,13 +3892,16 @@ class App(object):
         if var_sect is not None:
             label = var_sect.get()
         sid = sect.SECT_NAME_TO_ID.get(label) if label else None
-        if sid is None:
+        if sid is None or sid == 0:
             if note is not None:
                 a = self.current_actor() if self.g is not None else None
-                if a is not None and not self.g.sect_skills(a):
+                if a is not None and self.g.actor_sect_id(a) == 0:
                     # 无门派角色（@sect_id=0）：提示别写成「还没选」，会让人以为漏点了
                     note.set("这个角色没有门派 —— 想学哪个门派的技能，"
                              "就在上面选哪个门派。")
+                elif sid == 0:
+                    # 用户自己把下拉切到「无门派」（角色其实有门派）
+                    note.set("「无门派」没有门派技能。要看别的门派就在这里换一个。")
                 else:
                     note.set("先在上面选一个门派，这里才会列出它的 10 个技能。")
             return
@@ -3930,6 +4018,219 @@ class App(object):
         else:
             self.set_status("已学会 %d 个技能：%s（记得点「保存修改」）"
                             % (len(done), "、".join("#%d" % s for s in done)))
+
+    def actor_set_sect(self):
+        """把**当前角色**的门派改成左栏下拉里选的那个（只写 `@sect_id`）。
+
+        档位＝「只改门派」（2026-09-27 川选的 ①，见 `docs/门派修改可行性.md`）：
+          * 只动门派本身 —— `@skills` / `@sect_data` / 属性一律不碰，和游戏里
+            换门派的行为一致（`learn_skill` 从不清理旧门派技能，它们会留着）；
+          * 下拉里有 13 项（无门派 + 12 门派，2026-09-27 川要求把无门派也放进来）。
+            ⚠ 选「无门派」也是**只改门派、技能一个不动**（与转别的门派一致）；
+            「连技能一起重置」只属于「清空门派」那个按钮
+            （川 260927 22:5x：「无门派不清技能，清空门派才清技能」—— 两路**不**合并）；
+          * 顺带把**称谓**对齐（`@appellations`）：回收旧门派称谓、补上新门派那个
+            （2026-09-27 川指出原来不带这个）；门派本来就对、只是称谓不对时
+            也能点这个按钮修（不会白写 `@sect_id`）；
+          * 越界 id 的校验在 `GameEditor.set_actor_sect()` 里（写别的值游戏崩菜单）。
+        """
+        if self.g is None or self.sv is None:
+            return
+        a = self.current_actor()
+        if a is None:
+            messagebox.showinfo("提示", "先在角色列表选一个角色。",
+                                parent=self.root)
+            return
+        var = getattr(self, "var_actor_sect", None)
+        label = (var.get() if var is not None else "").strip()
+        sid = sect.SECT_NAME_TO_ID.get(label)
+        if sid is None:
+            messagebox.showinfo("提示", "先在左边选一个门派（下拉里挑一个）。",
+                                parent=self.root)
+            return
+        old_id = self.g.actor_sect_id(a)
+        # 称谓（@appellations）：门派称谓跟门派走 —— 转门派时回收旧的、补上新的
+        apps, app_idx = self.g.actor_appellations(a)
+        cur_app = apps[app_idx] if 0 <= app_idx < len(apps) else None
+        old_apps = self.g.sect_appellations_of(a)
+        want_app = self.g.sect_appellation_name(sid)
+        stale = [n for n, s in old_apps if s != sid]
+        missing = bool(want_app) and not any(s == sid for _n, s in old_apps)
+        # ⚠ 早退条件里**必须**算上称谓：真档里就有「门派对、称谓错」的角色
+        #   （秦媚儿：@sect_id=5 女儿村，称谓却是「地府弟子」）—— 只看
+        #   「门派一样」就早退，她就永远修不了。
+        if old_id == sid and not stale and not missing:
+            self.set_status("已经是「%s」了、称谓也没问题，无需改动" % label)
+            return
+        old_nm = self.g.actor_sect_name(a) or "（认不出：@sect_id=%s）" % old_id
+        same = (old_id == sid)
+        if same:
+            # 门派没变、只是称谓不对 → 只把称谓对齐（不白写 @sect_id）
+            lines = ["「%s」的门派已经是「%s」了，把称谓对齐过来？"
+                     % (self.sv.actor_name(a), label), ""]
+        elif sid == 0:
+            # ⚠ 「转门派」选「无门派」= **只改门派**，技能一个不动（和转别的门派
+            #   完全一致）。连技能一起重置是「清空门派」那个按钮的事
+            #   （川 260927 22:5x：「无门派不清技能，清空门派才清技能」）。
+            lines = ["把「%s」的门派改成「无门派」（@sect_id = 0）？"
+                     % self.sv.actor_name(a),
+                     "",
+                     "· 只改存档里的门派本身（@sect_id）",
+                     "· **技能一个不动**（原来是「%s」的技能会留着）" % old_nm,
+                     "  ⚠ 要连技能一起重置成天生技能 → 用「清空门派」那个按钮",
+                     "  ⚠ 游戏里快捷技能栏、门派技能页都会不可用"]
+        else:
+            lines = ["把「%s」的门派改成「%s」？" % (self.sv.actor_name(a), label),
+                     "",
+                     "· 只改存档里的门派本身（@sect_id）",
+                     "· 已学技能、辅助/修炼、属性 都不动",
+                     "  （原来是「%s」，它的技能会留在角色身上，游戏里照旧能用）"
+                     % old_nm]
+        moves = []
+        if stale:
+            moves.append("回收「%s」" % "、".join(stale))
+        if want_app:
+            moves.append("发「%s」" % want_app)
+        elif stale:
+            moves.append("不补新的")
+        if moves:
+            lines.append("· 称谓：%s" % " → ".join(moves))
+            if cur_app is not None and cur_app in [n for n, _s in old_apps]:
+                lines.append("  （原来显示的就是门派称谓 → 改成显示新的那个）")
+            lines.append("  ⚠ 游戏自己只加不删（而且不让改门派），回收/补发是工具额外做的")
+        if not messagebox.askyesno("改门派", "\n".join(lines), parent=self.root):
+            return
+        try:
+            if not same:
+                self.g.set_actor_sect(a, sid)
+            removed, added, _ap, _ai = self.g.set_actor_sect_appellation(a, sid)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        # ⚠ 下拉只在「换角色」时才自动切（见 `load_actor_skills`）→ 这里要把跟随
+        #   标记显式更新掉；否则下次刷新面板会把下拉抢回**旧**门派，看着像没改成。
+        self._sect_actor = a
+        keep = self.tv_actor.selection()
+        self.fill_actors(keep_id=keep[0] if keep else None)   # 列表「门派」列
+        self.load_actor()                                     # 属性文本 + 清单
+        extra = ""
+        if removed or added:
+            bits = []
+            if removed:
+                bits.append("回收「%s」" % "、".join(removed))
+            if added:
+                bits.append("发「%s」" % "、".join(added))
+            extra = "，称谓%s" % "、".join(bits)
+        if same:
+            self.set_status("门派没变「%s」，只把称谓对齐了%s（记得点「保存修改」）"
+                            % (label, extra))
+        elif sid == 0:
+            self.set_status("门派已改成「无门派」%s，技能没动"
+                            "（要重置技能用「清空门派」；游戏里快捷技能栏/门派技能页"
+                            "不可用；记得点「保存修改」）" % extra)
+        else:
+            self.set_status("门派已改成「%s」%s（@sect_id 已写，记得点「保存修改」）"
+                            % (label, extra))
+
+    def actor_clear_sect(self):
+        """把**当前角色**清成「无门派」+ 把技能重置成职业天生技能。
+
+        ⚠ 和「转门派」的边界（川 260927 22:5x 定）：**清技能只归本方法**。
+        下拉里选「无门派」再点「转门派」只改门派（技能一个不动），**不**再转发到这里
+        —— 两路合并过一次，是工具加戏，川明确要拆开（「无门派不清技能，清空门派才清技能」）。
+        本方法自己要做的事：写 `@sect_id = 0` + 把 `@skills` 重置成职业自带
+        （= 游戏 `clear_skills` + `init_skills`，见 `actor_reset_skills_to_class`），
+        也就是「回到刚出生、没门派」的状态。
+
+        ⚠ 两件事都必须告知到（确认框里写清楚了）：
+          * `@sect_id = 0` 在游戏里是**减功能**：脚本 34699 / 34797 让快捷技能栏
+            不可用，35804 隐藏门派技能页；
+          * 清技能是**工具额外做的**，游戏自己换门派时**不会**清（`learn_skill`
+            只 push + 排序）→ 门派技能、技能书/剧情给的技能会一起没。
+        2026-09-27 第三轮补：**门派称谓也一起回收**（`@appellations`，
+        「五庄观弟子」这种）—— 见 `set_actor_sect_appellation`。真档里有
+        「已经无门派、却还挂着门派称谓」的角色，所以早退条件里也算上了它。
+        `@sect_data`（辅助/修炼）和属性一律不动。
+        """
+        if self.g is None or self.sv is None:
+            return
+        a = self.current_actor()
+        if a is None:
+            messagebox.showinfo("提示", "先在角色列表选一个角色。",
+                                parent=self.root)
+            return
+        nm = self.sv.actor_name(a)
+        old_id = self.g.actor_sect_id(a)
+        innate = set(self.g.actor_class_learnings(a))
+        cur = set(self.g.actor_skills(a))
+        drop = sorted(cur - innate)
+        # 称谓（@appellations）：门派称谓也得一起回收（2026-09-27 川指出）。
+        # ⚠ 真档里有「已经无门派、却还挂着门派称谓」的角色（李修远：@sect_id=0
+        #   但称谓是「五庄观弟子」）→ 早退条件里必须算上称谓，否则点了一直
+        #   说「无需改动」、称谓永远回收不掉。
+        apps, app_idx = self.g.actor_appellations(a)
+        cur_app = apps[app_idx] if 0 <= app_idx < len(apps) else None
+        old_apps = self.g.sect_appellations_of(a)
+        if old_id == 0 and not drop and not old_apps:
+            # 门派是 0、技能只剩天生、也没门派称谓 → 真没什么可做的
+            self.set_status("「%s」已经是「无门派」、技能也只剩天生技能、"
+                            "也没有门派称谓，无需改动" % nm)
+            return
+        old_nm = self.g.actor_sect_name(a) or "（认不出：@sect_id=%s）" % old_id
+        sname = self.g.valid_skill_ids()
+        lines = ["把「%s」改成「无门派」（@sect_id = 0）？" % nm, ""]
+        if old_id != 0:
+            lines.append("· 门派：%s → 无门派" % old_nm)
+            lines.append("  ⚠ 游戏里快捷技能栏、门派技能页都会不可用")
+        if drop:
+            keep_nm = "、".join("#%d %s" % (s, sname.get(s, ""))
+                               for s in sorted(innate))
+            lines.append("· 技能：%d 个 → 只剩职业自带的 %d 个"
+                         % (len(cur), len(innate)))
+            if keep_nm:
+                lines.append("  留下：%s" % keep_nm)
+            lines.append("  清掉 %d 个（含门派技能、技能书/剧情给的）" % len(drop))
+            lines.append("  ⚠ 游戏自己换门派不会清技能，这一步是工具额外做的")
+        else:
+            lines.append("· 技能：已经是只剩天生技能，不动")
+        if old_apps:
+            lines.append("· 称谓：回收「%s」" % "、".join(n for n, _s in old_apps))
+            lines.append("  ⚠ 游戏自己只加不删、也不让退门派，回收是工具额外做的")
+        else:
+            lines.append("· 称谓：没有门派称谓，不动")
+        if cur_app is not None and cur_app in [n for n, _s in old_apps]:
+            lines.append("  （显示的就是它 → 回收后改成不显示）")
+        lines.append("")
+        lines.append("辅助/修炼、属性不动。")
+        if not messagebox.askyesno("清空门派", "\n".join(lines),
+                                   parent=self.root):
+            return
+        try:
+            self.g.set_actor_sect(a, 0)
+            if drop:
+                self.g.actor_reset_skills_to_class(a)
+            removed, _added, _ap, _ai = self.g.set_actor_sect_appellation(a, 0)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        # ⚠ 这里和 `actor_set_sect` 相反：**把跟随标记清掉**（= 不认「已同步」），
+        #   让下面的 `load_actor` 重新同步下拉 —— 无门派角色现在会同步成
+        #   「无门派」（下拉里有这一项了），左栏清单收起并提示没门派。
+        self._sect_actor = None
+        keep = self.tv_actor.selection()
+        self.fill_actors(keep_id=keep[0] if keep else None)
+        self.load_actor()
+        if drop:
+            msg = ("「%s」已清成无门派，技能重置为天生技能 %d 个"
+                   % (nm, len(innate)))
+        else:
+            msg = "「%s」门派已清成「无门派」（技能本来就只有天生技能）" % nm
+        if removed:
+            msg += "，回收称谓「%s」" % "、".join(removed)
+        self.set_status("%s（游戏里快捷技能栏/门派技能页不可用；记得点「保存修改」）"
+                        % msg)
 
     def actor_skill_add(self):
         """把下拉里选的技能教给当前角色（已学过的不重复加）。"""
@@ -4385,7 +4686,7 @@ class App(object):
         """读本机机器码填进输入框（不写存档）。"""
         if not self.g:
             return
-        now, err, _ids, _ok = self.g.machine_status()
+        now, err, _ids, _ok = self.g.machine_status(refresh=True)
         if err:
             messagebox.showerror("取机器码", zh_error(err), parent=self.root)
             return
@@ -4439,7 +4740,7 @@ class App(object):
         """取本机机器码，直接替换存档记录（换机器玩最直接的做法）。"""
         if not self.g:
             return
-        now, err, ids, ok = self.g.machine_status()
+        now, err, ids, ok = self.g.machine_status(refresh=True)
         if err:
             messagebox.showerror("取机器码", zh_error(err), parent=self.root)
             return

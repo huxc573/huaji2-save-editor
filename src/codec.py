@@ -168,7 +168,13 @@ def codec_info(main_dll=None):
     return info
 
 
-def machine_id(main_dll=None):
+# 机器码是硬件值：一次会话里不会变，但每次都得起一个 32 位宿主（约 0.3s）。
+# 一次保存里「存盘前体检 / 概览页 / 机器码页」会问它三遍 → 在这儿记住。
+# 显式点「读本机机器码」这类按钮要传 refresh=True，否则换了硬件还读旧值。
+_MACHINE_CACHE = {}
+
+
+def machine_id(main_dll=None, refresh=False):
     """本机机器码：调用 `main.dll!get_hard_disk_character()`（游戏自己也这么取）。
 
     存档里 `$game_system.config[:hard_disk_code]` 就是这个值的数组；
@@ -177,19 +183,23 @@ def machine_id(main_dll=None):
     main_dll = main_dll or paths.main_dll()
     if not main_dll:
         raise CodecError("找不到 System/main.dll，请用环境变量 XJ_GAME 指定游戏目录")
+    hit = _MACHINE_CACHE.get(main_dll)
+    if hit is not None and not refresh:
+        return hit
     rc, txt = _run(["machine", main_dll])
     info, lines = parse_info(txt)
     mid = info.get("id")
     if rc != 0 or not mid:
         raise CodecError("取机器码失败（退出码 %d）：\n%s"
                          % (rc, "\n".join(lines[-6:])))
+    _MACHINE_CACHE[main_dll] = mid
     return mid
 
 
-def try_machine_id(main_dll=None):
+def try_machine_id(main_dll=None, refresh=False):
     """取机器码，取不到就返回 (None, 原因) —— 界面里不要因为这一步就崩。"""
     try:
-        return machine_id(main_dll), ""
+        return machine_id(main_dll, refresh=refresh), ""
     except Exception as e:
         return None, str(e)
 

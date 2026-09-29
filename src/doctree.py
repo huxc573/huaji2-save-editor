@@ -100,11 +100,17 @@ class Doc(object):
             new = M.serialize_doc(self.objects)
         else:
             new = self.engine.apply()
-        M.parse_stream(new)                    # 编不出来就别写，避免写坏档
         # 守卫：重解析 → 重序列化必须逐字节还原。对象编号一旦错位
         # （如 Bignum 占编号的约定不一致），这一步必然对不上，把坏档
         # 拦在写盘之前 —— 游戏读那种档会直接 NoMethodError。
-        if M.serialize_doc(M.parse_stream(new)) != new:
+        # ⚠ 只解析一次：一份 46 万字节的存档 parse_stream 要 ~0.5s，
+        #   以前这里解析两遍、末尾再解析一遍 = 1.5s 白花，保存卡就卡在这儿。
+        try:
+            objs = M.parse_stream(new)
+        except Exception as e:
+            raise ValueError("保存前自检失败：重写的字节解析不出来（%s）"
+                             "，已取消写入，原文件未动" % e)
+        if M.serialize_doc(objs) != new:
             raise ValueError("保存前自检失败：重写的字节不自洽"
                              "（对象编号错位），已取消写入，原文件未动")
         if backup and os.path.exists(path):
@@ -129,7 +135,7 @@ class Doc(object):
             os.remove(tmp)
         self.raw = new
         self.engine = patchwriter.PatchEngine(new)
-        self.objects = M.parse_stream(new)
+        self.objects = objs            # 复用自检那一次解析（同一个 new，语义一样）
         self.dirty = False
         self.structural = False
         return path
