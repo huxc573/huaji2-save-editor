@@ -75,6 +75,8 @@ TESTS = [
     ("gui", ["tests/test_gui.py"]),
     ("gui_quick", ["tests/test_gui_quick.py"]),
     ("actor_tab", ["tests/test_actor_tab.py"]),
+    ("db_embed", ["tests/test_db_embed.py"]),
+    ("bundle_db", ["tests/test_bundle_db_table.py"]),
     ("db_csv", ["tests/test_db_csv.py"]),
     ("smoke", ["tests/smoke.py"]),
     ("save_layer", ["tests/test_save_layer.py"]),

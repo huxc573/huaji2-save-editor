@@ -7,7 +7,7 @@
 > **内测版 / 其他版本是否可用无法验证** —— 存档数据结构和密钥可能随游戏版本变化，
 > 用前请先备份存档。
 >
-> 作者 **[@huxc573](https://github.com/huxc573)** · 开源协议 **MIT** · 当前版本 **v0.5.4**
+> 作者 **[@huxc573](https://github.com/huxc573)** · 开源协议 **MIT** · 当前版本 **v0.6.0**
 
 `huaji1-save-editor` 的迭代作品（画迹1 的编辑器见 `!Tools\Github\huaji1-save-editor`）。
 本作换了保护壳：`Data\*.rvdata2` 和存档都被 `System\main.dll` 加密，
@@ -74,15 +74,18 @@ v0.2 已经把三个密钥全部逆向出来，所以**现在是真的能用**�
 :: 2) 编译 32 位宿主（仓库里已经带了一份编译好的，改过 .cs 才需要重编）
 python tools\build_host.py
 
-:: 3) 跑测试（可选，但建议）—— 15 组
+:: 3) 跑测试（可选，但建议）—— 19 组
 python tools\run_tests.py
 
 :: 4) 开图形界面
 python src/huaji2_save_editor.py
 
-:: 5) 打包成 exe（需要 PyInstaller；会自动找仓库旁的 .venv）
+:: 5) 打包成 exe（需要 PyInstaller；会自动找仓库旁的 .venv）→ 顺带打出发行 zip
 python tools\build.py
 python tools\build.py --dll-dir     :: 宿主放进 dist\dll\ 子目录
+
+:: 5.5) 发版前自检：缺宿主时确实用不了（A 组 NG）/ 连宿主一起拷时 OK（B 组）
+python tools\check_pack.py
 
 :: 6) 发 GitHub Release（附件按 ASCII 命名，需要 gh 已登录）
 python tools\release.py
@@ -90,16 +93,20 @@ python tools\release.py --upload-only   :: Release 已存在，只重传附件
 ```
 
 打包产物在 `dist\`：`画迹2存档工具.exe` + `XJCodec32.exe`（**必须挨着 exe**，
-或放 `dll\` 子目录）+ `使用说明.txt` / `CHANGELOG.md`。`XJ_SELFTEST=1` 跑一次会写
-`selftest_result.txt` 自检报告。
+或放 `dll\` 子目录）+ `使用说明.txt`，最后自动打成
+**`huaji2-save-editor-vX.Y.Z.zip`**（Release 上**只挂这一个附件**）。
+`XJ_SELFTEST=1` 跑一次会写 `selftest_result.txt` 自检报告。
 
-> 本地产物名**固定不带版本号**（`dist\画迹2存档工具.exe`），重复打包不会堆版本文件。
-> GitHub Release 附件名只能用 ASCII（中文文件名会被平台自动改名），发布版附件叫
-> `huaji2-save-editor_v0.5.4.exe` + `XJCodec32.exe` + `USAGE.txt`
-> —— **跟仓库名保持一致 + 版本号**，内容分别就是 `dist\画迹2存档工具.exe` /
-> `dist\XJCodec32.exe` / `使用说明.txt`。
-> 命名规则写在 `tools/build.py`（`EXE_NAME` / `RELEASE_ASSETS`），发版直接跑
-> `python tools/release.py`。
+> 本地产物名**固定不带版本号**（`dist\画迹2存档工具.exe`），重复打包不会堆版本文件；
+> 版本号只出现在发行 zip 名上。命名规则写在 `tools/build.py`
+> （`EXE_NAME` / `ZIP_MEMBERS` / `RELEASE_ASSETS`），发版直接跑
+> `python tools\release.py`。
+>
+> **为什么只发一个 zip**（2026-09-30）：宿主 `XJCodec32.exe` 不在 onefile 里
+> （`codec.host_candidates()` 是在 **exe 所在目录**找它的），少了下它就弹
+> 「打开失败 / 缺少依赖」，整个工具都用不了。以前挂 exe / USAGE.txt /
+> XJCodec32.exe 三个附件，**总有人只下主程序** —— 和画迹1 v1.4.0 修掉的是同一个坑
+> （画迹1 那边漏下的是 `TP.dll` / `Socket.dll`）。
 
 界面会自动定位游戏目录和存档；找不到就设环境变量：
 
@@ -320,17 +327,20 @@ src\
   itemattr.py            物品的运行时内容（@attr）
   backup.py              存档备份 / 恢复
   changelog.py           内置更新日志（由 tools/build.py 生成）
-  tables\                游戏常量表（exp / sect / baby_aptitude，由 tools/gen_*.py 生成）
+  tables\                游戏常量表（exp / sect / baby_aptitude / db_table，由 tools/gen_*.py 生成）
+                          db_table.py = **内置名字表**（技能/物品/武器/防具/角色/门派），游戏目录读不到时兜底
   native\                XJCodec32.exe + codec32.cs（32 位宿主源码与编译产物）
-tests\              全部回归测试（17 组）：
+tests\              全部回归测试（19 组）：
   test_marshal  test_codec  test_model  test_roundtrip  test_semantic_equal
   test_game_layer  test_backup  test_baby  test_save_layer  test_db_csv
   test_gui  test_gui_quick  test_actor_tab  test_save_files  test_dist
+  test_db_embed（内置名字表）  test_bundle_db_table（打包版 + 坏 Data 端到端）
   smoke.py（全档冒烟）  verify_all.py（整档重写自检）
   probe_*.py          界面体检探针（只碰副本存档，跑完删）
 tools\              日常工具
   run_tests.py        一键回归；build.py / build_host.py / release.py 打包发版
-  gen_exp_table.py / gen_sect_table.py / gen_baby_data.py   生成 src\tables\
+  gen_exp_table.py / gen_sect_table.py / gen_baby_data.py / gen_db_table.py   生成 src\tables\
+  check_pack.py       发版前看门狗：验「只给主程序用不了、带上宿主才能用」
   clear_cheat.py      命令行清作弊标记    cleanup.py 清可重跑的中间产物
   normalize_eol.py    统一 LF    gitcheck.py 查行尾    pack_only.py 只打包不重编宿主
   re\                 逆向考古脚本（一次性探针，留着备查，平时不用）

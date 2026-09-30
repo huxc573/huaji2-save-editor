@@ -29,6 +29,7 @@ if not py:
     sys.exit("[NG] 没找到装了 PyInstaller 的解释器")
 b.log("用 %s（PyInstaller %s）打包" % (py, ver))
 exe = b.build_exe(py)
+b.pack_zip()
 b.log("")
 b.log("发行目录 %s：" % b.DIST)
 for n in sorted(os.listdir(b.DIST)):

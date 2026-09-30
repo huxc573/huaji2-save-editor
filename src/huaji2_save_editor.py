@@ -125,7 +125,8 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
       「角色 / 属性」里的"获得经验"
       「概览 / 快捷修改」里的"防作弊体检"（一键修复 + 清除作弊标记）
   另外「数据表 (CSV)」页把 Data\\*.rvdata2 转成 CSV 查表。
-  独立发行版：dist\\画迹2存档工具v0.4.exe（XJCodec32.exe 要挨着它放）。
+  独立发行版：Release 上只挂一个 zip（huaji2-save-editor-vX.Y.Z.zip），
+  解压出来的 画迹2存档工具.exe 和 XJCodec32.exe **必须放在同一个目录**。
 
 一、这个游戏的存档
   <游戏根>\\save.rvdata2（手动存档）
@@ -1872,15 +1873,17 @@ class App(object):
 
     # -------------------------------------------------- 4.6 召唤兽：新增/删除/名字/技能
     def _skills_meta(self):
-        """{技能 id: (名字, 描述)}（Data\\Skills 表，带缓存）。"""
+        """{技能 id: (名字, 描述)}（Data\\Skills 表，带缓存）。
+
+        走 `datatables.desc_map()`：读不到游戏目录会退回**内置名字表**，
+        所以技能一览 / 说明框在"没放在游戏目录里"的机器上照样有内容。
+        """
         if getattr(self, "_skill_meta", None) is None:
             meta = {}
             try:
-                _r, items = datatables.load("Skills")
-                for i, node in items:
-                    desc = datatables.s(node, "@description") or ""
-                    desc = desc.replace("\\n", " ").replace("\n", " ").strip()
-                    meta[i] = (datatables.s(node, "@name") or "", desc)
+                for i, (nm, desc) in datatables.desc_map("Skills").items():
+                    desc = (desc or "").replace("\\n", " ").replace("\n", " ").strip()
+                    meta[i] = (nm or "", desc)
             except Exception:
                 meta = {}
             self._skill_meta = meta
@@ -5120,6 +5123,12 @@ def main():
     root.protocol("WM_DELETE_WINDOW", lambda: _hard_exit(0))
 
     if selftest:
+        # ⚠ 先把 `__init__` 里排队的自动载入掐掉。它 200ms 后醒来会自己去 `load()`：
+        #   缺宿主（只拷了 exe、漏下 XJCodec32.exe）时 `load()` 会弹**模态**「打开失败」，
+        #   而模态框在无人值守的自检会话里没人点 → 进程挂死、`selftest_result.txt`
+        #   根本写不出来。这是**竞态**（时有时无，2026-09-30 在 tools/check_pack.py
+        #   的「只拷 exe」一组里实测到），所以不能靠运气，必须显式掐掉。
+        app.cancel_auto_load()
         root.update()
         lines = selftest_lines(app)
         out = os.path.join(codec.app_dir(), "selftest_result.txt")
@@ -5196,6 +5205,21 @@ def selftest_lines(app):
         L.append("防作弊体检 = %d 项，超限 %d 项"
                  % (len(rep), len([r for r in rep if r[3]])))
         L.append("物品计数校验 = %d 条" % len(g.security_rows()))
+        # 名字表这条要看的是：**读不到游戏目录时有没有顶上**（内置快照）。
+        # 打包版测试（tests/test_bundle_db_table.py）就靠下面两行断言。
+        import datatables as _dt
+
+        def _named(k):
+            # 只数"真有名字"的：Data 表里那些空占位槽不算，否则跟内置快照没法比
+            return len([v for v in _dt.name_map(k).values() if v])
+
+        L.append("名字表: %s（技能 %d 条有名字 / 物品 %d 条）"
+                 % (_dt.names_source("Skills"), _named("Skills"),
+                    _named("Items")))
+        L.append("技能名自检: 9=%s / 1=%s / 101=%s"
+                 % (_dt.name_map("Skills").get(9),
+                    _dt.name_map("Skills").get(1),
+                    _dt.name_map("Skills").get(101)))
         # 在内存里试一次结构性重写（不写盘）
         try:
             import marshal_ruby as _M

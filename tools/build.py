@@ -13,9 +13,17 @@
     XJCodec32.exe            自带的 32 位加解密宿主（**必须**和 exe 放一起，
                              或者放 dll/ 子目录；codec 会按顺序找）
     使用说明.txt
+    huaji2-save-editor-vX.Y.Z.zip  ← **唯一发到 Release 上的东西**（上面几个打成一个包）
 
 **不放进去的东西**：游戏自己的 `System\\main.dll`（有版权，而且运行期就是
 从用户自己的游戏目录加载的，和 huaji1 的做法一致）。
+
+**为什么发 zip 而不是一个个附件**（2026-09-30，照画迹1 v1.4.0 的教训）：
+宿主 `XJCodec32.exe` **不在** onefile 里（`codec.host_candidates()` 是在 exe 所在目录
+找它的），少了它就会弹「打开失败 / 缺少依赖」，整个工具都用不了。
+以前 Release 上挂 exe / USAGE.txt / XJCodec32.exe 三个附件，**总有人只下主程序**。
+实测（`python tools/check_pack.py`）：只把 exe 拷进临时目录跑自检 → `32 位宿主: 未找到`、
+`未加载存档`、`结果: NG`；连宿主一起拷 → `结果: OK`。
 
 打包踩过的坑：
   * tcl/tk 的脚本库不会被自动收集，必须 `--add-data` 带上，并在 `import tkinter`
@@ -36,22 +44,26 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.5.5"
+APP_VERSION = "0.6.0"
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
 # 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
-# 版本号只出现在 Release 附件名上（见下面的 RELEASE_EXE_NAME）。
+# 版本号只出现在发行包名上（见下面的 ZIP_NAME）。
 EXE_NAME = "画迹2存档工具"
 
 # GitHub Release 的附件名：平台对中文文件名会自动改名，所以一律用 ASCII，
 # **跟仓库名保持一致 + 版本号**（本地 dist\ 里的中文名不影响，内容同一个文件）。
 # 发 Release 别手敲名字，直接跑 `python tools/release.py`。
 REPO_NAME = "huaji2-save-editor"
-RELEASE_EXE_NAME = "%s_v%s.exe" % (REPO_NAME, APP_VERSION)
-# (dist 里的文件名, Release 上的附件名) —— 宿主和说明必须一起发
+# 发行包（zip）：dist 里打好一个包发出去，别人**不用再单独下依赖 exe**。
+# 本地名与 Release 上的名字一致，都是 ASCII（GitHub 会剔除资源名里的中文）。
+ZIP_NAME = "%s-v%s.zip" % (REPO_NAME, APP_VERSION)
+#: 打进 zip 的东西（dist 里的本地名，按这个顺序写进包）；解压出来就是一份能直接双击的完整工具
+ZIP_MEMBERS = [EXE_NAME + ".exe", "XJCodec32.exe", "使用说明.txt"]
+
+# (dist 里的文件名, Release 上的附件名) —— **唯一来源**，tools/release.py 读这里。
+# ⚠ 只有一个附件：宿主和说明必须跟主程序一起到用户手里，散着挂就会有人漏下。
 RELEASE_ASSETS = [
-    (EXE_NAME + ".exe", RELEASE_EXE_NAME),
-    ("XJCodec32.exe", "XJCodec32.exe"),   # 缺了它读不了存档
-    ("使用说明.txt", "USAGE.txt"),
+    (ZIP_NAME, ZIP_NAME),
 ]
 
 DIST = os.path.join(ROOT, "dist")
@@ -98,10 +110,27 @@ def build_host():
 # --------------------------------------------------------------------------
 # 2) 发行目录
 # --------------------------------------------------------------------------
+def check_usage_version():
+    """`使用说明.txt` 首行的版本号对不对（忘了改就会在自检里露馅）。
+
+    它是手写的静态文档，不像 CHANGELOG 有 gen_changelog 兜着；发版时最容易漏。
+    只提示不中断 —— 说明文档的版本号写岔了不该挡住打包。
+    """
+    path = os.path.join(ROOT, "使用说明.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = f.readline().strip()
+    except OSError:
+        return
+    if APP_VERSION not in first:
+        log("  ! 使用说明.txt 首行没写当前版本 %s：%s" % (APP_VERSION, first))
+
+
 def prepare(host_exe, use_dll_dir=False):
     os.makedirs(DIST, exist_ok=True)
     target_dir = os.path.join(DIST, "dll") if use_dll_dir else DIST
     os.makedirs(target_dir, exist_ok=True)
+    check_usage_version()
     gen_changelog()
     items = [(host_exe, HOST_NAME),
              (os.path.join(ROOT, "使用说明.txt"), "使用说明.txt"),
@@ -290,7 +319,38 @@ def build_exe(py):
 
 
 # --------------------------------------------------------------------------
-# 4) 自检（把 dist 拷到临时目录跑，确保不依赖源码）
+# 4) 打包成发行 zip
+# --------------------------------------------------------------------------
+def pack_zip(target_dir=None):
+    r"""把 dist 里的整套文件打成一个 zip（**发到 Release 的就是它**）。
+
+    人最容易漏的是 `XJCodec32.exe`（少了它读不了存档，弹「打开失败」），
+    打成一个包就不会漏。缺东西**直接报错退出**，绝不发半包。
+    """
+    import zipfile
+    base = target_dir or DIST
+    found = {}
+    for n in ZIP_MEMBERS:
+        cands = [os.path.join(base, n), os.path.join(base, "dll", n)]
+        p = next((c for c in cands if os.path.exists(c)), None)
+        if p is None:
+            raise SystemExit(
+                "dist 里还缺 %s —— 发行包不该少东西。\n"
+                "  先跑 python tools/build.py（宿主 XJCodec32.exe 由 build_host() "
+                "编译生成），确认它在 dist 根目录或 dist/dll/。" % n)
+        found[n] = p
+    dst = os.path.join(base, ZIP_NAME)
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+        for n in ZIP_MEMBERS:
+            # 一律平铺在压缩包根目录：解压出来就能双击，不用再挪文件
+            z.write(found[n], n)
+    log("已打包发行 zip：%s（%.2f MB，%d 个文件）"
+        % (ZIP_NAME, os.path.getsize(dst) / 1048576.0, len(ZIP_MEMBERS)))
+    return dst
+
+
+# --------------------------------------------------------------------------
+# 5) 自检（把 dist 拷到临时目录跑，确保不依赖源码）
 # --------------------------------------------------------------------------
 def selftest(exe):
     import tempfile
@@ -359,8 +419,12 @@ def kill_tree(pid):
     if os.name != "nt":
         return
     try:
+        # encoding/errors 必须给：taskkill 在中文系统上是 GBK 输出，
+        # 让 subprocess 按 UTF-8 硬解会在读线程里抛 UnicodeDecodeError
+        # （只留一段难看的 traceback，不影响结果但很吵）。
         subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid)],
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=30)
     except Exception:
         pass
 
@@ -371,7 +435,8 @@ def kill_leftover(name):
         return
     try:
         r = subprocess.run(["taskkill", "/f", "/im", name],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=20)
         if (r.stdout or "").strip():
             log("  清掉没退干净的进程：%s" % (r.stdout or "").strip()[:120])
     except Exception:
@@ -395,6 +460,7 @@ def main():
         return 1
     log("用 %s（PyInstaller %s）打包" % (py, ver))
     exe = build_exe(py)
+    pack_zip()
     log("")
     log("发行目录 %s：" % DIST)
     for n in sorted(os.listdir(DIST)):

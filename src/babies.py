@@ -116,8 +116,18 @@ class Babies(object):
         return self.actor_table().get(int(baby_id))
 
     def name_of(self, baby_id):
+        """召唤兽名。读不到 `Data\\Actors`（工具没放在游戏里 / 版本不符）时
+        退回内置名字表 —— 一览表里至少还认得出是哪只，不再是满屏空。
+        """
         n = self.actor_node(baby_id)
-        return (datatables.s(n, "@name") or "") if n is not None else ""
+        if n is not None:
+            nm = datatables.s(n, "@name") or ""
+            if nm:
+                return nm
+        try:
+            return datatables.name_map("Actors").get(int(baby_id), "") or ""
+        except (TypeError, ValueError):
+            return ""
 
     def data_key(self, baby_id):
         """Data\\Actors 的 @note 里的 `data = :池名`（没有就 None）。"""
@@ -138,31 +148,36 @@ class Babies(object):
         return bool(cfg) and cfg.get("type") == "神兽"
 
     def class_skill_ids(self, class_id):
-        """某个职业（= Data\\Classes[id]）的全部学习技能 id。"""
+        """某个职业（= Data\\Classes[id]）的全部学习技能 id。
+
+        走 `datatables.class_learnings()`：读不到游戏目录时退回**内置表**，
+        不然召唤兽技能克隆会以为这个职业一个技能都没有。
+        """
         try:
-            _r, classes = datatables.load("Classes")
-        except Exception:
+            return sorted(set(sid for _lv, sid
+                              in datatables.class_learnings(int(class_id))))
+        except (TypeError, ValueError):
             return []
-        for i, node in classes:
-            if i != int(class_id):
-                continue
-            arr = _deref(datatables.ivar(node, "@learnings"))
-            out = []
-            if isinstance(arr, M.ArrayNode):
-                for it in arr.items:
-                    f = _deref(it)
-                    sid = get_int(ivar(f, "@skill_id"), 0) if f is not None else 0
-                    if sid:
-                        out.append(sid)
-            return out
-        return []
 
     def known_names(self):
-        """游戏认识的召唤兽名字（Data\\Actors 里所有能当召唤兽的名字）。"""
+        """游戏认识的召唤兽名字（Data\\Actors 里所有能当召唤兽的名字）。
+
+        读不到 `Data\\Actors` 时退回内置名字表 —— 这份表只用来判断"名字对不对"，
+        内置表的覆盖面和游戏目录是同一份，够用。
+        """
         if self._names is None:
             self._names = {}
+            src = {}
             for i, node in self.actor_table().items():
                 nm = datatables.s(node, "@name") or ""
+                if nm:
+                    src[i] = nm
+            if not src:
+                try:
+                    src = dict(datatables.name_map("Actors"))
+                except Exception:
+                    src = {}
+            for i, nm in src.items():
                 if nm:
                     self._names.setdefault(nm, []).append(i)
         return self._names
@@ -491,12 +506,13 @@ class Babies(object):
 
     # ------------------------------------------------------------------ 技能克隆
     def valid_skill_ids(self):
-        """{技能 id: 名字}（Data\\Skills 表，带缓存）；拿不到表就返回空字典。"""
+        """{技能 id: 名字}（Data\\Skills 表，带缓存）。
+
+        走 `datatables.name_map()`（读不到游戏目录会退回内置名字表），拿不到就是空字典。
+        """
         if self._skill_ids is None:
             try:
-                _r, items = datatables.load("Skills")
-                self._skill_ids = dict(
-                    (i, datatables.s(n, "@name") or "") for i, n in items)
+                self._skill_ids = dict(datatables.name_map("Skills"))
             except Exception:
                 self._skill_ids = {}
         return self._skill_ids

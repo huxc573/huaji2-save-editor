@@ -102,7 +102,12 @@ def main():
             print("[NG] XJCodec32.exe 不在 exe 旁边")
         for l in bad:
             print("[NG] %s" % l)
-        print("判定 = %s" % ("OK" if not ok else "有问题"))
+        # ⚠ 必须带 `[OK]` / `[NG]` 标记：tools/run_tests.py 是按这两个标记数项的，
+        #    只打「判定 = OK」的话这一组会显示成「0 项」，看着像根本没跑。
+        good = (not ok) and host_ok and not bad
+        print("  [%s] 打包版自检结果 = %s"
+              % ("OK" if good else "NG", "OK" if good else "有问题"))
+        print("判定 = %s" % ("OK" if good else "有问题"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
@@ -113,8 +118,11 @@ def _kill_tree(pid):
     if os.name != "nt":
         return
     try:
+        # encoding/errors 必须给：taskkill 在中文系统上是 GBK 输出，硬按 UTF-8 解
+        # 会在读线程里抛 UnicodeDecodeError（不影响结果，但会打一段 traceback）
         subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid)],
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=30)
     except Exception:
         pass
 
@@ -125,7 +133,8 @@ def _kill_leftover(name):
         return
     try:
         r = subprocess.run(["taskkill", "/f", "/im", name],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=20)
         out = (r.stdout or "").strip()
         if out:
             print("（清掉没退干净的进程：%s）" % out[:120])

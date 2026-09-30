@@ -291,14 +291,21 @@ class GameEditor(object):
         """物品模板表：[(id, 名称, 说明), ...]（从 Data\\<kind>.rvdata2 读）。
 
         仿画迹1：右边一个可搜索的模板列表，选中后写进背包格子。
+        读不到游戏目录时退回**内置名字表**（只有 id/名字/说明）——列表还能用，
+        只是「克隆整件物品」那条路（`make_item`）仍需要 Data，另见那里的提示。
         """
         import datatables
-        _root, items = datatables.load(kind)
         kw = (keyword or "").strip().lower()
+        try:
+            _root, items = datatables.load(kind)
+            rows = [(i, datatables.s(node, "@name") or ("#%d" % i),
+                     (datatables.s(node, "@description") or ""))
+                    for i, node in items]
+        except Exception:
+            rows = datatables.builtin_rows(kind)
         out = []
-        for i, node in items:
-            nm = datatables.s(node, "@name") or ("#%d" % i)
-            desc = (datatables.s(node, "@description") or "").strip().replace("\r\n", "\n")
+        for i, nm, desc in rows:
+            desc = (desc or "").strip().replace("\r\n", "\n")
             if kw and kw not in nm.lower() and kw not in str(i) \
                     and kw not in desc.lower():
                 continue
@@ -577,20 +584,21 @@ class GameEditor(object):
         return self._name_map(kind).get(item_id, "?")
 
     def _desc_map(self, kind):
-        """Data 表的 {id: (名称, 完整说明)}（懒加载缓存，悬浮提示用）。"""
+        """Data 表的 {id: (名称, 完整说明)}（懒加载缓存，悬浮提示用）。
+
+        读不到游戏目录时 `datatables.desc_map()` 会退回内置表，所以这里不用再兜一次。
+        """
         if not getattr(self, "_desc_cache", None):
             self._desc_cache = {}
         if kind not in self._desc_cache:
             import datatables
             m = {}
             try:
-                _root, items = datatables.load(kind)
-                for i, node in items:
-                    nm = datatables.s(node, "@name") or ("#%d" % i)
-                    desc = (datatables.s(node, "@description") or "").strip()
-                    m[i] = (nm, desc)
+                pairs = datatables.desc_map(kind)
             except Exception:
-                pass
+                pairs = {}
+            for i, (nm, desc) in pairs.items():
+                m[i] = (nm or ("#%d" % i), (desc or "").strip())
             self._desc_cache[kind] = m
         return self._desc_cache[kind]
 
@@ -1558,13 +1566,15 @@ class GameEditor(object):
         return self.actor_set_skills(actor, [])
 
     def valid_skill_ids(self):
-        """{技能 id: 名字}（Data\\Skills 表，带缓存）—— 挑技能 / 校验用。"""
+        """{技能 id: 名字}（Data\\Skills 表，带缓存）—— 挑技能 / 校验用。
+
+        走 `datatables.name_map()`：读不到游戏目录会自动退回**内置名字表**，
+        所以这里不再单独兜底（原来读不到会整片空掉，技能一览全 `?`）。
+        """
         if getattr(self, "_skill_ids", None) is None:
             import datatables
             try:
-                _r, items = datatables.load("Skills")
-                self._skill_ids = dict(
-                    (i, datatables.s(n, "@name") or "") for i, n in items)
+                self._skill_ids = dict(datatables.name_map("Skills"))
             except Exception:
                 self._skill_ids = {}
         return self._skill_ids
@@ -1625,6 +1635,9 @@ class GameEditor(object):
 
         ⚠ 门派技能不从这里来（那是「门派」页点名学会的），别把两者混一起：
           角色 `@skills` = 职业自带（如 id 9「牛刀小试」）+ 本门派技能。
+
+        ⚠ 走 `datatables.class_learnings()`：读不到游戏目录时它退回**内置表**。
+          这里要是自己吞异常返回空，「清空门派」就会把技能清光而不是重置成天生技能。
         """
         import datatables
         cid = get_int(_deref(ivar(actor, "@class_id")), 0)
@@ -1637,21 +1650,9 @@ class GameEditor(object):
             return cache[key]
         out = []
         try:
-            _r, classes = datatables.load("Classes")
-            for i, node in classes:
-                if i != cid:
-                    continue
-                arr = _deref(ivar(node, "@learnings"))
-                if isinstance(arr, M.ArrayNode):
-                    for it in arr.items:
-                        f = _deref(it)
-                        if f is None:
-                            continue
-                        sid = get_int(ivar(f, "@skill_id"), 0)
-                        slv = get_int(ivar(f, "@level"), 0)
-                        if sid and slv <= lv:
-                            out.append(sid)
-                break
+            for slv, sid in datatables.class_learnings(cid):
+                if sid and slv <= lv:
+                    out.append(sid)
         except Exception:
             out = []
         out = sorted(set(out))

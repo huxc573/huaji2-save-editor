@@ -352,6 +352,8 @@ ALL_KEYS = [t[0] for t in TABLES]
 # 表键 -> (中文名, 文件, 是否默认)
 _INFO = {t[0]: t for t in TABLES}
 _cache = {}
+#: 名字实际是从哪来的（"游戏目录" / "内置表" / "无"），自检与排查用，见 `names_source()`
+_SOURCE = {}
 
 
 class DBError(Exception):
@@ -375,7 +377,11 @@ def _plain_path(key, game_dir):
         raise DBError("找不到 %s" % src)
     d = os.path.join(os.path.dirname(HERE), "tools", "_plain")
     os.makedirs(d, exist_ok=True)
-    out = os.path.join(d, "Data_%s.rvdata2.bin" % key)
+    # ⚠ 缓存名要带源文件指纹（大小 + mtime）。只按表名缓存的话，游戏更新换掉
+    #   `Data\\X.rvdata2` 之后会把**旧表**一直用下去 —— 静默读到过期数据。
+    st = os.stat(src)
+    tag = "%x" % (st.st_size ^ (int(st.st_mtime) << 20))
+    out = os.path.join(d, "Data_%s_%s.bin" % (key, tag))
     if not os.path.exists(out) or os.path.getsize(out) == 0:
         codec.decrypt_file(src, out)
     return out
@@ -405,20 +411,132 @@ def load(key, game_dir=None):
     return _cache[ck]
 
 
+def _builtin():
+    """内置表模块（`src/tables/db_table.py`）。**只在需要兜底时才 import** ——
+    那是一份 100 KB 出头的字典字面量，正常路径（读得到游戏目录）没必要付这个钱。
+    """
+    try:
+        from tables import db_table
+        return db_table
+    except Exception:
+        return None
+
+
+def names_source(key="Skills"):
+    """上一次查这张表的名字时**实际用的是哪一路**："游戏目录" / "内置表" / "无" / "未查过"。
+
+    纯排查与自检用（`XJ_SELFTEST` 会打出来），不参与任何业务判断。
+    """
+    return _SOURCE.get("names:%s" % key, "未查过")
+
+
 def name_map(key, game_dir=None):
-    """{id: 名称} —— 存档界面拿它把 id 显示成人能看懂的名字。"""
+    """{id: 名称} —— 存档界面拿它把 id 显示成人能看懂的名字。
+
+    读游戏目录**成功就用游戏目录**（跟「物品模板 / 克隆」同源，也最跟得上游戏版本）；
+    失败（工具没放在游戏里、版本不符、内测版解密被授权链拦住…）才退回内置表。
+    两条路都拿不到就是空字典 —— **绝不抛异常**，调用方照旧显示 `?`。
+    """
     game_dir = game_dir or paths.find_game_dir()
     ck = ("__names__", key, game_dir)
     if ck in _cache:
         return _cache[ck]
     out = {}
+    src = "无"
     try:
         for i, n in load(key, game_dir)[1]:
             out[i] = s(n, "@name")
+        if out:
+            src = "游戏目录"
     except Exception:
         out = {}
+    if not out:
+        b = _builtin()
+        if b is not None and b.names(key):
+            out = dict(b.names(key))
+            src = "内置表"
+    _SOURCE["names:%s" % key] = src
     _cache[ck] = out
     return out
+
+
+def desc_map(key, game_dir=None):
+    """{id: (名称, 完整说明)} —— 悬浮提示 / 技能说明框用。兜底规则同 `name_map`。"""
+    game_dir = game_dir or paths.find_game_dir()
+    ck = ("__descs__", key, game_dir)
+    if ck in _cache:
+        return _cache[ck]
+    out = {}
+    try:
+        for i, n in load(key, game_dir)[1]:
+            out[i] = (s(n, "@name") or "", s(n, "@description") or "")
+    except Exception:
+        out = {}
+    if not out:
+        b = _builtin()
+        if b is not None:
+            bn, bd = b.names(key), b.descs(key)
+            for i in sorted(set(bn) | set(bd)):
+                out[i] = (bn.get(i, ""), bd.get(i, ""))
+    _cache[ck] = out
+    return out
+
+
+def class_learnings(class_id, game_dir=None):
+    """某个职业的天生技能 → `[(等级, 技能 id), ...]`（Data\\Classes 的 `@learnings`）。
+
+    ⚠ 读不到 Data 表时**必须**退回内置表，不能返回空：`actor_class_learnings()` /
+    `class_skill_ids()` 拿它决定「清空门派」之后该给角色留哪些技能 —— 空列表会
+    让技能被清光，那是静默的错误行为，不是"显示难看"。
+    """
+    try:
+        cid = int(class_id)
+    except (TypeError, ValueError):
+        return []
+    game_dir = game_dir or paths.find_game_dir()
+    ck = ("__learn__", cid, game_dir)
+    if ck in _cache:
+        return _cache[ck]
+    out = []
+    try:
+        _root, classes = load("Classes", game_dir)
+        for i, node in classes:
+            if i != cid:
+                continue
+            arr = deref(ivar(node, "@learnings"))
+            if isinstance(arr, M.ArrayNode):
+                for it in arr.items:
+                    f = deref(it)
+                    if f is None:
+                        continue
+                    sid = val(f, "@skill_id")
+                    lv = val(f, "@level")
+                    if isinstance(sid, int) and sid:
+                        out.append((lv if isinstance(lv, int) else 1, sid))
+            break
+    except Exception:
+        out = []
+    if not out:
+        b = _builtin()
+        if b is not None:
+            out = [tuple(p) for p in b.learnings(cid)]
+    out = sorted(set(out))
+    _cache[ck] = out
+    return out
+
+
+def builtin_rows(key):
+    """内置表里这张表的 `[(id, 名称, 说明), ...]`（按 id 排）；没有就空表。
+
+    给 `GameEditor.templates()` 兜底用：读不到 `Data\\<Key>.rvdata2` 时，
+    「添加物品」的模板列表至少还能列出来（原来是一片空）。
+    """
+    b = _builtin()
+    if b is None:
+        return []
+    nm, ds = b.names(key), b.descs(key)
+    return [(i, nm.get(i) or ("#%d" % i), ds.get(i, ""))
+            for i in sorted(set(nm) | set(ds))]
 
 
 def _cell(node, spec):
