@@ -275,39 +275,119 @@ class SaveDoc(object):
     def _data_array(self, section):
         return _deref(ivar(self.section(section), "@data"))
 
-    def get_switch(self, i):
-        arr = self._data_array("switches")
-        if arr is None or i < 0 or i >= len(arr.items):
+    # ------------------------------------------------------------ 开关 / 变量
+    #
+    # ⚠ **两个游戏版本结构不同**，这里统一兼容（2026-10-02 实测）：
+    #   尝鲜版 v0.x：`variables` 是 **ArrayNode**（下标 = 变量编号）
+    #   内测版 V2.201：`variables` 是 **HashNode**（键 = 变量编号 → 值）
+    #     实测该档`hash_put_pairs` 只有 3 对：{2=>11, 1=>1, 7=>1}，
+    #     而 Array 版本同样的位置是 30 个变量 ⇒ **不能按位置当编号用**。
+    #   `switches` 两版都是 ArrayNode，但 V2.201 里未用到的位是 `nil`（不是 false），
+    #   所以取值一律走 `_switch_value()` 归一。
+    #
+    # `_switch_len` / `_var_len` / `_var_pairs` 三个辅助把差异收在一处，
+    # 上面的 get/set 只管按编号读写。
+    def _switch_arr(self):
+        return self._data_array("switches")
+
+    def _switch_len(self):
+        a = self._switch_arr()
+        if a is None or not hasattr(a, "items"):
+            return 0
+        return len(a.items)
+
+    def _switch_value(self, i):
+        """第 i 个开关的值；空位（nil）算False。"""
+        a = self._switch_arr()
+        if a is None or not hasattr(a, "items") or i < 0 or i >= len(a.items):
             return None
-        return bool(M.value_of(_deref(arr.items[i])))
+        v = M.value_of(_deref(a.items[i]))
+        return bool(v) if v is not None else False
+
+    def _var_is_hash(self):
+        a = self._data_array("variables")
+        return isinstance(a, M.HashNode) or hasattr(a, "pairs")
+
+    def _var_pairs(self):
+        """`[(编号, 值节点), ...]`，两种结构都归一成这个。"""
+        a = self._data_array("variables")
+        if a is None:
+            return []
+        if self._var_is_hash():
+            out = []
+            for k, v in hash_put_pairs(a):
+                kid = M.value_of(_deref(k))
+                if isinstance(kid, int):
+                    out.append((kid, v))
+            return out
+        return list(enumerate(a.items))
+
+    def _var_len(self):
+        """「变量总数」。
+
+        ⚠ Hash 版（V2.201）是**稀疏**的：实测只有 `{2=>11, 1=>1, 7=>1}` 三个键，
+        编号 0/3/4/5/6 **根本不存在**。所以
+          * 报`max(键)+1`（=8）是**误导** —— 让人以为能写 0；
+          * 报「键的个数」（=3）同样不对 —— 键 7 明明在。
+        这里只用于**错误提示**，所以给「实际存在的编号数」并在提示里说清是稀疏的；
+        真正的能不能写，由 `_var_node()` 说了算（不存在就抛 IndexError）。
+        """
+        a = self._data_array("variables")
+        if a is None:
+            return 0
+        if self._var_is_hash():
+            return len(self._var_pairs())
+        return len(a.items) if hasattr(a, "items") else 0
+
+    def _var_hint(self):
+        """错误提示用：这个版本 variables 的实际编号长什么样。"""
+        a = self._data_array("variables")
+        if a is not None and self._var_is_hash():
+            ids = sorted(i for i, _ in self._var_pairs())
+            return "（本版本 variables 是稀疏哈希，只有编号 %s 存在）" % (
+                "、".join(str(i) for i in ids) if ids else "无")
+        return ""
+
+    def _var_node(self, i):
+        """第 i 个变量的**值节点**（可直接给 set_value）；没有返回 None。"""
+        a = self._data_array("variables")
+        if a is None:
+            return None
+        if self._var_is_hash():
+            for kid, v in self._var_pairs():
+                if kid == i:
+                    return _deref(v)
+            return None
+        if i < 0 or not hasattr(a, "items") or i >= len(a.items):
+            return None
+        return _deref(a.items[i])
+
+    def get_switch(self, i):
+        return self._switch_value(i)
 
     def set_switch(self, i, value):
-        arr = self._data_array("switches")
-        if arr is None or i < 0 or i >= len(arr.items):
+        a = self._switch_arr()
+        if a is None or not hasattr(a, "items") or i < 0 or i >= len(a.items):
             raise IndexError("开关 %d 超出范围（共 %d 个）"
-                             % (i, 0 if arr is None else len(arr.items)))
-        self.doc.set_value(_deref(arr.items[i]), bool(value))
+                             % (i, self._switch_len()))
+        self.doc.set_value(_deref(a.items[i]), bool(value))
         return bool(value)
 
     def get_variable(self, i):
-        arr = self._data_array("variables")
-        if arr is None or i < 0 or i >= len(arr.items):
-            return None
-        return M.value_of(_deref(arr.items[i]))
+        n = self._var_node(i)
+        return None if n is None else M.value_of(n)
 
     def set_variable(self, i, value):
-        arr = self._data_array("variables")
-        if arr is None or i < 0 or i >= len(arr.items):
-            raise IndexError("变量 %d 超出范围（共 %d 个）"
-                             % (i, 0 if arr is None else len(arr.items)))
-        self.doc.set_value(_deref(arr.items[i]), int(value))
+        n = self._var_node(i)
+        if n is None:
+            raise IndexError("变量 %d 不存在%s"
+                             % (i, self._var_hint()))
+        self.doc.set_value(n, int(value))
         return int(value)
 
     def counts(self):
-        sw = self._data_array("switches")
-        va = self._data_array("variables")
-        return (len(sw.items) if sw is not None else 0,
-                len(va.items) if va is not None else 0)
+        # ⚠ 不能直接摸 `arr.items`：V2.201 的 variables 是 HashNode（没有 .items）
+        return (self._switch_len(), self._var_len())
 
     # ------------------------------------------------------------ 角色
     def actors(self):

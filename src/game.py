@@ -2240,8 +2240,15 @@ class GameEditor(object):
             rows.append((name, cur, limit, cur is not None and cur > limit, why))
 
         def eq_row(name, cur, want, why):
-            rows.append((name, cur, want,
-                         cur is None or cur != want, why))
+            # ⚠ `cur is None`＝**这个版本根本没有这笔账**（不是「账错了」）。
+            #   V2.201 的 `security` 是空 HashNode（游戏压根没建金钱/物品计数账），
+            #   而 V0.x 存档里 `cur=None` 是「读失败」—— 两种含义不同，
+            #   混为一谈会让 V2.201 一打开就报一堆假异常。
+            #   所以：读不到 → 不标红（灰着），只提示"本版本无此校验"。
+            if cur is None:
+                rows.append((name, "本版本无此校验", "—", False, why))
+            else:
+                rows.append((name, cur, want, cur != want, why))
 
         # ① Lock 校验和
         bad_locks = self.sv.check_locks()
