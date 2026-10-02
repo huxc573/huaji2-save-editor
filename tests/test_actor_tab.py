@@ -574,7 +574,7 @@ def main():
                            [d1.get(k) for k in OTHERS]))
 
     # ---- 10) 改门派（2026-09-27 新增：「转门派」按钮 = 只写 @sect_id）
-    #   查证见 `docs/门派修改可行性.md`：门派就一个整数，`@skills`/`@sect_data`
+    #   查证见 `docs/待解决问题.md`「门派修改」：门派就一个整数，`@skills`/`@sect_data`
     #   都不动（游戏里换门派也这样，learn_skill 从不清理旧技能）。
     print("\n--- 10) 改门派 ---")
     _guard_real_save(app, paths.save_path())
