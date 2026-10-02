@@ -253,11 +253,28 @@ VARIABLE_NAMES = {
 # --------------------------------------------------------------------------
 PACK_PAGE_SIZE = 20      # 游戏里 pack(page) = container[page*20 + i]
 PACK_PAGES = 4           # Game_Party::MAX_PACK_PAGE
-MAX_GOLD = 30000000      # Config::Game::MAX_GOLD
+
+# ⚠⚠ **内测版 V2.201 的上限与尝鲜版差着2.5 倍**（2026-10-03 按脚本
+#    `Config::Game` 逐个抄正，位置：`script00_00000020.rb` 第 38273-38292 行）。
+#    用错尝鲜版的值会**实际伤害**：改等级超过 60 会被工具自己压回 60，
+#    而游戏其实允许到 155 ⇒ 白改。
+# ┌──────────────────┬────────────┬────────────┐
+# │ 常量│ 尝鲜版│ **V2.201** │
+# ├──────────────────┼────────────┼────────────┤
+# │ MAX_GOLD│ 30,000,000 │ **9,999,999,999** │
+# │ MAX_LEVEL_ACTOR   │ 60         │ **155**    │
+# │ MAX_LEVEL_BABY    │ 65         │ **165**    │
+# │ MAX_WAREHOUSE     │ [0, 3]     │ **[0, 12]** │
+# │ MAX_BABY_LIFE     │ 12000      │ **14000**  │
+# │ MAX_ITEM          │ 99         │ 99（相同） │
+# └──────────────────┴────────────┴────────────┘
+MAX_GOLD = 9999999999   # Config::Game::MAX_GOLD
 MAX_ITEM = 99            # Config::Game::MAX_ITEM
-MAX_LEVEL_ACTOR = 60
-MAX_LEVEL_BABY = 65
-MAX_BABY_LIFE = 12000
+MAX_LEVEL_ACTOR = 155   # Config::Game::MAX_LEVEL_ACTOR（尝鲜版 60）
+MAX_LEVEL_BABY = 165    # Config::Game::MAX_LEVEL_BABY （尝鲜版 65）
+#: 仓库页数上限：`Config::Game::MAX_WAREHOUSE = [0, 12]`（尝鲜版是 [0, 3]）
+MAX_WAREHOUSE = 12
+MAX_BABY_LIFE = 14000    # Config::Game::MAX_BABY_LIFE（尝鲜版 12000）
 MAX_BABY_LOYALTY = 100    # Config::Game::MAX_BABY_LOYALTY（add_loyalty 里 limit 到它）
 #: 低于这个数召唤兽不能参战（游戏 `Config::Baby::ALLOW_LOYALTY`）。
 #: ⚠ 不是 100：100 只是上限，能上战场的门槛是 60。

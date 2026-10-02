@@ -6,26 +6,37 @@
 和 `save.SaveDoc` 的分工：
   * `save` 管**存档骨架**（分区、Lock、开关变量、角色基础字段）；
   * 这里管**游戏玩法数据**（背包 4 页×20 格、召唤兽资质、经验、以及游戏的
-    `$jiance` 周期性反作弊检查 和 `Change` 物品计数校验）。
+    `Lock` 校验和 与 `Change` 物品计数校验）。
 
-防作弊（v0.4 新发现，见 docs/逆向过程.md）：
+⚠⚠ **内测版 V2.201 与尝鲜版的防作弊机制差别很大**（2026-10-03 按脚本实测），
+   下面第1 类**在 V2.201 里根本不存在**：
 
-1. **周期检查**（脚本 29455 行起，每 300 帧一次）：
-       $jiance = [MAX_LEVEL_ACTOR*761205, MAX_LEVEL_BABY*761205,
-                  MAX_GOLD*654321, MAX_WAREHOUSE[1]*159753]
-       任一角色 level > 60               → 作弊
-       某角色当前召唤兽 level > 65        → 作弊
-       $game_party.gold > 30,000,000      → 作弊
-       $game_party.hash[:warehouse_page]>3→ 作弊
-       a.attr.point_num > a.level*10+500  → 作弊   （point_num = 体质+法力+力量+耐力+敏捷）
-   一旦被判定作弊：`$game_system.cheated = Graphics.frame_count`，
-   游戏内 20 分钟后弹警告、25 分钟后 `msgbox "存档异常！" + exit`。
-   ⇒ 改数值时**必须**守住这些上限；本模块提供"体检 + 一键按规则修复 + 清除作弊标记"。
+1. ~~**周期检查**（`$jiance`，尝鲜版脚本 29455 行起每 300 帧一次）~~ ——
+   ⚠ **V2.201 脚本里 `cheated` / `作弊` / `$jiance` 三个关键词全部搜不到**，
+   存档里也没有 `@cheated` / `@keyword` 字段、`$game_system.security` 是**空的**。
+   ⇒ V2.201 **没有周期检查、没有作弊标记、没有物品记账校验**。
+   但**上限常量还在**（`Config::Game`，脚本第 38273-38292 行），只是不再用来判作弊：
 
-2. **物品计数校验**：游戏给物品记了一笔"累计获得数量"，
+   | 常量 | 尝鲜版 | **V2.201** |
+   | --- | --- | --- |
+   | `MAX_LEVEL_ACTOR` | 60 | **155** |
+   | `MAX_LEVEL_BABY` | 65 | **165** |
+   | `MAX_GOLD` | 30,000,000 | **9,999,999,999** |
+   | `MAX_WAREHOUSE` | [0, 3] | **[0, 12]** |
+   | `MAX_BABY_LIFE` | 12000 | **14000** |
+
+   ⇒ 工具的「体检」在 V2.201 上仍按这些上限**提示超限**（有用：超了游戏也不正常），
+   但**不再说「会被判作弊」**。上限值已按 V2.201 改到 `fieldnames`。
+
+2. **Lock 校验和**（**两个版本都有**，V2.201 脚本第 867 行）：
+   `get_encryption(v) = v * 91 + 45 + seed / 800`（seed = `$game_system.seeds[:shield]`），
+   金钱等关键数值被它包着。游戏读的时候会验算，不一致就报错。
+   ⇒ 本模块改金钱时自动重算 `@master`。**这是 V2.201 仅存的防作弊**。
+
+3. **物品计数校验**（尝鲜版才有）：游戏给物品记"累计获得数量"，
    存在 `$game_system.security[:items][id]`（`Change` 对象，逐位数字 AES-ECB 加密）。
-   改背包数量后如果不同步，游戏下次**合法获得**同一件物品时会发现对不上 → 记作弊。
-   ⇒ 本模块改数量/加物品时自动同步（AES 实现在 `aes`，密钥来自游戏脚本第 1142 行）。
+   ⚠ **V2.201 的 security 是空 HashNode，没这套账** —— 改背包不会被逮到。
+   下面的同步逻辑在 V2.201 上是**无害的空操作**，保留是为了两个版本共用一套代码。
 """
 import os
 import random
@@ -44,15 +55,19 @@ from tables import sect  # noqa: E402   # 门派表（游戏脚本里的 $sects�
 from tables import sect_appellation  # noqa: E402   # 门派称谓表（拜师事件里抠的，tools/gen_sect_appellation.py 生成）
 from save import _deref, _as_str, ivar, hash_get, hash_put_pairs  # noqa: E402
 
-# 游戏里的上限（Config::Game + $jiance）
+# 游戏里的上限（**V2.201 实测值**，全部来自脚本 `Config::Game`，见 fieldnames 里的对照表）
 MAX_LEVEL_ACTOR = fieldnames.MAX_LEVEL_ACTOR
 MAX_LEVEL_BABY = fieldnames.MAX_LEVEL_BABY
 MAX_GOLD = fieldnames.MAX_GOLD
-# 改金钱一旦超过上限，不压到"贴着上限"，而是压到上限的 5/6（= 25,000,000）：
-# 离 30,000,000 的判定线留出余量，游戏里再正常获得金钱也不会一脚踩过线。
-SAFE_GOLD = MAX_GOLD * 5 // 6       # 留 1/6 安全余量，避免贴着上限被周期检查
+# 改金钱一旦超过上限，不压到"贴着上限"，而是压到上限的 5/6：
+# 离判定线留出余量，游戏里再正常获得金钱也不会一脚踩过线。
+# ⚠ V2.201 的 MAX_GOLD 是 9,999,999,999（尝鲜版 30,000,000）⇒ SAFE_GOLD 约 83 亿。
+#   V2.201 实际已无`$jiance` 判作弊（见模块文档），留余量只是为了别贴死上限。
+SAFE_GOLD = MAX_GOLD * 5 // 6       # 留 1/6 安全余量
 MAX_ITEM = fieldnames.MAX_ITEM
-MAX_WAREHOUSE_PAGE = 3
+#: 仓库页号上限。**V2.201 是 12**（`Config::Game::MAX_WAREHOUSE = [0, 12]`），
+#: 尝鲜版只有 3 —— 沿用旧值会把合法的 4~12 页当成超限去"修"。
+MAX_WAREHOUSE_PAGE = fieldnames.MAX_WAREHOUSE
 MAX_BABY_LIFE = fieldnames.MAX_BABY_LIFE
 MAX_BABY_LOYALTY = fieldnames.MAX_BABY_LOYALTY
 #: 低于它不能参战（`Config::Baby::ALLOW_LOYALTY`）—— 和 100 那个上限是两回事
@@ -2259,26 +2274,32 @@ class GameEditor(object):
                       "直接改值会对不上：%r" % (bad_locks[:3],))
                      if bad_locks else "所有 Lock 的 @master 都对得上"))
 
-        # ② $jiance 周期检查
+        # ② 上限检查（**V2.201 已无 `$jiance` 判作弊**，这里只提示「超出游戏常量」）
+        #⚠ 措辞按内测版改过：尝鲜版超限会被周期检查判作弊、20分钟后弹窗强退；
+        #   V2.201 脚本里`cheated`/`$jiance` **完全不存在**，超限只是"不正常"，
+        #   不会被游戏惩罚 —— 所以别再吓唬用户。
         gold = self.sv.gold()
-        row("金钱", gold, MAX_GOLD, "游戏每 300 帧检查一次，超了算作弊；"
-                                    "工具改钱超过上限会自动压到 %d" % SAFE_GOLD)
+        row("金钱", gold, MAX_GOLD,
+            "Config::Game::MAX_GOLD = %d（内测版无周期检查，超了不会被判作弊，"
+            "但别贴着上限）；工具改钱超过上限会自动压到 %d" % (MAX_GOLD, SAFE_GOLD))
         row("仓库页号 warehouse_page", self.warehouse_page(), MAX_WAREHOUSE_PAGE,
-            "同上")
+            "Config::Game::MAX_WAREHOUSE = [0, %d]" % MAX_WAREHOUSE_PAGE)
         for aid, a in self.sv.actors():
             nm = self.sv.actor_name(a) or ("角色%d" % aid)
             row("%s 等级" % nm, get_int(ivar(a, "@level")), MAX_LEVEL_ACTOR,
-                "上限来自 Config::Game::MAX_LEVEL_ACTOR")
+                "Config::Game::MAX_LEVEL_ACTOR = %d" % MAX_LEVEL_ACTOR)
             pn = self.point_num(a)
             lim = get_int(ivar(a, "@level")) * 10 + 500
             rows.append(("%s 五维总点数" % nm, pn, lim, pn > lim,
-                         "上限 = 等级*10+500（体质+法力+力量+耐力+敏捷）"))
+                         "参考线 = 等级*10+500（体质+法力+力量+耐力+敏捷）"))
             for i, b in self.babies(a):
                 row("%s 的召唤兽「%s」等级" % (nm, self.baby_name(b)),
                     get_int(ivar(b, "@level")), MAX_LEVEL_BABY,
-                    "上限来自 Config::Game::MAX_LEVEL_BABY")
+                    "Config::Game::MAX_LEVEL_BABY = %d" % MAX_LEVEL_BABY)
 
-        # ③ Change 记账
+        # ③ Change 记账（⚠ V2.201 的 security 是空 HashNode ⇒ 下面全部走
+        #    「本版本无此校验」分支、**不标红**。这段是尝鲜版的逻辑，
+        #    保留是为了两个版本共用一套代码，在 V2.201 上无害。）
         # 金钱账：最容易漏 —— 以前工具改钱不同步它，玩一会儿必被记 'NE!'
         rec_gold = self.security_gold()
         eq_row("金钱记账 security[:gold]", rec_gold, gold,
