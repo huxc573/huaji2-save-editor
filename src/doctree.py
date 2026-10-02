@@ -14,7 +14,12 @@
 文件本身用 `main.dll` 的 `decryption_file` / `encryption_file` 加密，
 密钥 = `tiyan_version`（见 codec.KEY_SAVE），本模块会自动选密钥。
 
-写回时先做 Marshal 重写 → 再加密，并且会备份 `*.bak.<时间戳>`。
+⚠ **内测版 V2.201 的存档格式不一样**（`save_v201.py`：AES-128-ECB + Zlib，
+口令 `153ad4v3fbdgbgd` 零补齐 16 字节），由 `codec` 自动分流。
+本模块用 `self.v201` 记住打开时是哪种格式 —— 保存时必须按**同一种**格式写回去，
+选错会写出游戏读不了的坏档（而且不报错，是最坏的一类 bug）。
+
+写回时先做Marshal 重写 → 再加密，并且会备份 `*.bak.<时间戳>`。
 """
 import os
 import shutil
@@ -32,6 +37,7 @@ import codec  # noqa: E402
 import patchwriter  # noqa: E402
 import paths  # noqa: E402
 import marshal_ruby as M  # noqa: E402
+import save_v201  # noqa: E402
 
 
 class Doc(object):
@@ -44,6 +50,7 @@ class Doc(object):
         self.objects = []              # [{'head':..,'node':..,'links':..}, ...]
         self.plain = False             # 打开时是不是明文
         self.plain_key = None          # 打开密文时用的密钥
+        self.v201 = False              # 是不是内测版 V2.201 存档（AES+Zlib，见 save_v201）
         self.dirty = False
         self.structural = False        # 有没有"加减对象"的改动（见 save）：
         #                                标量改动走区间补丁；一旦新增/删除了对象，
@@ -56,13 +63,26 @@ class Doc(object):
     def load(self, path):
         self.path = path
         self.plain = codec.looks_like_marshal(path)
+        self.v201 = False
         if self.plain:
             self.raw = open(path, "rb").read()
         else:
+            # 先试内测版 V2.201 通道（AES-128-ECB+Zlib，纯 Python、不需要宿主）；
+            # 认出来就记进 self.v201 —— 保存时必须按同一种格式写回去。
+            plain = None
+            if save_v201.is_v201_candidate(path):
+                try:
+                    plain = save_v201.decode(open(path, "rb").read())
+                    self.v201 = True
+                except Exception:
+                    plain = None
             tmp = path + ".xj_plain"
-            codec.decrypt_file(path, tmp)
-            self.plain_key = codec.key_used_for(path)
-            self.raw = open(tmp, "rb").read()
+            if plain is None:
+                codec.decrypt_file(path, tmp)
+                self.plain_key = codec.key_used_for(path)
+                self.raw = open(tmp, "rb").read()
+            else:
+                self.raw = plain
             try:
                 os.remove(tmp)
             except OSError:
@@ -130,8 +150,15 @@ class Doc(object):
         else:
             tmp = path + ".xj_new"
             open(tmp, "wb").write(new)
-            key = getattr(self, "plain_key", None) or codec.key_used_for(path)
-            codec.encrypt_file(tmp, path, key)
+            #⚠ 内测版 V2.201 存档必须走 save_v201 通道（AES-128-ECB+Zlib）。
+            #  `tmp` 是明文临时文件、名字里没有 save 字样，光看文件名判断不出
+            #  该用哪种加密 —— 而选错会写出一个游戏读不了的坏档（且不报错）。
+            #  `self.v201` 是 load() 当时认出来的，最可靠。
+            if getattr(self, "v201", False):
+                save_v201.encrypt_file(tmp, path)
+            else:
+                key = getattr(self, "plain_key", None) or codec.key_used_for(path)
+                codec.encrypt_file(tmp, path, key)
             os.remove(tmp)
         self.raw = new
         self.engine = patchwriter.PatchEngine(new)

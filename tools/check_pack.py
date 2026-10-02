@@ -34,7 +34,7 @@ sys.path.insert(0, SRC)
 import paths  # noqa: E402
 
 DIST = os.path.join(ROOT, "dist")
-EXE = os.path.join(DIST, "画迹2存档工具.exe")
+EXE = os.path.join(DIST, "画迹2内测版存档工具.exe")
 HOST = os.path.join(DIST, "XJCodec32.exe")
 TMPROOT = os.path.join(os.environ.get("TEMP", "."), "xj_pack")
 

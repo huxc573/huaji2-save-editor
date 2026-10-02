@@ -9,7 +9,7 @@
 
 发行目录（dist/）里有什么：
 
-    画迹2存档工具.exe        PyInstaller 单文件 exe（内含 tcl/tk 脚本库）
+    画迹2内测版存档工具.exe  PyInstaller 单文件 exe（内含 tcl/tk 脚本库）
     XJCodec32.exe            自带的 32 位加解密宿主（**必须**和 exe 放一起，
                              或者放 dll/ 子目录；codec 会按顺序找）
     使用说明.txt
@@ -44,7 +44,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "2.201-beta.2"
+APP_VERSION = "2.201-beta.3"
 # 版本线（2026-10-02 川定）：本分支（`beta`）是**内测版**的开发线，独立于尝鲜版的 v0.x 线。
 #
 # 版本号 = **游戏版本号 + SemVer 预发布后缀**：`2.201-beta.2`
@@ -65,9 +65,12 @@ APP_VERSION_LINE = "beta"  # 本分支对应的发版分支（gh release --targe
 #:   不依赖平台推断 —— 免得哪次版本号写成 `2.201-beta.x` 之外的形状就悄悄变成正式版。）
 APP_PRERELEASE = True
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
-# 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
+# 画迹2内测版存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
 # 版本号只出现在发行包名上（见下面的 ZIP_NAME）。
-EXE_NAME = "画迹2存档工具"
+# ⚠ 带「内测版」三字（2026-10-02 川定）：本分支是**内测版 V2.201** 的修改器，
+#   与main（尝鲜版 v0.x 线）并存，必须一眼能分清装的是哪个 —— 两者存档格式不通用，
+#   拿错就会「打不开存档」。exe 名跟着变，界面标题栏也跟着变（APP_NAME）。
+EXE_NAME = "画迹2内测版存档工具"
 
 # GitHub Release 的附件名：平台对中文文件名会自动改名，所以一律用 ASCII，
 # **跟仓库名保持一致 + 版本号**（本地 dist\ 里的中文名不影响，内容同一个文件）。
@@ -219,8 +222,10 @@ def sweep_old_exes(keep):
     """把 dist 里**旧命名的**主程序删掉（留着容易点错版本）。
 
     历史产物名带版本号（`画迹2存档工具v0.5.4.exe`），现在固定叫
-    `画迹2存档工具.exe` —— 打包时顺手清掉以前留下的那些。
-    只认 `画迹2存档工具` 前缀，不碰宿主 XJCodec32.exe。
+    `画迹2内测版存档工具.exe` —— 打包时顺手清掉以前留下的那些。
+    ⚠ 认**两个**前缀：老的 `画迹2存档工具`（v0.x 时代留下的）和新的
+    `画迹2内测版存档工具`。别只认新的 —— dist 里躺着旧名 exe 会让人
+    以为是两个工具，其实一个是死的。不碰宿主 XJCodec32.exe。
     """
     try:
         names = sorted(os.listdir(DIST))
@@ -229,7 +234,8 @@ def sweep_old_exes(keep):
     for n in names:
         if not n.endswith(".exe") or n == keep:
             continue
-        if not n.startswith("画迹2存档工具"):
+        if not (n.startswith("画迹2内测版存档工具")
+                or n.startswith("画迹2存档工具")):
             continue
         try:
             os.remove(os.path.join(DIST, n))

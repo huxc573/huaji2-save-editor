@@ -79,14 +79,17 @@ class _IV(object):
     def none(obj, name, default=None):
         return save._deref(save.ivar(obj, name))
 
-APP_NAME = "画迹2 存档工具"
+# ⚠ 带「内测版」（2026-10-02川定）：本分支适配**内测版 V2.201**，
+#   与 main（尝鲜版 v0.x）并存且存档格式不通用 —— 标题必须一眼分清，
+#   否则用户对着尝鲜版存档用内测版工具，只会看到"打不开"。
+APP_NAME = "画迹2 内测版存档工具"
 try:
     # 版本号单一来源 = tools/build.py 的 APP_VERSION（它生成 changelog.py）；
     # 界面标题 / 关于 / 帮助头都从这里取，升级只改 build.py 一处。
     import changelog as _xj_cl
     VERSION = "v" + _xj_cl.VERSION
 except Exception:               # changelog 缺失时兜底（别让它再变成第二处真源）
-    VERSION = "v0.5.4"
+    VERSION = "v2.201-beta.2"
 AUTHOR = "huxc573"
 HOMEPAGE = "https://github.com/huxc573/huaji2-save-editor"
 ISSUES = HOMEPAGE + "/issues"
@@ -126,7 +129,7 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
       「概览 / 快捷修改」里的"防作弊体检"（一键修复 + 清除作弊标记）
   另外「数据表 (CSV)」页把 Data\\*.rvdata2 转成 CSV 查表。
   独立发行版：Release 上只挂一个 zip（huaji2-save-editor-vX.Y.Z.zip），
-  解压出来的 画迹2存档工具.exe 和 XJCodec32.exe **必须放在同一个目录**。
+  解压出来的 画迹2内测版存档工具.exe 和 XJCodec32.exe **必须放在同一个目录**。
 
 一、这个游戏的存档
   <游戏根>\\save.rvdata2（手动存档）
@@ -5118,7 +5121,7 @@ def main():
         return _fatal(traceback.format_exc())
 
     # 关窗口（点 × / Alt+F4）= 硬退出：原因同 `_hard_exit` —— 走 Tk 自己的收尾
-    # 偶尔会卡住，任务管理器里留一个「画迹2存档工具.exe」不放。
+    # 偶尔会卡住，任务管理器里留一个「画迹2内测版存档工具.exe」不放。
     # 现版本没有「未保存就拦一下」的提示，所以直接退不会丢东西。
     root.protocol("WM_DELETE_WINDOW", lambda: _hard_exit(0))
 

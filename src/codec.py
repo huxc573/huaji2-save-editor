@@ -17,6 +17,10 @@
   随包带一个 32 位宿主 `src/native/XJCodec32.exe` 中转。
 
 密钥（均已实测验证）见 KEY_761205 / KEY_SCRIPT / KEY_SAVE，`key_for()` 会按文件名猜。
+
+⚠ **内测版 V2.201 的存档格式完全不同**（AES-128-ECB + Zlib，不是上面那套8 字节分组 ECB），
+   已由 `src/save_v201.py` 独立实现。这里的 `decrypt_file` / `encrypt_file`
+   会**先按文件名+ 实测探测**分流到它，两条版本线共用同一批 API，调用方无需关心。
 """
 import os
 import subprocess
@@ -28,6 +32,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import paths  # noqa: E402
+import save_v201  # noqa: E402  （内测版 V2.201 存档通道）
 
 HOST = os.path.join(HERE, "native", "XJCodec32.exe")
 
@@ -246,9 +251,18 @@ def decrypt_file(src, dst=None, key=None, main_dll=None):
 
     `key=None` 时按文件名猜密钥，猜不中就**依次试已知密钥**
     （密钥不对时 DLL 只输出 0 字节空文件，所以判定很干净）。
+
+    ⚠ **内测版 V2.201 存档自动分流**（见 `save_v201`）：文件名像存档时会先试
+    纯Python 的 AES+Zlib 通道 —— 它不需要 32 位宿主，也不碰 main.dll。
+    试不中才回落到原来的 main.dll 通路，所以尝鲜版行为完全不变。
     """
     if dst is None:
         dst = src + ".plain"
+    if save_v201.is_v201_candidate(src):
+        try:
+            return save_v201.decrypt_file(src, dst)
+        except Exception:
+            pass          # 不是 V2.201 格式（或没装 cryptography）→ 走老路
     keys = [key] if key else key_candidates(src)
     tried = []
     last = ([], "")
@@ -269,6 +283,11 @@ def decrypt_file(src, dst=None, key=None, main_dll=None):
 # 记住"哪个文件用了哪个密钥"，写回时保证用同一个
 _LAST_KEY = {}
 
+# 记住"哪个密文文件是 V2.201 格式"（set 存绝对路径）。
+# 为什么必须记：写回时拿到手的是**明文临时文件**（名字里没有 save 字样），
+# 光看文件名判断不出该用哪种加密 —— 而选错就是坏档。解密时认过一次最可靠。
+_V201_SRC = set()
+
 
 def key_used_for(path):
     k = _LAST_KEY.get(os.path.abspath(path))
@@ -276,13 +295,25 @@ def key_used_for(path):
 
 
 def encrypt_file(src, dst=None, key=None, main_dll=None):
-    """加密一个文件（用同一个密钥就能还原自己加密过的东西）。
+    r"""加密一个文件（用同一个密钥就能还原自己加密过的东西）。
 
     `key=None` 时会参考 `src` 对应的解密密钥（如果之前解过），
     否则按目标文件名猜。
+
+    ⚠ **写回 V2.201 存档必须走 `save_v201` 通道**：它是 AES-128-ECB+Zlib，
+    用 main.dll 那套 8 字节分组 ECB 写出去，游戏**读不了**（而且是静默读错，
+    最坏情况是存档看着正常、进游戏才发现坏了）。
+
+    ⚠ 所以这里**不做文件名推断**，只认两种可靠依据（顺序即优先级）：
+      1. 之前 `decrypt_file` 认出过这个密文是 V2.201（记在 `_V201_SRC`）；
+      2. 目标 `dst` 的名字就是 V2.201 存档（`save*.rvdata2` / `AutoSave\*.rvdata2`）。
+    两者都不中才走老路。**绝不「试一下老路，不行再换」** —— 那会写出坏档。
     """
     if dst is None:
         dst = src + ".enc"
+    was_v201 = os.path.abspath(src) in _V201_SRC
+    if was_v201 or save_v201.is_v201_save(dst):
+        return save_v201.encrypt_file(src, dst)
     if key is None:
         key = key_used_for(src) if os.path.abspath(src) in _LAST_KEY \
             else key_for(dst)

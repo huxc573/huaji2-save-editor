@@ -29,7 +29,7 @@ sys.stdout.reconfigure(errors="replace")
 import paths  # noqa: E402
 
 DIST = os.path.join(ROOT, "dist")
-EXE_NAME = "画迹2存档工具.exe"
+EXE_NAME = "画迹2内测版存档工具.exe"
 HOST_NAME = "XJCodec32.exe"
 BAD = ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE",
        "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
