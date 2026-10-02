@@ -44,7 +44,15 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.0.1-beta.1"
+#版本线（2026-10-02 川定）：本分支是**内测版 V2.2**（游戏本体），独立于尝鲜版的 v0.x 线。
+# 版本号从 0.0.1 重新起，带 SemVer 预发布后缀 `-beta.N`：
+#   * 好处一：GitHub 认SemVer 预发布，Release 页面自动标「Pre-release」，不会跟正式版混淆；
+#   * 好处二：tag 唯一性天然不与主线 v0.x 相撞，两条线可以各自随便发版；
+#   * 好处三：`-beta.1 → -beta.2 → … → 正式 0.0.1`，语义清楚，正式版就是去掉后缀。
+# ⚠ 改动这里的版本号后，`使用说明.txt` 首行和 CHANGELOG 都要跟着改
+#   （前者build.py 只提示不拦，后者有 gen_changelog 兜底）。
+APP_VERSION_LINE = "v22-beta"  # 本分支对应的发版分支（gh release --target 用）
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
 # 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
 # 版本号只出现在发行包名上（见下面的 ZIP_NAME）。

@@ -6,9 +6,15 @@ r"""发 GitHub Release：按 `build.py` 里的命名规则准备好附件，再�
     python tools/release.py --dry           # 只打印要做什么，不动手
 
 附件命名（**唯一来源在 tools/build.py**，别在这儿手敲）：
-    huaji2-save-editor-v0.6.0.zip   发行包 = 主程序 + XJCodec32.exe + 使用说明
+    huaji2-save-editor-v<版本>.zip   发行包 = 主程序 + XJCodec32.exe + 使用说明
     ⚠ **只有一个附件**：宿主必须跟主程序一起到用户手里（散着挂总有人只下主程序，
       然后报「打不开」）。Release 上只上传这一个 zip，别再加别的。
+
+⚠ tag 打在哪条线（2026-10-02 双线后新增）：本仓库有两条发版线，共用同一个仓库 ——
+    main= 尝鲜版 v0.x，v22-beta = 内测版 v0.0.1-beta.N。
+    `gh release create` 的 `--target` 已显式取build.py 的 `APP_VERSION_LINE`，
+    别删掉它 —— 漏了就会把 tag 落在「当前 HEAD」上，很容易发错线。
+    tag 本身是全仓库唯一的，所以两条线的版本号永远不会撞。
 
 Release 正文 = 一段固定的下载说明 + CHANGELOG.md 里对应版本的那一段，
 标题与正文开头都带上 CHANGELOG 版本标题里的发版日期（写到分钟）。
@@ -125,7 +131,11 @@ def main():
 
     cmd = ["gh", "release", "upload", TAG] + files + ["--clobber"]
     if not upload_only:
+        # --target 必须显式给：本仓库 main（尝鲜版 v0.x线）和 v22-beta（内测版线）
+        # 共用同一个仓库，漏了它tag 会落在「当前 HEAD」上 —— 从哪个分支跑就发哪条线，
+        # 很容易把内测版的 tag 误打到 main 上。
         cmd = ["gh", "release", "create", TAG,
+               "--target", b.APP_VERSION_LINE,
                "--title", title,
                "--notes-file", notes] + files
     print("将执行：gh release %s %s …" % ("upload" if upload_only else "create", TAG))
