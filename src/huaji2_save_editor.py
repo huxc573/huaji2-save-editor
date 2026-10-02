@@ -134,20 +134,30 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
 一、这个游戏的存档
   <游戏根>\\save.rvdata2（手动存档）
   <游戏根>\\AutoSave\\save00..29.rvdata2（自动存档）
-  存档由 System\\main.dll 加密，密钥 **tiyan_version**。
+  格式：**AES-128-ECB + Zlib**（不是main.dll 那套 8 字节分组 ECB）——
+    写：marshal(header)+marshal(contents) → Deflate → 零填充到 16 → AES-128-ECB
+    读：AES 解密 → 首字节是'x' 就 Inflate → Marshal.load 两次
+  实现见 src\\save_v201.py（纯 Python，不依赖 main.dll / 32 位宿主）。
 
-二、三个密钥（都已逆向出来）
-  761205            Data\\*.rvdata2 数据库、System\\Game.md5
-  imoutogadaisuki   Data\\Scripts.rvdata2（游戏脚本本体）
-  tiyan_version     存档 save.rvdata2 / AutoSave\\*.rvdata2
-  密钥不对时 main.dll 不报错，只写 0 字节空文件 —— 本工具靠这个判定命中，
-  按文件名猜不出时还会依次试这三个密钥。
+二、两套加密（内测版 V2.201 与尝鲜版完全不同，别混用）
+  【本工具＝内测版 V2.201】
+  存档     153ad4v3fbdgbgd   ⚠ 15 字符，必须**零补齐**到 16 字节当 AES 密钥
+  数据表   按文件名派生的 RC4：
+           '9KQ1L0PWRESZV7HM' + b36(crc32(带扩展名的文件名))[0..13]，取**后** 16 字符
+           ⚠ 取前 16 的话对所有文件都一样 ⇒ 谁也解不开（易踩）
+           例外：main.rvdata2 是明文骨架、Scripts.rvdata2 解不开，别硬解
+  【尝鲜版（main 分支，本工具不适用）】
+  761205 / imoutogadaisuki / tiyan_version 三个密钥 + main.dll 的 8 字节分组 ECB
+  ⇒ **拿本工具开尝鲜版存档会失败，反之亦然**。要开尝鲜版请用 main 分支的 v0.6.0。
 
 三、存档结构
   明文 = 两个 Marshal 对象相接（各自带 04 08 头）：
       { :temp => nil }                                      <- header
       { :system :timer :message :switches :variables
         :self_switches :actors :party :troop :map :player }  <- contents
+  ⚠ **内测版与尝鲜版结构有一处不同**：`variables` 内测版是**稀疏哈希**（键＝变量编号），
+     尝鲜版是数组（下标＝编号）。实测内测版只有 {1,2,7} 三个键 ——
+     **不能按位置当编号用**。工具已自动兼容。
   角色的五维/潜能是中文实例变量，放在 Game_Actor.@attr（类 Game_Actor_Attr）：
       @体质 @法力 @力量 @耐力 @敏捷 @潜能 @人气 @贡献 @体力 @活力
 
@@ -161,17 +171,18 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
         仓库页号 > 3 / 五维总点数 > 等级*10+500
      超了就置 @cheated = 当前帧号；之后游戏会弹「存档异常！」并退出。
      金钱填超过 30,000,000 时工具自动压到 25,000,000（上限的 5/6，留余量）。
-  3) 记账校验（Change）：$game_system.security 里有五类账，游戏每次数值变动
-     都拿账和实际值比对，对不上立刻往 @keyword 写 'NE!' 并判作弊：
-        :gold 金钱 / :items 物品累计获得数 / :variables 变量
-        :renqi 角色人气 / :gongxian 角色贡献
-     （数值逐位 AES-ECB 加密，密钥 admin_1941344749，可以是负数）
-     本工具改金钱/背包时会自动同步对应账；「防作弊检测并修复」会把五类账
-     全部对齐，并清掉 @cheated 和整个 @keyword（VNE/NE!/修改器关键字）。
+  3) 记账校验（Change）：尝鲜版有五类账（:gold 金钱 / :items 物品累计 /
+     :variables 变量 / :renqi 人气 / :gongxian 贡献），游戏每次数值变动都拿账
+     和实际值比对，对不上就判作弊（数值逐位 AES-ECB，密钥 admin_1941344749）。
+     ⚠ **内测版 V2.201 没有这一层** —— 实测它的 $game_system.security 是**空的**，
+     而且存档里**连 @cheated / @keyword 字段都没有**（这个版本还没做这套机制）。
+     所以工具对内测版只查前两层（Lock 校验和 + $jiance），不会误报。
+     ⇒ 内测版改钱/改背包**不会被记账校验逮到**，但仍建议别改太离谱。
 
 五、Data 目录下的 .rvdata2
-  **全都被加密**（与存档同一套 main.dll 加密，密钥 761205）。本工具直接解密＋解析，
-  可转成 CSV 方便查表（Excel 双击即开，utf-8-sig 编码）：
+  **全都被加密**，但**内测版用的是按文件名派生的 RC4**（不是尝鲜版的 761205），
+  实现见 src\\data_v201.py（纯 Python，实测 403/403 个表全部解出）。
+  本工具直接解密＋解析，可转成 CSV 方便查表（Excel 双击即开，utf-8-sig 编码）：
       Items 物品 / Weapons 武器 / Armors 防具 / Skills 技能 / States 状态
       Actors 角色 / Classes 职业 / Enemies 敌人
       （可选：Troops 敌人队伍 / CommonEvents 公共事件）
@@ -1785,7 +1796,8 @@ class App(object):
         self.var_baby_note.set(
             "共 %d 只（★ = 当前出战）；「新增召唤兽」可以加任意一种，"
             "包括正常玩法拿不到的**小孩**（小精灵/小毛头/小魔头/小仙灵/"
-            "小仙女/小丫丫，它们属于神兽资质3 池，没有任何道具能开出来）。"
+            "小仙女/小丫丫 —— 这几个在游戏数据里属于 `神兽资质3` 池，"
+            "**没有任何道具的开蛋池包含它们**）。"
             % len(self.baby_rows))
         kids = self.tv_babies.get_children()
         if kids:

@@ -34,6 +34,7 @@ if HERE not in sys.path:
 import paths  # noqa: E402
 import save_v201  # noqa: E402  （内测版 V2.201 存档通道：AES-128-ECB + Zlib）
 import data_v201  # noqa: E402  （内测版 V2.201 数据表通道：按文件名派生的 RC4）
+import machine_id_v201  # noqa: E402  （机器码纯 Python 实现，不依赖 main.dll）
 
 HOST = os.path.join(HERE, "native", "XJCodec32.exe")
 
@@ -178,17 +179,41 @@ def codec_info(main_dll=None):
 # 一次保存里「存盘前体检 / 概览页 / 机器码页」会问它三遍 → 在这儿记住。
 # 显式点「读本机机器码」这类按钮要传 refresh=True，否则换了硬件还读旧值。
 _MACHINE_CACHE = {}
+#: 纯 Python 机器码实现的缓存（不按main_dll 分，因为它跟 dll 无关）
+_MACHINE_PURE = {}
 
 
 def machine_id(main_dll=None, refresh=False):
-    """本机机器码：调用 `main.dll!get_hard_disk_character()`（游戏自己也这么取）。
+    """本机机器码。存档里 `$game_system.config[:hard_disk_code]` 就是这个值的数组；
+    游戏启动时会 `include?(code)` 比对，不在里面就"存档异常"。
 
-    存档里 `$game_system.config[:hard_disk_code]` 就是这个值的数组；
-    游戏启动时会 `include?(code)` 比对，不在里面就 "存档异常"。
+    ⚠ **优先走纯 Python 实现**（`machine_id_v201`），不碰 main.dll：
+       内测版 V2.201 的 main.dll 加壳后导不出 `get_hard_disk_character`
+       （实测宿主报 `[ERR] … = 126`），老路必然失败。
+       机器码算法两个版本一致（PhysicalDrive0 → DeviceIoControl(0x2D1400)
+       → CRC32(1024B) → 十进制），所以纯 Python 版对两版都适用，
+       而且不需要 32 位宿主、也不需要管理员权限。
+
+    只有纯 Python 取不到（没物理盘 / 被安全策略拦）时，才回落到原来的宿主通路
+    —— 万一某个环境仍能走 dll 呢，留着这条路不亏。
     """
+    if not refresh:
+        hit = _MACHINE_PURE.get("id")
+        if hit is not None:
+            return hit
+    try:
+        mid = machine_id_v201.read_machine_code()
+        _MACHINE_PURE["id"] = mid
+        return mid
+    except Exception:
+        pass                      # 纯 Python 取不到 → 走老路（若能走 dll 更好）
+
     main_dll = main_dll or paths.main_dll()
     if not main_dll:
-        raise CodecError("找不到 System/main.dll，请用环境变量 XJ_GAME 指定游戏目录")
+        raise CodecError(
+            "找不到 System/main.dll，且纯 Python 也读不出机器码。\n"
+            "（内测版的 main.dll 加壳后导不出 get_hard_disk_character，"
+            "正常情况不该走到这里）")
     hit = _MACHINE_CACHE.get(main_dll)
     if hit is not None and not refresh:
         return hit
