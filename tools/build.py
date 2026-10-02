@@ -44,15 +44,26 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.0.1-beta.1"
-#版本线（2026-10-02 川定）：本分支是**内测版 V2.2**（游戏本体），独立于尝鲜版的 v0.x 线。
-# 版本号从 0.0.1 重新起，带 SemVer 预发布后缀 `-beta.N`：
-#   * 好处一：GitHub 认SemVer 预发布，Release 页面自动标「Pre-release」，不会跟正式版混淆；
-#   * 好处二：tag 唯一性天然不与主线 v0.x 相撞，两条线可以各自随便发版；
-#   * 好处三：`-beta.1 → -beta.2 → … → 正式 0.0.1`，语义清楚，正式版就是去掉后缀。
+APP_VERSION = "2.201-beta.2"
+# 版本线（2026-10-02 川定）：本分支（`beta`）是**内测版**的开发线，独立于尝鲜版的 v0.x 线。
+#
+# 版本号 = **游戏版本号 + SemVer 预发布后缀**：`2.201-beta.2`
+#   前段直接抄游戏内测版号，一眼看出适配的是哪个游戏版本（游戏是 2.201，修改器就是 2.201-x）；
+#   后段是**同一个游戏版本内、修改器自己的第几次发版**（跟游戏无关）。
+#
+#   两条改法，别搞混：
+#     * 游戏内测版更新了 → 只改前段：2.201-beta.2 → 2.202-beta.1（后缀重新从1数）
+#     * 同一游戏版本内又修了 bug / 加了功能 → 只加后缀：2.201-beta.2 → 2.201-beta.3
+#
+#   * 用标准 SemVer 后缀，GitHub 会自动把它标成「Pre-release」，不会跟正式版混淆；
+#   * tag 唯一性天然不与主线 v0.x 相撞，两条线可以各自随便发版。
 # ⚠ 改动这里的版本号后，`使用说明.txt` 首行和 CHANGELOG 都要跟着改
-#   （前者build.py 只提示不拦，后者有 gen_changelog 兜底）。
-APP_VERSION_LINE = "v22-beta"  # 本分支对应的发版分支（gh release --target 用）
+#   （前者 build.py 只提示不拦，后者有 gen_changelog 兜底）。
+APP_VERSION_LINE = "beta"  # 本分支对应的发版分支（gh release --target 用）
+#: 发 Release 时是否挂 GitHub 的「Pre-release」标签。本线永远是内测版 → True。
+#: （后缀已经是标准 SemVer 预发布，GitHub 本就会自动标；这里显式再给一次，
+#:   不依赖平台推断 —— 免得哪次版本号写成 `2.201-beta.x` 之外的形状就悄悄变成正式版。）
+APP_PRERELEASE = True
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
 # 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
 # 版本号只出现在发行包名上（见下面的 ZIP_NAME）。

@@ -4,15 +4,19 @@ r"""发 GitHub Release：按 `build.py` 里的命名规则准备好附件，再�
     python tools/release.py                 # 创建/更新 v<当前版本> 的 Release
     python tools/release.py --upload-only   # Release 已存在，只重传附件
     python tools/release.py --dry           # 只打印要做什么，不动手
+    python tools/release.py --no-prerelease # 临时不挂 Pre-release 标签
 
 附件命名（**唯一来源在 tools/build.py**，别在这儿手敲）：
     huaji2-save-editor-v<版本>.zip   发行包 = 主程序 + XJCodec32.exe + 使用说明
     ⚠ **只有一个附件**：宿主必须跟主程序一起到用户手里（散着挂总有人只下主程序，
       然后报「打不开」）。Release 上只上传这一个 zip，别再加别的。
 
+版本号形状：`2.201-beta.N` —— 前段抄游戏内测版号，后段是同一游戏版本内
+    修改器自己的发版次数（游戏更新就只改前段，见 build.py 的注释）。
+
 ⚠ tag 打在哪条线（2026-10-02 双线后新增）：本仓库有两条发版线，共用同一个仓库 ——
-    main= 尝鲜版 v0.x，v22-beta = 内测版 v0.0.1-beta.N。
-    `gh release create` 的 `--target` 已显式取build.py 的 `APP_VERSION_LINE`，
+    main = 尝鲜版 v0.x，beta = 内测版 2.201-beta.N。
+    `gh release create` 的 `--target` 已显式取 build.py 的 `APP_VERSION_LINE`，
     别删掉它 —— 漏了就会把 tag 落在「当前 HEAD」上，很容易发错线。
     tag 本身是全仓库唯一的，所以两条线的版本号永远不会撞。
 
@@ -121,7 +125,12 @@ def main():
     argv = sys.argv[1:]
     dry = "--dry" in argv
     upload_only = "--upload-only" in argv
-    print("版本 %s → tag %s" % (b.APP_VERSION, TAG))
+    # 版本号是 `2.201-beta.N` 这种标准 SemVer 预发布形状，GitHub 本会自动标
+    # Pre-release；这里再显式给一次（见 build.py 的 APP_PRERELEASE），
+    # 不依赖平台推断。`--no-prerelease` 可以临时关掉。
+    prerelease = b.APP_PRERELEASE and "--no-prerelease" not in argv
+    print("版本 %s → tag %s%s" % (b.APP_VERSION, TAG,
+                                  "（Pre-release）" if prerelease else ""))
     title = release_title()
     print("Release 标题：%s" % title)
     files = stage_assets()
@@ -131,13 +140,15 @@ def main():
 
     cmd = ["gh", "release", "upload", TAG] + files + ["--clobber"]
     if not upload_only:
-        # --target 必须显式给：本仓库 main（尝鲜版 v0.x线）和 v22-beta（内测版线）
-        # 共用同一个仓库，漏了它tag 会落在「当前 HEAD」上 —— 从哪个分支跑就发哪条线，
+        # --target 必须显式给：本仓库 main（尝鲜版 v0.x 线）和 beta（内测版线）
+        # 共用同一个仓库，漏了它 tag 会落在「当前 HEAD」上 —— 从哪个分支跑就发哪条线，
         # 很容易把内测版的 tag 误打到 main 上。
         cmd = ["gh", "release", "create", TAG,
                "--target", b.APP_VERSION_LINE,
                "--title", title,
                "--notes-file", notes] + files
+        if prerelease:
+            cmd.insert(4, "--prerelease")
     print("将执行：gh release %s %s …" % ("upload" if upload_only else "create", TAG))
     if dry:
         print("--dry，未执行")
