@@ -70,15 +70,29 @@ class Doc(object):
             # 先试内测版 V2.201 通道（AES-128-ECB+Zlib，纯 Python、不需要宿主）；
             # 认出来就记进 self.v201 —— 保存时必须按同一种格式写回去。
             plain = None
+            v201_err = None
             if save_v201.is_v201_candidate(path):
                 try:
                     plain = save_v201.decode(open(path, "rb").read())
                     self.v201 = True
-                except Exception:
-                    plain = None
+                except Exception as e:
+                    v201_err = e
             tmp = path + ".xj_plain"
             if plain is None:
-                codec.decrypt_file(path, tmp)
+                try:
+                    codec.decrypt_file(path, tmp)
+                except codec.CodecError:
+                    # 两条路都解不开。**优先报 V2.201 那条的原因** ——
+                    # 老路（main.dll）的报错永远是「输出为空 / 密钥不对」这种
+                    # 套话，对 V2.201 存档毫无指向性（它压根不是那套格式），
+                    # 只报它会让人以为是密钥问题，反复换密钥都是白忙。
+                    if v201_err is not None:
+                        raise ValueError(
+                            "这个存档按内测版 V2.201 格式（AES-128-ECB + Zlib）"
+                            "也解不开：%s\n"
+                            "它可能既不是 V2.201 存档、也不是尝鲜版存档"
+                            "（后者请用 main 分支的 v0.6.0 版本工具）。" % v201_err)
+                    raise
                 self.plain_key = codec.key_used_for(path)
                 self.raw = open(tmp, "rb").read()
             else:
