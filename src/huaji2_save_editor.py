@@ -2247,9 +2247,14 @@ class App(object):
                                   "%s/%s/%s/%s/%s/%s" % (c["atk"], c["def"], c["hp"],
                                                          c["mp"], c["agi"], c["eva"]),
                                   c["grow"], life))
+            n_est = sum(1 for c in rows if c.get("inferred"))
             info.set("共 %d 种可选。神兽（含小孩）资质取定值；"
                      "普通召唤兽资质带随机（勾了“变异”则区间 ×0.66）。"
-                     % len(rows))
+                     "%s" % (len(rows),
+                             ("\n⚠ 其中 %d 种的资质是**按 id 区间估算**的"
+                              "（内测版的 $baby 表运行时才生成、静态取不到，"
+                              "所以这几项数值不是游戏真值，用后可在召唤兽页手动修正）。"
+                              % n_est) if n_est else ""))
             self._add_rows = rows
             kids = tv.get_children()
             if kids:

@@ -195,6 +195,10 @@ class Babies(object):
             out.append({
                 "id": i, "name": nm, "type": cfg.get("type"),
                 "pool": self.data_key(i) or "",
+                # `inferred=True` 表示资质是**按 id 区间估的**，不是游戏真值
+                # （V2.201 的 `$baby` 表运行时才生成，静态拿不到 —— 见
+                #  tables/baby_aptitude.py 的说明）。界面据此提示用户。
+                "inferred": bool(cfg.get("inferred")),
                 "allow_lv": cfg.get("allow_lv", 0),
                 "atk": cfg.get("atk"), "def": cfg.get("def"),
                 "hp": cfg.get("hp"), "mp": cfg.get("mp"),
