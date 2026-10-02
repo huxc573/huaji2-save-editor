@@ -32,7 +32,8 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import paths  # noqa: E402
-import save_v201  # noqa: E402  （内测版 V2.201 存档通道）
+import save_v201  # noqa: E402  （内测版 V2.201 存档通道：AES-128-ECB + Zlib）
+import data_v201  # noqa: E402  （内测版 V2.201 数据表通道：按文件名派生的 RC4）
 
 HOST = os.path.join(HERE, "native", "XJCodec32.exe")
 
@@ -258,11 +259,28 @@ def decrypt_file(src, dst=None, key=None, main_dll=None):
     """
     if dst is None:
         dst = src + ".plain"
+    # ⚠ 内测版 V2.201：**存档**（AES+Zlib）与 **Data 表**（RC4）是两套完全不同的算法，
+    #   都要在碰 main.dll 之前先试 —— main.dll 在 V2.201 里加壳后导不出加解密函数，
+    #   走老路必然失败。两条通道都失败才回落，所以尝鲜版行为完全不变。
     if save_v201.is_v201_candidate(src):
         try:
             return save_v201.decrypt_file(src, dst)
         except Exception:
-            pass          # 不是 V2.201 格式（或没装 cryptography）→ 走老路
+            pass          # 不是 V2.201 存档 → 走老路
+    if data_v201.looks_like_table(os.path.basename(src)):
+        try:
+            # ⚠ 只有**解出来确实带 Marshal 头**才算命中，才登记 —— 否则
+            # 尝鲜版的同名表（`761205` + main.dll 8 字节 ECB）会被误记成 V2.201，
+            # 写回时用错算法 = 写坏表。
+            with open(src, "rb") as f:
+                plain = data_v201.decrypt(f.read(), os.path.basename(src))
+            if plain[:2] == data_v201.MARSHAL_MAGIC:
+                with open(dst, "wb") as f:
+                    f.write(plain)
+                _V201_TABLE.add(os.path.abspath(dst))
+                return dst, len(plain)
+        except Exception:
+            pass          # 不是 V2.201 Data 表 → 走老路
     keys = [key] if key else key_candidates(src)
     tried = []
     last = ([], "")
@@ -288,6 +306,9 @@ _LAST_KEY = {}
 # 光看文件名判断不出该用哪种加密 —— 而选错就是坏档。解密时认过一次最可靠。
 _V201_SRC = set()
 
+# 同理，记「哪个明文临时文件是某张 V2.201 数据表的解密产物」（写回时要按 RC4 加密回去）
+_V201_TABLE = set()
+
 
 def key_used_for(path):
     k = _LAST_KEY.get(os.path.abspath(path))
@@ -308,12 +329,22 @@ def encrypt_file(src, dst=None, key=None, main_dll=None):
       1. 之前 `decrypt_file` 认出过这个密文是 V2.201（记在 `_V201_SRC`）；
       2. 目标 `dst` 的名字就是 V2.201 存档（`save*.rvdata2` / `AutoSave\*.rvdata2`）。
     两者都不中才走老路。**绝不「试一下老路，不行再换」** —— 那会写出坏档。
+
+    ⚠ V2.201 的 **Data 表**（RC4，见 `data_v201`）同理：认过的那张表写回时也
+    必须用 RC4，不能落到 main.dll 那套 8 字节 ECB 上（否则游戏读不了表）。
     """
     if dst is None:
         dst = src + ".enc"
     was_v201 = os.path.abspath(src) in _V201_SRC
     if was_v201 or save_v201.is_v201_save(dst):
         return save_v201.encrypt_file(src, dst)
+    if os.path.abspath(src) in _V201_TABLE or data_v201.looks_like_table(
+            os.path.basename(dst)):
+        plain = open(src, "rb").read()
+        out = data_v201.rc4(plain, data_v201.key_for(os.path.basename(dst)))
+        with open(dst, "wb") as f:
+            f.write(out)
+        return dst, len(out)
     if key is None:
         key = key_used_for(src) if os.path.abspath(src) in _LAST_KEY \
             else key_for(dst)
