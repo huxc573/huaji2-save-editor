@@ -10,8 +10,10 @@ r"""发 GitHub Release：按 `build.py` 里的命名规则准备好附件，再�
     ⚠ **只有一个附件**：宿主必须跟主程序一起到用户手里（散着挂总有人只下主程序，
       然后报「打不开」）。Release 上只上传这一个 zip，别再加别的。
 
-Release 正文 = 一段固定的下载说明 + CHANGELOG.md 里对应版本的那一段，
-标题与正文开头都带上 CHANGELOG 版本标题里的发版日期（写到分钟）。
+Release 正文 = CHANGELOG.md 里本版本那段的**更新总结打头**，尾部接免责声明 +
+一行下载说明（与画迹1 同一套规则，别往正文里堆下载说明）。
+Release 标题 = `vX.Y.Z —— <总结第一行>`（发版日期只留在 CHANGELOG 段标题里，
+不再往 Release 标题/正文上堆）。
 需要本机装了 `gh` 且已登录（`gh auth status`）；git 推送另说。
 """
 import os
@@ -63,52 +65,52 @@ def stage_assets():
     return out
 
 
-def changelog_section():
-    r"""CHANGELOG 里本版本的那一段 → `(标题, 正文)`；找不到返回 `("", "")`。
+def summary_lines():
+    r"""CHANGELOG 里本版本段的正文（剥掉 `## vX.Y.Z (日期)` 标题行与尾部 `---`）。
 
-    标题形如 `v0.6.0 (2026-09-30 17:20)` —— **发版日期只写在这一处**（写到分钟），
-    Release 的标题和正文开头都从这儿取，省得三个地方各写一遍写岔。
+    正文第一行就是这版的更新总结（`**…**`）—— Release 标题与正文都从它取，
+    所以日期只留在 CHANGELOG 的段标题里，不再往标题/正文上堆。
     """
     path = os.path.join(ROOT, "CHANGELOG.md")
     if not os.path.exists(path):
-        return "", ""
+        return []
     text = open(path, encoding="utf-8").read()
     head = text.find("## " + TAG)
     if head < 0:
-        return "", ""
-    eol = text.find("\n", head)
-    if eol < 0:
-        return text[head + 3:].strip(), ""
-    heading = text[head + 3:eol].strip()
+        return []
     nxt = text.find("\n## ", head + 1)
-    return heading, text[eol + 1:nxt if nxt > 0 else len(text)].rstrip()
+    body = text[head:nxt if nxt > 0 else len(text)].rstrip()
+    lines = body.split("\n")
+    while lines and (lines[0].startswith("## ") or not lines[0].strip()):
+        lines.pop(0)
+    while lines and lines[-1].strip() == "---":
+        lines.pop()
+    return lines
 
 
-def release_title():
-    """Release 标题：`v0.6.0 (2026-09-30 17:20) —— 见下方更新日志`。"""
-    heading, _ = changelog_section()
-    return "%s —— 见下方更新日志" % (heading or TAG)
+def title_text():
+    """Release 标题 = `tag —— 更新总结`（取总结第一行，剥粗体标记）。"""
+    for ln in summary_lines():
+        t = ln.strip().replace("**", "").strip()
+        if t:
+            return "%s —— %s" % (TAG, t)
+    return TAG
 
 
 def notes_text():
-    """一段固定的下载说明 + CHANGELOG 里本版本的那一段（开头带发版日期）。"""
-    heading, body = changelog_section()
+    """Release 正文 = 更新总结打头，尾部免责声明 + 一行下载说明。"""
+    lines = summary_lines()
+    summary = "\n".join(lines).strip()
     (zip_name,) = (a for _, a in b.RELEASE_ASSETS)
-    extra = (
-        ("**%s**\n\n" % heading if heading else "") +
-        "## 下载 / 用法\n\n"
-        "下这一个附件就行 —— 里面是完整的工具：\n\n"
-        "* `%s` —— 解压出来直接双击 `画迹2存档工具.exe`，免安装。\n"
-        "  包里已经带上 **XJCodec32.exe**（32 位加解密宿主，用来加载游戏的 "
-        "`System/main.dll`，没有它读不了存档）和使用说明，不用再单独下别的。\n\n"
-        "> 附件名用 ASCII（GitHub 对中文文件名会自动改名），跟仓库名保持一致 + 版本号。\n"
-        "> 以前是 exe / USAGE.txt / XJCodec32.exe 三个附件，**总有人只下主程序**然后\n"
-        "> 报「打不开 / 缺少依赖」—— 现在只挂一个包，漏不了。\n"
-        % (zip_name,)
+    tail = (
+        "\n---\n\n"
+        "> ⚠️ 使用前请先自己备份存档（游戏根目录下的 `save.rvdata2`）。"
+        "本工具是第三方工具，与游戏作者无关；游戏本体及其素材版权归原作者所有。\n\n"
+        "下载：只下 Assets 里的 **`%s`**（唯一附件），解压后双击 `%s` 即可；"
+        "别只把 exe 单独拖出来，依赖要跟它在同一目录。\n"
+        % (zip_name, b.EXE_NAME + ".exe")
     )
-    if not body:
-        return extra
-    return extra + "\n---\n\n## %s\n\n%s\n" % (heading, body)
+    return (summary + "\n" if summary else "") + tail
 
 
 def main():
@@ -116,7 +118,7 @@ def main():
     dry = "--dry" in argv
     upload_only = "--upload-only" in argv
     print("版本 %s → tag %s" % (b.APP_VERSION, TAG))
-    title = release_title()
+    title = title_text()
     print("Release 标题：%s" % title)
     files = stage_assets()
     # notes 也放临时目录：仓库路径里的 `[]` 会让 gh 把 --notes-file 当 glob 处理
