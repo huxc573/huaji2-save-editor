@@ -64,7 +64,27 @@ def main():
     check("效果已翻成人话", "HP回复" in fx and "解除状态" in fx,
           fx[:40])
     check("效果里没有光秃的代码数字", " 11 " not in fx and " 22 " not in fx)
-    check("伤害已翻成人话", "浮动" in "".join(r[idx["伤害"]] for r in data))
+    check("伤害已翻成人话",
+          "浮动" in "".join(r[idx["伤害"]] for r in datatables.rows("Skills")[1]))
+
+    # ---------------- 2026-10-03 描述增强：<S:N> 解名 / 去转译噪声
+    h, sk = datatables.rows("Skills")
+    i = {c: k for k, c in enumerate(h)}
+    descs = "".join(r[i["说明"]] for r in sk)
+    fxs = "".join(r[i["效果"]] for r in sk)
+    dmgs = "".join(r[i["伤害"]] for r in sk)
+    check("技能说明无 <S:N> 占位符（已解成状态名）", "<S:" not in descs,
+          descs[:40])
+    check("技能效果无 #id 转译残留", "#" not in fxs)
+    check("技能伤害无「公式:」转译残留", "公式:" not in dmgs)
+    check("技能伤害无 type0 噪声行",
+          all(not r[i["伤害"]].startswith("伤害:无") for r in sk))
+    check("回复量取固定值（不是 +500%）", "%)" not in by_id["1"][idx["效果"]],
+          by_id["1"][idx["效果"]])
+    check("附加状态解出状态名", "附加状态[" in fxs)
+    dm = datatables.desc_map("Skills")
+    bad_dm = [k for k, (_n, d) in dm.items() if "<S:" in d]
+    check("desc_map（界面悬浮）同样已清洗", not bad_dm, "%d 条残留" % len(bad_dm))
 
     # ---------------- 其它表的嵌套字段
     h, w = datatables.rows("Enemies")

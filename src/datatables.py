@@ -11,8 +11,10 @@
     （可选：Troops 敌人队伍 · CommonEvents 公共事件）
 
 CSV 用 **utf-8-sig** 编码（Excel 双击直接正常显示中文），一行一个 id，
-列名是中文，值里嵌套的东西（效果 / 特性 / 伤害 / 学会技能…）会翻成人话，
-比如 `@effects` 会写成「HP回复 +500；附加状态#1 100%」。
+列名是中文，值里嵌套的东西（效果 / 特性 / 伤害 / 学会技能…）会翻成人话并
+**把 id 解成名字**：`@effects` 写成「HP回复 +500；解除状态[剧毒]」，
+说明列会解掉 `<S:N>` 状态占位符（按备注 `state_details`，与游戏运行时一致）。
+伤害列只对真有伤害的条目输出，公式翻成「攻击−目标防御+随机(0~9)」这类可读式。
 
 用法：
     python src/datatables.py                      # 列出所有表 + 行数
@@ -22,6 +24,7 @@ CSV 用 **utf-8-sig** 编码（Excel 双击直接正常显示中文），一行�
 """
 import csv
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -137,6 +140,14 @@ def clean_text(t):
     return " ".join(str(t).replace("\r", " ").replace("\n", " ").split())
 
 
+def _pct(fv):
+    """比例(0.6) → 「60%」；None → 空。"""
+    if fv is None:
+        return ""
+    v = fv * 100
+    return "%d%%" % int(v) if v == int(v) else "%g%%" % v
+
+
 def fmt_effects(node):
     node = deref(node)
     if not isinstance(node, M.ArrayNode):
@@ -147,26 +158,84 @@ def fmt_effects(node):
         d1 = val(e, "@data_id")
         v1 = val(e, "@value1")
         v2 = val(e, "@value2")
-        name = EFFECT_CODES.get(code, "效果%s" % code)
+        try:
+            fv1 = float(v1 or 0)
+        except (TypeError, ValueError):
+            fv1 = 0.0
+        try:
+            fv2 = float(v2 or 0)
+        except (TypeError, ValueError):
+            fv2 = 0.0
+        # 取值语义是逐条对过 Data 表的（别套 VX Ace 文档）：
+        #   11/12 HP/MP回复：v1=最大值比例、v2=固定值（两者可同时出现）
+        #   13 TP增加：v1=固定值
+        #   21/22 附加/解除状态：data_id=状态，**概率在 v1**（v2 恒 0；旧版取 v2 全显示 0%）
+        #   31 强化能力：data_id=参数，v1=回合数
+        #   44 公共事件：data_id=事件 id
         if code in (11, 12):
-            out.append("%s %+g%%" % (name, float(v2 or 0)))
+            parts = []
+            if fv1:
+                parts.append("%+.0f%%" % (fv1 * 100))
+            if fv2:
+                parts.append("%+g" % fv2)
+            if parts:
+                out.append("%s %s" % ("HP回复" if code == 11 else "MP回复",
+                                      "/".join(parts)))
         elif code == 13:
-            out.append("%s %+g" % (name, float(v2 or 0)))
-        elif code in (21, 22):
-            out.append("%s#%s %.0f%%" % (name, d1, float(v2 or 0) * 100))
-        elif code in (31, 32, 33, 34):
+            if v1:
+                out.append("TP增加 %+g" % fv1)
+        elif code == 21:
+            nm = _names("States").get(d1)
+            if nm and fv1 > 0:      # data_id=0 / 概率=0 都是不生效的占位条目
+                rate = "" if fv1 >= 1 else " " + _pct(fv1)
+                out.append("附加状态[%s]%s" % (nm, rate))
+        elif code == 22:
+            nm = _names("States").get(d1)
+            if nm:
+                out.append("解除状态[%s]" % nm)
+        elif code == 31:
             pname = PARAM_NAMES[d1] if isinstance(d1, int) and 0 <= d1 < 8 else d1
-            out.append("%s[%s]%.0f" % (name, pname, float(v2 or 0) * 100))
+            out.append("强化[%s] %g回合" % (pname, fv1))
         elif code == 42:
             pname = PARAM_NAMES[d1] if isinstance(d1, int) and 0 <= d1 < 8 else d1
-            out.append("成长[%s]+%g" % (pname, float(v2 or 0)))
+            out.append("成长[%s]+%g" % (pname, fv2))
         elif code == 43:
-            out.append("习得技能#%s" % d1)
+            out.append("习得技能[%s]" % (_names("Skills").get(d1) or "#%s" % d1))
         elif code == 44:
-            out.append("公共事件#%s" % d1)
+            out.append("公共事件[%s]" % (_names("CommonEvents").get(d1) or "#%s" % d1))
         else:
-            out.append("%s(data=%s,%s,%s)" % (name, d1, v1, v2))
+            out.append("%s(data=%s)" % (EFFECT_CODES.get(code, "效果%s" % code), d1))
     return "；".join(out)
+
+
+# 伤害公式的「a./b. 属性」对照（a=施放者，b=目标；顺序长的在前防误替换）
+_FORMULA_TOKENS = [
+    (r"a\.attr\.get_(\S+?)(?=[\s*+\-/)])", r"\1"),
+    (r"a\.mhp", "最大气血"), (r"a\.hp", "气血"),
+    (r"a\.atk", "攻击"), (r"a\.def", "防御"),
+    (r"a\.mat", "灵力"), (r"a\.mdf", "魔防"),
+    (r"a\.agi", "速度"), (r"a\.luk", "幸运"), (r"a\.level", "等级"),
+    (r"b\.mhp", "目标最大气血"), (r"b\.hp", "目标气血"),
+    (r"b\.atk", "目标攻击"), (r"b\.def", "目标防御"),
+    (r"b\.mat", "目标灵力"), (r"b\.mdf", "目标魔防"),
+]
+
+
+def _read_formula(node):
+    """公式原文 → 可读：去注释、rand/default/属性 token 翻译。
+
+    `default` 是本引擎的「基础伤害」占位（尝鲜版常见，内测版技能多为空）。
+    翻不动的部分原样保留 —— 宁可少翻也不错译。
+    """
+    t = s(node, "@formula") or ""
+    t = t.split("#")[0].strip()          # `999999999 #level` 这类行尾注释
+    t = re.sub(r"rand\((\d+)\.\.(\d+)\)", r"随机(\1~\2)", t)
+    t = re.sub(r"rand\((\d+)\)",
+               lambda m: "随机(0~%d)" % (int(m.group(1)) - 1), t)
+    t = re.sub(r"\bdefault\b", "基础伤害", t)
+    for pat, rep in _FORMULA_TOKENS:
+        t = re.sub(pat, rep, t)
+    return t
 
 
 def fmt_damage(node):
@@ -174,9 +243,23 @@ def fmt_damage(node):
     if node is None or not hasattr(node, "ivars"):
         return ""
     t = val(node, "@type")
-    return "伤害:%s 公式:%s 浮动:%s%% 会心:%s 属性:%s" % (
-        DAMAGE_TYPE_NAMES.get(t, t), s(node, "@formula"), s(node, "@variance"),
-        s(node, "@critical"), s(node, "@element_id"))
+    if not t:
+        # type 0 = 无伤害。旧版会输出「伤害:无 公式:0 浮动:20% …」的噪声，直接留空。
+        return ""
+    parts = ["%s：%s" % (DAMAGE_TYPE_NAMES.get(t, t), _read_formula(node))]
+    try:
+        variance = int(val(node, "@variance") or 0)
+    except (TypeError, ValueError):
+        variance = 0
+    if variance > 0:
+        parts.append("浮动±%d%%" % variance)
+    if val(node, "@critical"):
+        parts.append("可会心")
+    eid = val(node, "@element_id")
+    if isinstance(eid, int) and eid > 0:
+        en = _element_names().get(eid)
+        parts.append("属性[%s]" % (en or "#%d" % eid))
+    return "，".join(parts)
 
 
 def fmt_features(node):
@@ -186,14 +269,49 @@ def fmt_features(node):
     out = []
     for f in node.items:
         code = val(f, "@code")
-        name = FEATURE_CODES.get(code, "特性%s" % code)
+        d1 = val(f, "@data_id")
+        v = val(f, "@value")
+        try:
+            fv = float(v) if v is not None else None
+        except (TypeError, ValueError):
+            fv = None
         if code in (11, 12, 13, 14, 15, 16, 17, 18):
-            out.append("%s%+g%%" % (name, float(val(f, "@value") or 0) * 100))
-        elif code in (31, 32, 33, 53, 54, 55):
-            out.append("%s#%s" % (name, val(f, "@data_id")))
+            out.append("%s%+g%%" % (PARAM_NAMES[code - 11], float(v or 0) * 100))
+        elif code == 21:
+            en = _element_names().get(d1)
+            out.append("属性[%s]有效度 %s" % (en or d1, _pct(fv)))
+        elif code == 22:
+            nm = _names("States").get(d1)
+            if fv is not None and fv <= 0:
+                out.append("状态[%s]抗性" % (nm or d1))
+            else:
+                out.append("状态[%s]有效度 %s" % (nm or d1, _pct(fv)))
+        elif code == 23:
+            out.append("状态[%s]无效" % (_names("States").get(d1) or d1))
+        elif code == 31:
+            en = _element_names().get(d1)
+            out.append("攻击属性[%s]" % (en or d1))
+        elif code == 32:
+            nm = _names("States").get(d1)
+            rate = "" if (fv or 0) >= 1 else " " + _pct(fv)
+            out.append("攻击附加[%s]%s" % (nm or d1, rate))
+        elif code == 33:
+            out.append("攻击速度%+g" % (fv or 0))
+        elif code == 34:
+            out.append("攻击追加 %g 次" % (fv or 0))
+        elif code == 35:
+            out.append("普通攻击 %g 次" % (fv or 0))
+        elif code in (51, 52):
+            nm = _skill_type_names().get(d1)
+            out.append("%s[%s]" % ("添加技能类型" if code == 51 else "封印技能类型",
+                                   nm or ("#%s" % d1)))
+        elif code in (53, 54, 55):
+            nm = _names("Skills").get(d1)
+            out.append("%s[%s]" % ({53: "添加技能", 54: "封印技能",
+                                    55: "已学技能"}[code], nm or ("#%s" % d1)))
         else:
-            out.append("%s(data=%s,val=%s)" % (name, val(f, "@data_id"),
-                                               val(f, "@value")))
+            out.append("%s(data=%s,val=%s)" % (FEATURE_CODES.get(code, "特性%s" % code),
+                                               d1, v))
     return "；".join(out)
 
 
@@ -268,7 +386,7 @@ def fmt_ivars(node, keys, sep="/"):
 # --------------------------------------------------------------------------
 TABLES = [
     ("Items", "物品", True, [
-        ("ID", "@id"), ("名称", "@name"), ("说明", "@description"),
+        ("ID", "@id"), ("名称", "@name"), ("说明", "desc:@description,@note"),
         ("效果", "fx:@effects"), ("伤害", "dmg:@damage"), ("特性", "feat:@features"),
         ("价格", "@price"), ("消耗品", "@consumable"),
         ("使用场合", "map:@occasion"), ("影响范围", "map:@scope"),
@@ -278,20 +396,20 @@ TABLES = [
         ("图标", "@icon_index"), ("备注", "text:@note"),
     ]),
     ("Weapons", "武器", True, [
-        ("ID", "@id"), ("名称", "@name"), ("说明", "@description"),
+        ("ID", "@id"), ("名称", "@name"), ("说明", "desc:@description,@note"),
         ("能力加成(最大HP/MP/攻/防/魔攻/魔防/敏/运)", "params:@params"),
         ("特性", "feat:@features"), ("价格", "@price"),
         ("攻击动画", "@animation_id"), ("装备类型", "@wtype_id"),
         ("装备位置", "@etype_id"), ("图标", "@icon_index"), ("备注", "text:@note"),
     ]),
     ("Armors", "防具", True, [
-        ("ID", "@id"), ("名称", "@name"), ("说明", "@description"),
+        ("ID", "@id"), ("名称", "@name"), ("说明", "desc:@description,@note"),
         ("能力加成", "params:@params"), ("特性", "feat:@features"),
         ("价格", "@price"), ("防具类型", "@atype_id"),
         ("装备位置", "@etype_id"), ("图标", "@icon_index"), ("备注", "text:@note"),
     ]),
     ("Skills", "技能", True, [
-        ("ID", "@id"), ("名称", "@name"), ("说明", "@description"),
+        ("ID", "@id"), ("名称", "@name"), ("说明", "desc:@description,@note"),
         ("效果", "fx:@effects"), ("伤害", "dmg:@damage"),
         ("MP消耗", "@mp_cost"), ("TP消耗", "@tp_cost"), ("TP回复", "@tp_gain"),
         ("使用场合", "map:@occasion"), ("影响范围", "map:@scope"),
@@ -315,13 +433,13 @@ TABLES = [
     ("Actors", "角色", True, [
         ("ID", "@id"), ("名称", "@name"), ("昵称", "@nickname"),
         ("职业ID", "@class_id"), ("初始等级", "@initial_level"),
-        ("最大等级", "@max_level"), ("说明", "@description"),
+        ("最大等级", "@max_level"), ("说明", "desc:@description,@note"),
         ("初始装备(0=无)", "params:@equips"),
         ("立绘", "@face_name"), ("行走图", "@character_name"),
         ("特性", "feat:@features"), ("备注", "text:@note"),
     ]),
     ("Classes", "职业", True, [
-        ("ID", "@id"), ("名称", "@name"), ("说明", "@description"),
+        ("ID", "@id"), ("名称", "@name"), ("说明", "desc:@description,@note"),
         ("学会技能", "learn:@learnings"), ("特性", "feat:@features"),
         ("升级经验曲线", "params:@exp_params"),
         ("成长曲线(Table)", "params:@params"), ("图标", "@icon_index"),
@@ -469,7 +587,8 @@ def desc_map(key, game_dir=None):
     out = {}
     try:
         for i, n in load(key, game_dir)[1]:
-            out[i] = (s(n, "@name") or "", s(n, "@description") or "")
+            out[i] = (s(n, "@name") or "",
+                      clean_desc(s(n, "@description"), s(n, "@note")))
     except Exception:
         out = {}
     if not out:
@@ -477,7 +596,7 @@ def desc_map(key, game_dir=None):
         if b is not None:
             bn, bd = b.names(key), b.descs(key)
             for i in sorted(set(bn) | set(bd)):
-                out[i] = (bn.get(i, ""), bd.get(i, ""))
+                out[i] = (bn.get(i, ""), clean_desc(bd.get(i, "")))
     _cache[ck] = out
     return out
 
@@ -539,6 +658,104 @@ def builtin_rows(key):
             for i in sorted(set(nm) | set(ds))]
 
 
+# --------------------------------------------------------------------------
+# 效果/说明渲染用的名字解析（#id → 人话）。任何失败都退空 dict，绝不影响导出。
+# --------------------------------------------------------------------------
+_name_cache = {}
+
+
+def _names(key):
+    """{id: 名称}（懒加载 + 缓存；读不到就空 —— 渲染时退回 #id）。"""
+    if key not in _name_cache:
+        try:
+            _name_cache[key] = dict(name_map(key))
+        except Exception:
+            _name_cache[key] = {}
+    return _name_cache[key]
+
+
+_system_cache = {}
+
+
+def _system_array(ivar_name):
+    """System.rvdata2 里的字符串数组 → {下标: 内容}（@elements/@skill_types）。"""
+    if ivar_name not in _system_cache:
+        out = {}
+        try:
+            p = _plain_path("System", paths.find_game_dir())
+            objs = M.parse_stream(open(p, "rb").read())
+            root = deref(objs[-1]["node"])
+            arr = deref(ivar(root, ivar_name))
+            if isinstance(arr, M.ArrayNode):
+                for i, x in enumerate(arr.items):
+                    v = val(x)
+                    if v:
+                        out[i] = v
+        except Exception:
+            out = {}
+        _system_cache[ivar_name] = out
+    return _system_cache[ivar_name]
+
+
+def _element_names():
+    return _system_array("@elements")
+
+
+def _skill_type_names():
+    return _system_array("@skill_types")
+
+
+_RE_COLOR = re.compile(r"\\[cC]\[\d+\]")
+_RE_HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
+_RE_SPH = re.compile(r"<S:([\d\s,]+)>")
+
+
+def _state_details(note):
+    """备注里的 `state_details = [a, b, …]`（行匹配规则与游戏 ReadNote 一致）。
+
+    `<S:N>` 里的 N 是**这个数组的下标**（不是状态 id）—— 游戏运行时由
+    `RPG::UsableItem#description_ex` 用 `$data_states[arr[n]].name` 替换。
+    """
+    out = []
+    m = re.search(r"^\s*state_details\s*=\s*\[([^\]]*)\]", note or "", re.M)
+    if m:
+        for x in m.group(1).split(","):
+            x = x.strip()
+            if x.isdigit():
+                out.append(int(x))
+    return out
+
+
+def clean_desc(desc, note=""):
+    """官方说明 → 可读文本：解 `<S:N>` 状态占位符 + 去掉颜色标记。
+
+    - `<S:0>` / `<S:0,1>`：按备注 `state_details` 解成 `<剧毒/黑暗>`（与游戏
+      运行时行为一致，只是不带颜色）；解不了才退「【状态】」占位。
+    - 颜色码 `\\c[99]`、`#G/#R/#M/#Y`、6 位色号：游戏里是着色标记，纯文本无意义。
+    """
+    t = desc or ""
+    if "<S:" in t:
+        ids = _state_details(note)
+        st = _names("States")
+
+        def _sub(m):
+            names = []
+            for k in m.group(1).split(","):
+                k = k.strip()
+                if k.isdigit() and int(k) < len(ids):
+                    nm = st.get(ids[int(k)])
+                    if nm:
+                        names.append(nm)
+            return "<%s>" % "/".join(names) if names else "【状态】"
+
+        t = _RE_SPH.sub(_sub, t)
+    t = _RE_COLOR.sub("", t)
+    t = _RE_HEX.sub("", t)
+    for c in ("#G", "#R", "#M", "#Y"):
+        t = t.replace(c, "")
+    return t
+
+
 def _cell(node, spec):
     """按列定义算一格。spec 形如 '@name' / 'fx:@effects' / 'map:@scope'。"""
     if ":" in spec and not spec.startswith("@"):
@@ -567,6 +784,10 @@ def _cell(node, spec):
         return fmt_list_count(ivar(node, arg))
     if kind == "text":
         return clean_text(s(node, arg))
+    if kind == "desc":
+        # 说明列：解 <S:N> 占位符 + 去颜色码（arg = "@description,@note"）
+        a, b = arg.split(",")
+        return clean_desc(s(node, a), s(node, b))
     if kind == "turns":
         a, b = arg.split(",")
         return "%s ~ %s" % (s(node, a), s(node, b))
