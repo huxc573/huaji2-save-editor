@@ -15,6 +15,7 @@
 启动：python src/huaji2_save_editor.py [存档路径] [--selftest]
 """
 import os
+import tempfile
 import sys
 import time
 import traceback
@@ -99,6 +100,19 @@ TITLE = "%s %s" % (APP_NAME, VERSION)
 CHILD_LIMIT = 300          # 数据树每层最多显示多少项（真实存档有几万个容器）
 LAST_TXT = os.path.join(os.path.expanduser("~"), ".huaji2_save_editor_last.txt")
 DEFAULT_CSV_DIR = os.path.join(os.path.dirname(HERE), "csv")
+
+
+def _in_temp(path):
+    """路径是否在 %TEMP% 下（测试/自动化残留的假存档，绝不自动猜）。"""
+    try:
+        rp = os.path.realpath(path).lower()
+        for base in (os.environ.get("TEMP", ""), tempfile.gettempdir()):
+            if base and rp.startswith(os.path.realpath(base).lower()
+                                      + os.sep):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _read_text(path, limit=200000):
@@ -2891,7 +2905,11 @@ class App(object):
     def _guess_save(self):
         if os.path.exists(LAST_TXT):
             p = open(LAST_TXT, encoding="utf-8").read().strip()
-            if p and os.path.exists(p):
+            # ⚠ 排除 %TEMP% 下的路径：自动化/测试会在 Temp 建假存档副本并
+            #   load 过它（把 LAST_TXT 写成了副本路径），下次启动猜到它只会
+            #   弹「打开失败」—— 而且弹在首帧之前，整个窗口白屏「未响应」
+            #   （2026-10-03 beta.12 实际发生过）。真档永远不在 Temp 里。
+            if p and os.path.exists(p) and not _in_temp(p):
                 return p
         return paths.save_path()
 
