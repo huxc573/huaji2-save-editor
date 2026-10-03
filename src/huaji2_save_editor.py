@@ -376,6 +376,10 @@ class SkillPicker(object):
         self.desc = desc_text           # 只读说明 Text
         self.choices = []
         self.desc_full = ""
+        # 下拉 popdown 悬停浮窗（照画迹1 v1.5.0 的方案移植）
+        self._lb = None                 # 下拉内部 listbox 的 Tcl 路径
+        self._cmds = {}                 # 注册过的 Tcl 回调（只注册一次）
+        self._tip_item = None           # 上次提示的下拉项（变了才重建浮窗）
 
     # ------------------------------------------------------------ 数据
     def meta(self):
@@ -505,6 +509,102 @@ class SkillPicker(object):
                            self.desc.winfo_rootx() + event.x + 12,
                            self.desc.winfo_rooty() + event.y + 12,
                            key=tipkey)
+
+    # -------------------------------------------- 下拉 popdown 悬停浮窗
+    def on_post(self):
+        """下拉即将弹出（ttk 的 -postcommand）：收旧提示并绑好悬停。"""
+        self.app._tip_hide()
+        self.bind_popdown()
+
+    def _tcl_cmd(self, key, func):
+        """把一个 Python 回调注册成 Tcl 命令（缓存住，别每轮注册一遍）。"""
+        if key not in self._cmds:
+            self._cmds[key] = self.app.root.register(func)
+        return self._cmds[key]
+
+    def _popdown_listbox(self):
+        """拿到下拉内部 listbox 的 Tcl 路径（拿不到返回 None）。
+
+        ⚠ 别用 nametowidget：popdown 是 ttk 用 Tcl 直接建的原生 toplevel，
+          tkinter 的 children 字典里没有它 ⇒ nametowidget 直接 KeyError。
+          实测结构：<combobox>.popdown → .f → .f.l(Listbox) / .f.sb(TScrollbar)。
+        """
+        try:
+            pd = self.app.root.tk.call("ttk::combobox::PopdownWindow",
+                                       str(self.cb))
+            kids = self.app.root.tk.call("winfo", "children", "%s.f" % pd)
+        except Exception:
+            return None
+        if not isinstance(kids, (list, tuple)):
+            kids = [kids] if kids else []
+        for ch in kids:
+            ch = str(ch)
+            try:
+                if self.app.root.tk.call("winfo", "class", ch) == "Listbox":
+                    return ch
+            except Exception:
+                continue
+        return None
+
+    def bind_popdown(self):
+        """给下拉内部的 listbox 绑「鼠标移到某项就弹说明」。
+
+        ⚠ 时机：ttk 的 Post 是「先跑 -postcommand，再建/显示 popdown」，所以
+          只能挂在 -postcommand 上（我们这次调用会把 popdown 一并建出来）。
+        ⚠ 绑定走 Tcl 层且不加 '+'：ttk 自己的 <ButtonRelease-1>/<Escape> 挂在
+          ComboboxListbox / Listbox 这些 bindtag 上，不在这控件的 tag 上，
+          覆盖不到它；不加 '+' 则重复绑定只覆盖、不堆叠。
+        返回绑好的 listbox 路径；拿不到就返回 None，不影响正常使用。
+        """
+        lb = self._popdown_listbox()
+        if not lb:
+            return None
+        try:
+            self.app.root.tk.call("bind", lb, "<Motion>", "%s %%y" %
+                                  self._tcl_cmd("motion", self._lb_motion))
+            hide = self._tcl_cmd("hide", self.app._tip_hide)
+            for ev in ("<Leave>", "<ButtonRelease-1>", "<Escape>",
+                       "<FocusOut>"):
+                self.app.root.tk.call("bind", lb, ev, hide)
+            pd = self.app.root.tk.call("ttk::combobox::PopdownWindow",
+                                       str(self.cb))
+            self.app.root.tk.call("bind", pd, "<Unmap>", hide)  # 收起即收提示
+        except Exception:
+            return None
+        self._lb = lb
+        return lb
+
+    def _lb_motion(self, y):
+        """下拉 listbox 上鼠标移动：把该项的说明弹出来（Tcl <Motion> 回调）。"""
+        lb = self._lb
+        if not lb:
+            return
+        try:
+            idx = int(self.app.root.tk.call(lb, "nearest", int(float(y))))
+            if idx < 0 or idx >= int(self.app.root.tk.call(lb, "size")):
+                self.app._tip_hide()
+                return
+            txt = str(self.app.root.tk.call(lb, "get", idx))
+        except Exception:
+            return
+        if txt == self._tip_item:
+            return
+        self._tip_item = txt
+        sid = None
+        if txt.startswith("#") and " " in txt:
+            try:
+                sid = int(txt[1:txt.index(" ")])
+            except ValueError:
+                sid = None
+        meta = self.meta()
+        if sid is None or sid not in meta:
+            self.app._tip_hide()
+            return
+        nm, desc = meta[sid]
+        r = self.app.root
+        self.app._tip_show("技能 #%d %s\n%s" % (sid, nm, desc or "（没有说明）"),
+                           r.winfo_pointerx() + 18, r.winfo_pointery() + 16,
+                           key="%s:lb:%s" % (self.key, txt))
 
 
 class App(object):
@@ -1977,6 +2077,8 @@ class App(object):
         cb.bind("<<ComboboxSelected>>", lambda e: skp.show_desc())
         cb.bind("<Down>", lambda e: skp.arrow(1))
         cb.bind("<Up>", lambda e: skp.arrow(-1))
+        # 下拉展开时给内部 listbox 绑悬停浮窗（-postcommand 在弹出前触发）
+        cb.configure(postcommand=lambda: skp.on_post())
         tree.bind("<<TreeviewSelect>>", lambda e: skp.show_desc())
         # 鼠标放技能行 / 说明框上都弹浮窗（说明太长时窗口里看不全）
         tree.bind("<Motion>", skp.row_tip)
