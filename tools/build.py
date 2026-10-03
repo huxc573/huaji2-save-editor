@@ -44,7 +44,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
 # 画迹2存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
 # 版本号只出现在发行包名上（见下面的 ZIP_NAME）。

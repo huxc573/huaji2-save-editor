@@ -850,14 +850,16 @@ def main():
         print("[NG] 没找到游戏目录，可设 XJ_GAME")
         return 1
     out_dir = DEFAULT_OUT
+    asked_out = False          # ⚠ 只给了 `--out <目录>` 时 argv 会被删空，别当成「没给参数」
     if "--out" in argv:
         i = argv.index("--out")
         if i + 1 >= len(argv):
             print("[NG] --out 后面要跟一个目录，例如：python src/datatables.py --out csv")
             return 1
         out_dir = argv[i + 1]
+        asked_out = True
         del argv[i:i + 2]
-    if not argv:
+    if not argv and not asked_out:
         print("游戏目录 = %s" % game)
         print("%-14s %-8s %-8s %s" % ("表", "中文", "默认转", "行数"))
         for k in ALL_KEYS:

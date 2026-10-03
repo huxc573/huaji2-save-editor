@@ -6,6 +6,7 @@
 import csv
 import os
 import shutil
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -140,6 +141,21 @@ def main():
     datatables.export_all(os.path.join(WORK, "def8"))
     n8 = len([x for x in os.listdir(os.path.join(WORK, "def8")) if x.endswith(".csv")])
     check("默认只导 8 张", n8 == 8, "%d 个" % n8)
+
+    # 命令行入口：只给 --out 也必须真导出（曾经只会打印一遍表清单就退出）
+    cli_dir = os.path.join(WORK, "cli")
+    os.makedirs(cli_dir, exist_ok=True)
+    script = os.path.join(ROOT, "src", "datatables.py")
+    p = subprocess.run([sys.executable, script, "--out", cli_dir],
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    n_csv = len([x for x in os.listdir(cli_dir) if x.endswith(".csv")])
+    check("CLI: --out <目录> 真导出了 8 张", p.returncode == 0 and n_csv == 8,
+          "退出码 %d / %d 个 csv" % (p.returncode, n_csv))
+    p2 = subprocess.run([sys.executable, script], capture_output=True, text=True,
+                        encoding="utf-8", errors="replace")
+    check("CLI: 不带参数仍是表清单", "用法：" in (p2.stdout or ""),
+          "退出码 %d" % p2.returncode)
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== %d 通过 / %d 失败 ====" % (OK[0], OK[1]))

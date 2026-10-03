@@ -95,7 +95,11 @@ LICENSE_NAME = "MIT"
 TITLE = "%s %s" % (APP_NAME, VERSION)
 
 CHILD_LIMIT = 300          # 数据树每层最多显示多少项（真实存档有几万个容器）
-LAST_TXT = os.path.join(os.path.expanduser("~"), ".huaji2_save_editor_last.txt")
+LAST_TXT = os.path.join(os.path.expanduser("~"),
+                        ".huaji2_save_editor_last_main.txt")
+#: ⚠ 和内测版（beta 分支）**不能共用**「最近打开」文件：两版存档格式不通用，
+#:   共用会把对方版本的存档路径写进来 —— 下次启动自动载它必弹「打开失败」，
+#:   而且弹在首帧之前、整窗白屏「未响应」（2026-10-03 实际踩了两次）。
 
 
 def _in_temp(path):
@@ -2941,10 +2945,13 @@ class App(object):
         except Exception:
             self.sv = None            # 不是本作存档：只保留"数据树"功能
         self.sync_editor()
-        try:
-            open(LAST_TXT, "w", encoding="utf-8").write(path)
-        except OSError:
-            pass
+        # ⚠ 只记「真档」：测试/自动化在 %TEMP% 建的副本不算 —— 记进去
+        #   下次启动就会自动载它（解不开→弹框→白屏未响应，2026-10-03 踩过）。
+        if not _in_temp(path):
+            try:
+                open(LAST_TXT, "w", encoding="utf-8").write(path)
+            except OSError:
+                pass
         self.var_path.set(path)
         self.clear_dirty()
         # 每个面板单独兜底：一个面板炸了不能把「全部解析数据」也一起带下去
