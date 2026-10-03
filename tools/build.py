@@ -44,7 +44,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 sys.stdout.reconfigure(errors="replace")
 
-APP_VERSION = "2.201-beta.11"
+APP_VERSION = "2.201-beta.12"
 # 版本线（2026-10-02 川定）：本分支（`beta`）是**内测版**的开发线，独立于尝鲜版的 v0.x 线。
 #
 # 版本号 = **游戏版本号 + SemVer 预发布后缀**：`2.201-beta.2`

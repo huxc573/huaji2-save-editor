@@ -897,26 +897,121 @@ class GameEditor(object):
         self.doc.mark_structural()
         return self.item_payload(it)
 
+    #: 游戏写的 type 是中文符号（脚本 `魔兽要诀/孵化蛋…` 那批方法）、
+    #: 工具生成用的是英文（itemattr.py）—— 两套都认，归一到内部键。
+    #: 参照游戏自己的物品浮窗（脚本 `when :魔兽要诀` 那段）做的口径。
+    _PAYLOAD_KINDS = {
+        "孵化蛋": "egg", "baby_egg": "egg",
+        "魔兽要诀": "book", "高级魔兽要诀": "book", "超级魔兽要诀": "book",
+        "特殊魔兽要诀": "book", "低级内丹": "book", "高级内丹": "book",
+        "skill_book": "book",
+        "真知棒": "stick", "超级真知棒": "stick",
+        "real_stick_1": "stick", "real_stick_2": "stick",
+        "制造指南书": "guide", "灵饰指南书": "guide", "guide_book": "guide",
+        "上古锻造图策": "atlas", "ancient_forging_atlas": "atlas",
+        "百炼精铁": "iron", "iron": "iron",
+        "天眼珠": "god_eye_bead", "god_eye_bead": "god_eye_bead",
+        "元灵晶石": "crystal",
+        "宝石": "stone", "stone": "stone",
+        "人参果": "ginseng", "ginseng": "ginseng",
+        "如意丹": "ruyi",
+        "元宵": "yuanxiao", "yuanxiao": "yuanxiao",
+        "进阶石": "promote", "promote_stone": "promote",
+        "导航旗": "flag", "navigation_flag": "flag",
+        "点化石": "dianhua",
+        "鬼谷子": "formation", "formation": "formation",
+    }
+
     def payload_summary(self, node):
-        """一句话描述物件的运行时内容（背包列表“内容”列用），空代表没有。"""
+        """一句话描述物件的运行时内容（背包列表“内容”列用），空代表没有。
+
+        id 一律解成名字（要诀→技能名、蛋→召唤兽名），不再显示 `{id:45}`
+        这种裸数据；翻不动就保留原文（宁缺毋错译）。
+        """
         t, d = self.item_payload(node)
         if not t:
             return ""
-        kid = M.value_of(_deref(hash_get(d, "id"))) if d is not None else None
-        if t == "baby_egg":
+        kind = self._PAYLOAD_KINDS.get(t)
+
+        def dv(key):
+            return M.value_of(_deref(hash_get(d, key))) if d is not None \
+                else None
+
+        if kind == "egg":
+            kid = dv("id")
             acts = self._name_map("Actors")
-            return "蛋→%s(%s)" % (acts.get(kid, "?"), kid)
-        if t == "skill_book":
+            s = "蛋→%s(%s)" % (acts.get(kid, "?"), kid)
+            if dv("mutation"):
+                s += " 变异"
+            return s
+        if kind == "book":
+            kid = dv("id")
             sk = self._name_map("Skills")
-            return "技能书→%s(%s)" % (sk.get(kid, "?"), kid)
-        if t == "formation":
-            key = M.value_of(_deref(hash_get(d, "key"))) if d is not None else None
-            return "阵型→%s" % (key or "?")
-        if t == "guide_book":
-            return "指南书→%s" % self._plain_text(d)
-        if t in ("iron", "god_eye_bead", "stone"):
-            return "%s→等级%s" % (t, M.value_of(_deref(hash_get(d, "lv")))
-                                    if d is not None else "?")
+            nm = t if not str(t).isascii() else "技能书"
+            return "%s→%s(%s)" % (nm, sk.get(kid, "?"), kid)
+        if kind == "stick":
+            acts = self._name_map("Actors")
+            sk = self._name_map("Skills")
+            aid, sid = dv("id"), dv("sid")
+            s = "%s→%s" % (t if not str(t).isascii() else "真知棒",
+                           acts.get(aid, "?"))
+            if sid is not None:
+                s += "；附带技能→%s" % sk.get(sid, "?")
+            return s
+        if kind == "guide":
+            w = dv("type") == "w"
+            return "指南书→%s 等级%s" % ("武器" if w else "防具", dv("lv"))
+        if kind == "atlas":
+            eid = dv("eid")
+            nm = ("护腕", "项圈", "铠甲")[eid - 1] if eid in (1, 2, 3) else "?"
+            return "图策→%s 等级%s" % (nm, dv("lv"))
+        if kind in ("iron", "god_eye_bead", "crystal", "stone"):
+            label = {"iron": "精铁", "god_eye_bead": "天眼珠",
+                     "crystal": "晶石", "stone": "宝石"}[kind]
+            return "%s→等级%s" % (label, dv("lv"))
+        if kind in ("ginseng", "ruyi"):
+            names = ("体质", "魔力", "力量", "耐力", "敏捷")
+            ty = dv("type")
+            nm = names[ty] if isinstance(ty, int) and 0 <= ty < 5 else "?"
+            label = "人参果" if kind == "ginseng" else "如意丹"
+            return "%s→%s %s/%s" % (label, nm, dv("point"), dv("max"))
+        if kind == "yuanxiao":
+            names = ("攻击资质", "防御资质", "体力资质", "法力资质",
+                     "速度资质", "躲闪资质", "成长")
+            ty = dv("type")
+            nm = names[ty] if isinstance(ty, int) and 0 <= ty < 7 else "?"
+            val = _deref(hash_get(d, "value")) if d is not None else None
+            v = "?"
+            if isinstance(val, M.HashNode) and val.pairs:
+                # 游戏就是按下标取第 type 个值（`d[:value].values[d[:type]]`）
+                pair = val.pairs[ty] if isinstance(ty, int) and \
+                    0 <= ty < len(val.pairs) else None
+                if pair is not None:
+                    v = M.value_of(_deref(pair[1]))
+            mx = _deref(hash_get(d, "max")) if d is not None else None
+            if isinstance(mx, M.ArrayNode) and isinstance(ty, int) and \
+                    0 <= ty < len(mx.items):
+                mx = M.value_of(_deref(mx.items[ty]))
+            else:
+                mx = M.value_of(mx) if mx is not None else "?"
+            return "元宵→%s %s/%s" % (nm, v, mx)
+        if kind == "promote":
+            aid = dv("id")
+            acts = self._name_map("Actors")
+            who = "无" if aid == 0 else acts.get(aid, "?")
+            cnt = dv("count")
+            prog = "" if cnt is None else \
+                (" 已充沛" if cnt == 50 else " %s/50" % cnt)
+            return "进阶石→%s%s" % (who, prog)
+        if kind == "flag":
+            return "导航旗→剩余%s次" % dv("count")
+        if kind == "dianhua":
+            kid = dv("id")
+            sk = self._name_map("Skills")
+            return "点化石→%s" % sk.get(kid, "?")
+        if kind == "formation":
+            key = dv("key")
+            return "鬼谷子→阵法·%s" % (key or "?")
         return "%s→%s" % (t, self._plain_text(d))
 
     @staticmethod
@@ -958,7 +1053,7 @@ class GameEditor(object):
         if isinstance(value, int):
             return int_node(value)
         if isinstance(value, float):
-            return M.FloatNode(value)
+            return M.FloatNode(value, repr(value).encode("ascii"))
         if isinstance(value, bytes):
             return str_node(value)
         if isinstance(value, str):
