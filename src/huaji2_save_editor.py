@@ -98,7 +98,8 @@ LICENSE_NAME = "MIT"
 TITLE = "%s %s" % (APP_NAME, VERSION)
 
 CHILD_LIMIT = 300          # 数据树每层最多显示多少项（真实存档有几万个容器）
-LAST_TXT = os.path.join(os.path.expanduser("~"), ".huaji2_save_editor_last.txt")
+LAST_TXT = os.path.join(os.path.expanduser("~"),
+                        ".huaji2_save_editor_last_beta.txt")
 DEFAULT_CSV_DIR = os.path.join(os.path.dirname(HERE), "csv")
 
 
@@ -2902,6 +2903,32 @@ class App(object):
             % (APP_NAME, VERSION, AUTHOR, HOMEPAGE, ISSUES, LICENSE_NAME),
             parent=self.root)
 
+    @staticmethod
+    def _looks_like_ours(path):
+        """这个存档是不是本工具吃的版本（内测版 V2.201）？
+
+        川 2026-10-03 要求：**先识别文件和存档版本**再载入。跨版存档
+        （拿内测版工具开尝鲜版档）以前要等自动载入弹「打开失败」才发现，
+        模态框还把窗口卡成「未响应」；现在猜路径阶段就验，验不过不载。
+
+        ⚠ 只看**第一个 AES 块**（16 字节），绝不整档解 —— `save_v201`
+          的 `looks_like_v201()` 会把整个文件 AES+Inflate 解开，纯 Python
+          AES 解几 MB 要 30+ 秒（2026-10-03 实测 35.5s），启动探测绝不能走它。
+          V2.201 明文以 Zlib 流开头（0x78 'x'），第一个块里就能验。
+        """
+        try:
+            import save_v201
+            raw = open(path, "rb").read(16)
+            if len(raw) < 16:
+                return False
+            head = save_v201._aes_ecb(raw, save_v201.save_key(), True)
+            if head[:1] != b"x":                 # zlib 头 0x78
+                return False
+            # zlib 头两字节校验：(CMF*256 + FLG) % 31 == 0
+            return (head[0] * 256 + head[1]) % 31 == 0
+        except Exception:
+            return False
+
     def _guess_save(self):
         if os.path.exists(LAST_TXT):
             p = open(LAST_TXT, encoding="utf-8").read().strip()
@@ -2909,9 +2936,20 @@ class App(object):
             #   load 过它（把 LAST_TXT 写成了副本路径），下次启动猜到它只会
             #   弹「打开失败」—— 而且弹在首帧之前，整个窗口白屏「未响应」
             #   （2026-10-03 beta.12 实际发生过）。真档永远不在 Temp 里。
-            if p and os.path.exists(p) and not _in_temp(p):
+            if p and os.path.exists(p) and not _in_temp(p) \
+                    and self._looks_like_ours(p):
                 return p
-        return paths.save_path()
+            if p and os.path.exists(p) and not _in_temp(p):
+                # 名字对、打不开：多半是跨版本存档（比如尝鲜版的档）
+                self.set_status(
+                    "上次打开的「%s」不是内测版 V2.201 格式（可能是尝鲜版"
+                    "存档），已跳过；请点「选择存档…」手动选内测版存档。"
+                    % os.path.basename(p))
+        p = paths.save_path()
+        # 游戏目录里那份也要验：内测版工具若对着尝鲜版目录跑，同样不能载
+        if p and not self._looks_like_ours(p):
+            return None
+        return p
 
     def refresh_env(self):
         g = paths.find_game_dir()
@@ -2936,11 +2974,39 @@ class App(object):
         if p:
             self.load(p)
 
+    def _pump(self, msg):
+        """载入途中刷一条进度 + 泵一轮消息。
+
+        ⚠ 载真档要几秒（解密+解析+刷全部页签），期间主线程若不取消息，
+          Windows 直接给窗口挂「未响应」，看起来像死了（2026-10-03 川实报）。
+          这里主动 update() 一轮：窗口能重绘、标题不挂未响应。
+        ⚠ update() 会放行用户输入 ⇒ 用 _loading 挡住 load 重入（见 load）。
+        """
+        if msg:
+            self.set_status(msg)
+        try:
+            self.root.update()
+        except Exception:
+            pass
+
     def load(self, path, quiet=False):
+        # 防重入：_pump 会 update() 放行用户输入，别让「重新载入」在载入
+        # 途中再进来一层（半载状态再 load 必炸）。
+        if getattr(self, "_loading", False):
+            return
+        self._loading = True
+        try:
+            self._load_impl(path, quiet)
+        finally:
+            self._loading = False
+
+    def _load_impl(self, path, quiet=False):
         # 手动载入 = 已明确指定要开哪本，把 __init__ 里排队的自动载入撤掉。
         # 不撤的话，那个 after(200) 回调随后会把 doc 换回 _guess_save() 猜到的
         # 那本档 —— 自动化脚本先 load(副本) 再改，最终就写到了玩家真档上。
         self.cancel_auto_load()
+        self._pump("正在打开 %s …（解密+解析要几秒，不是卡死）"
+                   % os.path.basename(path))
         try:
             self.doc = doctree.Doc(path)
         except Exception as e:
@@ -2960,14 +3026,19 @@ class App(object):
                 self.sv = None
         except Exception:
             self.sv = None            # 不是本作存档：只保留"数据树"功能
+        self._pump("正在解析存档结构 …")
         self.sync_editor()
-        try:
-            open(LAST_TXT, "w", encoding="utf-8").write(path)
-        except OSError:
-            pass
+        # ⚠ 只记「真档」：测试/自动化在 %TEMP% 建的副本不算 —— 记进去
+        #   下次启动就会自动载它（解不开→弹框→白屏未响应，2026-10-03 踩过）。
+        if not _in_temp(path):
+            try:
+                open(LAST_TXT, "w", encoding="utf-8").write(path)
+            except OSError:
+                pass
         self.var_path.set(path)
         self.clear_dirty()
         # 每个面板单独兜底：一个面板炸了不能把「全部解析数据」也一起带下去
+        self._pump("正在刷新各页签 …")
         bad = self.refresh_panels()
         if bad:
             self.set_status("已载入 %s，但「%s」刷新失败：%s"
@@ -3082,6 +3153,7 @@ class App(object):
                          ("机器码", lambda: self.machine_show(quiet=True)),
                          ("存档管理", self.saves_refresh),
                          ("环境信息", self.refresh_env)):
+            self._pump("正在刷新「%s」…" % step)
             try:
                 fn()
             except Exception as e:
