@@ -12,14 +12,14 @@
       end
       def show; load.map{|i| AES_ECB.decrypt(i) }.join.to_i; end
     end
-    AES_ECB.set_key('admin_1941344749')       # 脚本第 1142 行
+    AES_ECB.set_key('admin_alskmcndfj')       # 脚本第 1843 行（V2.201；旧文档写的 1142 行/旧密钥已失效）
 
 所以改背包数量之后，必须把对应物品的 `security[:items][id]` 计数一起改对，
 否则游戏下次"合法获得"这件物品时会发现对不上，把存档标成作弊
 （`$game_system.cheated = frame_count`，之后 20 分钟警告、25 分钟 `msgbox + exit`）。
 
 参数（照抄游戏脚本）：
-  * 密钥 `admin_1941344749`（16 字节 → AES-128）；
+  * 密钥 `admin_alskmcndfj`（16 字节 → AES-128；V2.201 实际值）；
   * 填充 PKCS#7（`pad = 16 - len % 16`，补那么多个 pad 字节）；
   * 加密结果按十六进制小写字符串返回，解密时按 32 个字符一块。
 
@@ -28,7 +28,7 @@
 """
 import os
 
-KEY = b"admin_1941344749"
+KEY = b"admin_alskmcndfj"
 
 
 # --------------------------------------------------------------------------
@@ -275,3 +275,14 @@ if __name__ == "__main__":
         h = encrypt_digit(d)
         back = decrypt_digit(h)
         print("  %s -> %s -> %s %s" % (d, h, back, "[OK]" if back == d else "[NG]"))
+    # 钉子：**游戏自己写的账**（AutoSave\_save.rvdata2 的 gold 账，值 13790）。
+    # 密钥一旦被改错（历史上就是照脚本里作者 QQ 号猜的 `admin_1941344749`），
+    # 这几位立刻解不出来 —— 用来防「密钥回退」。取样来源：script00:1843 的 key。
+    for h, want in (("4dea3f29581a67232acee5e599d13810", "1"),
+                    ("2f8eabf1a03916708c53f1ec416d762a", "3"),
+                    ("7520b37734999c73b6003684e49d8557", "7"),
+                    ("22a3126a7d9fdb5daec2b75da28698c3", "9"),
+                    ("e7e794b9942d4a9e8191727faa25d465", "0")):
+        back = decrypt_digit(h)
+        print("  真档样本 %s… -> %s %s"
+              % (h[:8], back, "[OK]" if back == want else "[NG]"))
