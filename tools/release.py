@@ -5,6 +5,15 @@ r"""发 GitHub Release：按 `build.py` 里的命名规则准备好附件，再�
     python tools/release.py --upload-only   # Release 已存在，只重传附件
     python tools/release.py --dry           # 只打印要做什么，不动手
     python tools/release.py --no-prerelease # 临时不挂 Pre-release 标签
+    python tools/release.py --no-draft      # 临时不存草稿（直接对外公布）
+    python tools/release.py --publish       # 把已存在的 Draft 转成正式发布
+
+Draft（草稿，2026-10-05 川定）：**内测版线平时不公布产物** —— 按 `build.py` 的
+    `APP_DRAFT` 默认存成 Draft。Draft 期间 Releases 页不列、`/releases/tags/<tag>`
+    对非协作者 404，**tag 也不会被创建**（前提是没手动 `git push` 过这个 tag）
+    —— 所以 `beta` 线的发版流程是「本地打 tag → 不 push → 跑本脚本」，
+    GitHub 到 `--publish` 那一刻才建 tag。⚠ **别再把 tag 提前 push 上去**，
+    推了 tag 就公开了，Draft 只挡得住 Release 对象本身。
 
 附件命名（**唯一来源在 tools/build.py**，别在这儿手敲）：
     huaji2-save-editor-v<版本>.zip   发行包 = 主程序 + XJCodec32.exe + 使用说明
@@ -132,12 +141,32 @@ def main():
     argv = sys.argv[1:]
     dry = "--dry" in argv
     upload_only = "--upload-only" in argv
+    publish = "--publish" in argv
     # 版本号是 `2.201-beta.N` 这种标准 SemVer 预发布形状，GitHub 本会自动标
     # Pre-release；这里再显式给一次（见 build.py 的 APP_PRERELEASE），
     # 不依赖平台推断。`--no-prerelease` 可以临时关掉。
     prerelease = b.APP_PRERELEASE and "--no-prerelease" not in argv
+    # Draft（2026-10-05 川定）：内测版线平时不公布产物 —— 默认按 build.py 的
+    # APP_DRAFT（beta 线 = True）。`--draft` / `--no-draft` 临时覆盖。
+    draft = ("--draft" in argv) or (b.APP_DRAFT and "--no-draft" not in argv)
+    flags = (["Pre-release"] if prerelease else []) + (["Draft（不公布）"] if draft else [])
     print("版本 %s → tag %s%s" % (b.APP_VERSION, TAG,
-                                  "（Pre-release）" if prerelease else ""))
+                                  ("（" + "、".join(flags) + "）") if flags else ""))
+
+    # --publish：把已存在的 Draft 转正式发布（不重建、不重传附件）
+    if publish:
+        cmd = ["gh", "release", "edit", TAG, "--draft=false"]
+        if prerelease:
+            cmd.append("--prerelease")
+        print("将执行：gh release edit %s --draft=false …" % TAG)
+        if dry:
+            print("--dry，未执行")
+            return 0
+        p = subprocess.run(cmd, cwd=ROOT)
+        if p.returncode != 0:
+            print("[NG] gh 返回 %d（Draft 转正式失败，确认 tag 名对不对）" % p.returncode)
+        return p.returncode
+
     title = title_text()
     print("Release 标题：%s" % title)
     files = stage_assets()
@@ -156,6 +185,8 @@ def main():
                "--notes-file", notes] + files
         if prerelease:
             cmd.insert(4, "--prerelease")
+        if draft:
+            cmd.insert(4, "--draft")
     print("将执行：gh release %s %s …" % ("upload" if upload_only else "create", TAG))
     if dry:
         print("--dry，未执行")

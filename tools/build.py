@@ -64,6 +64,16 @@ APP_VERSION_LINE = "beta"  # 本分支对应的发版分支（gh release --targe
 #: （后缀已经是标准 SemVer 预发布，GitHub 本就会自动标；这里显式再给一次，
 #:   不依赖平台推断 —— 免得哪次版本号写成 `2.201-beta.x` 之外的形状就悄悄变成正式版。）
 APP_PRERELEASE = True
+#: 发 Release 时先存成 **Draft（草稿）**，不对外公布。内测版线永远是 `True`
+#: （2026-10-05 川定：「内测版修改器产物正常情况下不公布，有源码、有能力的人自然会
+#:   自己用和编译」）。Draft 期间的效果：
+#:   * Releases 页不列出、`/releases/tags/<tag>` 对非协作者 **404**；
+#:   * **tag 也不会被创建** —— 前提是这个 tag 没被手动 `git push` 过
+#:     （创建 draft 用的是 `--target <分支>`，GitHub 到 publish 那一刻才真正建 tag）
+#:     ⇒ 连版本号都不对外露。⚠ draft 流程下**别提前 `git push` tag**。
+#:   * 附件与正文原样保留，想公开就 `python tools/release.py --publish`。
+#:   * 命令行可临时覆盖：`--draft` 强制存草稿、`--no-draft` 强制直接公布。
+APP_DRAFT = True
 # 本地产物名**不带版本号**（2026-09-20 川）：dist 里永远只有一个
 # 画迹2内测版存档工具.exe，不会被 vX.Y.Z 版本名占满、也不会误点开旧版本。
 # 版本号只出现在发行包名上（见下面的 ZIP_NAME）。
