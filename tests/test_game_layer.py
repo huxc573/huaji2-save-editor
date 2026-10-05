@@ -17,6 +17,7 @@ sys.stdout.reconfigure(errors="replace")
 import backup  # noqa: E402
 import paths  # noqa: E402
 import game  # noqa: E402
+import itemattr  # noqa: E402
 import marshal_ruby as M  # noqa: E402
 import save  # noqa: E402
 
@@ -140,10 +141,16 @@ def main():
     # 正常存档本来就不该有超限项（这个副本是干净档）；先造一个作弊标记，
     # 再看体检能不能标出来。
     sys_node = save._deref(save.ivar(sv.section("system"), "@cheated"))
-    sv.doc.set_value(sys_node, True)
-    rep = g.anti_cheat_report()
-    check("体检能标出超限项", any(r[3] for r in rep),
-          "、".join(r[0] for r in rep if r[3])[:60] or "（没有超限项）")
+    # ⚠ V2.201（内测版）没有 @cheated 节点 —— 原来这里直接 set_value(None, True)
+    # 会抛 AttributeError，让**整组**测试在 143 行就早退（后面所有段都跑不到，
+    # 包括 actor_exp_fill 那组）。加守卫跳过这一小段。
+    if sys_node is None:
+        print("  （内测版没有 @cheated 节点，跳过「造作弊标记 + 检出」这段）")
+    else:
+        sv.doc.set_value(sys_node, True)
+        rep = g.anti_cheat_report()
+        check("体检能标出超限项", any(r[3] for r in rep),
+              "、".join(r[0] for r in rep if r[3])[:60] or "（没有超限项）")
 
     # 故意越界：金钱拉满到上限之上（走底层 sv.set_gold，模拟外部直接改值，
     # 只动 Lock 不动游戏记账 —— 这正是旧版工具留下的坑）
@@ -223,6 +230,15 @@ def main():
     only = g.set_machine_ids(["888888888"])
     check("能整组替换机器码", only == ["888888888"] 
           or only == ["888888888"][:len(only)], "%r" % (only,))
+    # ⚠ 回归钉子（2026-10-04 川）：机器码换成别人的码之后，**自动修复不许把
+    #   本机码塞回来** —— 原来 `fix_anti_cheat` 里有一段「本机码不在档就追加」，
+    #   于是「替换 → 保存 → 重载」本机真实机器码又冒出来了。
+    g.fix_anti_cheat(clamp=False, clear_flag=False)
+    check("自动修复不会把本机码塞回存档", g.machine_ids() == ["888888888"],
+          "%r" % (g.machine_ids(),))
+    rows_m2 = [r for r in g.anti_cheat_report() if "机器码" in r[0]]
+    check("机器码不在档也不算问题项", bool(rows_m2) and not rows_m2[0][3],
+          repr(rows_m2[0][:4]) if rows_m2 else "没这项")
     g.set_machine_ids(ids)                     # 恢复成原来的
     check("机器码能恢复原样", g.machine_ids() == ids, "%r" % g.machine_ids())
 
@@ -273,12 +289,18 @@ def main():
     kid = M.value_of(save._deref(save.hash_get(d, "id"))) if d is not None \
         else None
     check("新加的孵化蛋自己生成了 @attr 内容",
-          t == "baby_egg" and isinstance(kid, int),
+          t == "孵化蛋" and isinstance(kid, int),
           "type=%r id=%r" % (t, kid))
-    check("生成的召唤兽 id 落在游戏范围内",
-          kid in list(range(21, 24)) + list(range(25, 64))
-          + list(range(64, 96)) + list(range(127, 135))
-          + list(range(96, 127)) or kid is not None, kid)
+    # ⚠ 必须是**游戏写的中文符号**：游戏按 `case item.data[:type]` 分发，
+    #   早期工具写的 `:baby_egg` 游戏一律不认（浮窗不显示、用的时候还可能报错）。
+    _pool0 = itemattr.egg_pool(110)
+    check("写的 type 是游戏符号（:孵化蛋，不是 :baby_egg）", t == "孵化蛋", t)
+    check("初级孵化蛋的兽池 = 真值三档第 0 档（allow_lv 0..55）",
+          bool(_pool0) and all(
+              itemattr._BA.SPECIES[i]["allow_lv"] <= 55 for i in _pool0),
+          "%d 只，例 %s" % (len(_pool0), _pool0[:6]))
+    check("生成的召唤兽 id 落在该档兽池里", kid in _pool0,
+          "id=%r 池=%d 只" % (kid, len(_pool0)))
     g.clear_slot("Items", probe)
     g.add_item("Items", probe, 110, 1, kid=57)
     it = _item_of(g, "Items", probe)
@@ -329,7 +351,7 @@ def main():
     g.pack_fix(rows_bad)
     _t3, d3 = g.item_payload(_item_of(g, "Items", probe2))
     check("一键修复能把运行时内容补回来",
-          _t3 == "baby_egg" and d3 is not None, "type=%r" % (_t3,))
+          _t3 == "孵化蛋" and d3 is not None, "type=%r" % (_t3,))
     g.clear_slot("Items", probe2)
 
     # ---------------- v0.4.3：重抽 / 指定内容 + 内容摘要
@@ -346,7 +368,7 @@ def main():
           "%r" % (d4,))
     g.set_payload("Items", probe3)          # 不给 kid = 按游戏范围随机
     _t5, d5 = g.item_payload(_item_of(g, "Items", probe3))
-    check("不给 kid 时随机重抽", _t5 == "baby_egg" and d5 is not None, "%r" % (d5,))
+    check("不给 kid 时随机重抽", _t5 == "孵化蛋" and d5 is not None, "%r" % (d5,))
     try:
         g.set_payload("Items", 999, kid=1)
         check("对空格子重抽会报错", False)
@@ -392,7 +414,7 @@ def main():
                      M.HashNode([(M.SymbolNode("data"), payload)],
                                 default=None))
     check("符号键现在能被“读”出来（兼容）",
-          g.item_payload(it5)[0] == "baby_egg", g.payload_summary(it5))
+          g.item_payload(it5)[0] == "孵化蛋", g.payload_summary(it5))
     check("但体检知道游戏读不到（键类型不对）", not g.payload_key_ok(it5))
     rows5 = g.pack_report()
     check("体检会把“键类型不对”列出来",
@@ -409,6 +431,50 @@ def main():
               save.hash_get(d6, "id"))) == 57,
           "type=%r" % (_t6,))
     g.clear_slot("Items", probe5)
+
+    # ---------------- 2026-10-04：全部生成器对齐 V2.201 的**中文符号**
+    #  游戏是 `case item.data[:type]` 分发，工具以前写的是英文名（`:导航旗` →
+    #  `:navigation_flag`）⇒ 游戏浮窗不显示、使用逻辑也进不去。实测真档里
+    #  游戏写的是 `导航旗`、而工具写过的那件是 `navigation_flag`。
+    want = {
+        110: "孵化蛋", 113: "孵化蛋", 221: "孵化蛋",
+        235: "礼盒", 94: "导航旗",
+        66: "魔兽要诀", 67: "高级魔兽要诀",
+        152: "特殊魔兽要诀", 161: "超级魔兽要诀",
+        135: "激进元宵丹", 104: "元宵", 90: "人参果",
+        91: "真知棒", 92: "超级真知棒", 93: "鬼谷子",
+        68: "制造指南书", 69: "百炼精铁", 70: "上古锻造图策",
+        71: "天眼珠", 73: "宝石",
+    }
+    free = list(g.empty_slots("Items"))
+    bad_sym = []
+    for iid in sorted(want):
+        if not free:
+            break
+        slot = free.pop(0)
+        nm = g.item_needs_payload("Items", iid)[1]
+        g.add_item("Items", slot, iid, 1, clone_like=False)
+        got, _d = g.item_payload(_item_of(g, "Items", slot))
+        if got != want[iid]:
+            bad_sym.append("#%d %s → %r（应 %r）" % (iid, nm, got, want[iid]))
+        g.clear_slot("Items", slot)
+    check("每件运行时物品写的 type 都是游戏的中文符号",
+          not bad_sym, "；".join(bad_sym) or "%d 件全对" % len(want))
+    check("旧英文 type（:baby_egg）仍读得出来（兼容老存档）",
+          g._PAYLOAD_KINDS.get("baby_egg") == "egg")
+    # 兽池：三档互不重叠，且神兽池照脚本取 135..170 ∩ type2
+    tiers = [set(itemattr.egg_pool(110 + k)) for k in range(3)]
+    check("孵化蛋三档兽池互不重叠",
+          not (tiers[0] & tiers[1]) and not (tiers[1] & tiers[2])
+          and not (tiers[0] & tiers[2]),
+          "三档 %d/%d/%d 只" % tuple(len(x) for x in tiers))
+    _gods = set(itemattr.egg_pool(113))
+    check("神兽孵化蛋兽池 = 135..170 ∩ (神兽资质 ∪ 神兽资质2)",
+          _gods and all(135 <= i <= 170 for i in _gods)
+          and _gods == set(itemattr.egg_pool(221)) | set(itemattr.egg_pool(222)),
+          "%d 只（普通 %d + 生肖 %d）"
+          % (len(_gods), len(itemattr.egg_pool(221)),
+             len(itemattr.egg_pool(222))))
 
     # ---------------- 保存 / 重开
     before = dict((r[0], r[5]) for r in g.bag("Items"))
@@ -596,7 +662,7 @@ def main():
           [g3._actor_attr_int(a5, k) for k in FIVE] == [40] * 5,
           [g3._actor_attr_int(a5, k) for k in FIVE])
 
-    # ---------------- `actor_exp_full` = 界面「经验拉满」（2026-09-20 新增）
+    # ---------------- `actor_exp_full` = 界面「一键满级」（2026-09-20 新增）
     print("\n-- actor_exp_full：等级 + 获得经验一起拉满 --")
     g3.set_actor_level_full(a5, 10)
     lvf, wrotef = g3.actor_exp_full(a5)
@@ -605,6 +671,21 @@ def main():
           and wrotef == game.exp_for_level(game.MAX_LEVEL_ACTOR, "actor")
           and g3.exp(a5) == wrotef,
           "%r / %r" % (lvf, wrotef))
+
+    # ---------------- `actor_exp_fill` = 界面「经验拉满」（2026-10-03 新增）
+    # 只写 @exp、**不动等级** —— 回游戏自己点「升级」（一次一级）。
+    print("\n-- actor_exp_fill：只写经验、等级不动 --")
+    check("ACTOR_EXP_FILL = 5000 万", game.ACTOR_EXP_FILL == 50000000,
+          game.ACTOR_EXP_FILL)
+    g3.set_actor_level_full(a5, 25)
+    lv_before = g3.actor_level(a5)
+    wf = g3.actor_exp_fill(a5)
+    check("actor_exp_fill → @exp = ACTOR_EXP_FILL",
+          wf == game.ACTOR_EXP_FILL and g3.exp(a5) == game.ACTOR_EXP_FILL,
+          "%r / %r" % (wf, g3.exp(a5)))
+    check("actor_exp_fill 不动等级",
+          g3.actor_level(a5) == lv_before == 25,
+          "before=%r after=%r" % (lv_before, g3.actor_level(a5)))
 
     # ---------------- 角色技能 @skills（2026-09-20；角色没有 12 个上限）
     print("\n-- 角色技能：@skills 读写 --")
@@ -656,16 +737,26 @@ def main():
     # ---------------- 门派 @sect_id（2026-09-20；门派不是 Data 表，是脚本 $sects）
     print("\n-- 门派：@sect_id / 门派技能表 --")
     from tables import sect
-    check("门派表 13 项（无门派 + 12 门派）", len(sect.SECTS) == 13,
-          len(sect.SECTS))
+    # 2026-10-04：按真实 `$sects` 补齐 —— **14 个门派**（0 无门派 + 1..13 + 20 九黎城），
+    # id **不连号**；每个门派 10 个 + 1 个 index 10 的「上古××」秘技（凌波城 12 个）。
+    check("门派表 15 项（无门派 + 14 门派；id 不连号：…13、20）",
+          len(sect.SECTS) == 15 and 13 in sect.SECTS and 20 in sect.SECTS
+          and 14 not in sect.SECTS, len(sect.SECTS))
     check("无门派没有技能", sect.sect_skill_ids(0) == ())
-    check("每个正式门派 10 个技能",
-          all(len(sect.sect_skill_ids(s)) == 10
+    check("每个正式门派 ≥10 个技能（含 index 10 的秘技）",
+          all(len(sect.sect_skill_ids(s)) >= 10
               for s in sect.SECT_ORDER if s != 0),
           [len(sect.sect_skill_ids(s)) for s in sect.SECT_ORDER])
     check("门派名字 -> id 能反查", sect.SECT_NAME_TO_ID.get("五庄观") == 1)
+    check("两个新门派在表里（凌波城 13 / 九黎城 20）、10 号已改名「阴曹地府」",
+          sect.SECT_NAME_TO_ID.get("凌波城") == 13
+          and sect.SECT_NAME_TO_ID.get("九黎城") == 20
+          and sect.sect_name(10) == "阴曹地府", sect.sect_name(10))
     check("技能能反查门派（181 -> 1 五庄观）",
           sect.sect_of_skill(181) == 1)
+    check("新门派的技能也能反查（713 -> 13 凌波城 / 701 -> 20 九黎城）",
+          sect.sect_of_skill(713) == 13 and sect.sect_of_skill(701) == 20,
+          "%r / %r" % (sect.sect_of_skill(713), sect.sect_of_skill(701)))
     check("职业自带的 #9 不属于任何门派（别把职业技能算成门派技能）",
           sect.sect_of_skill(9) is None)
 

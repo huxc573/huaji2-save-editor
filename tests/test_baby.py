@@ -18,6 +18,7 @@ import paths         # noqa: E402
 import game        # noqa: E402
 import marshal_ruby as M  # noqa: E402
 import save        # noqa: E402
+from tables import baby_aptitude as BA  # noqa: E402
 
 OK = [0, 0]
 WORK = os.path.join(HERE, "_baby")
@@ -58,9 +59,12 @@ def main():
     check("小孩是神兽（资质取定值）", B.is_god(181) and B.is_god(186))
     check("大海龟是普通（资质带随机）", not B.is_god(21))
     c181 = B.config(181)
-    check("神兽资质3 配置正确",
-          c181["atk"] == 2400 and c181["hp"] == 7500 and c181["grow"] == 1.8
-          and c181["life"] == "infinite",
+    # ⚠ 期望值从真值表取（`$baby` 是 2026-10-04 从内测版 eval_17.rb 生成的）：
+    #   以前这里硬编码尝鲜版的估算值 2400/7500/1.8，一换真值表就全 NG。
+    _p3 = BA.POOLS["神兽资质3"]
+    check("神兽资质3 配置正确（与表一致）",
+          c181["atk"] == _p3["atk"] and c181["hp"] == _p3["hp"]
+          and c181["grow"] == _p3["grow"] and c181["life"] == "infinite",
           "atk=%s hp=%s grow=%s life=%s" % (c181["atk"], c181["hp"],
                                             c181["grow"], c181["life"]))
 
@@ -76,11 +80,12 @@ def main():
           g.baby_value(b, "level"))
     a = B.g.baby_attr(b)
     check("type = :神兽", M.value_of(_deref_attr(a, "@type")) == "神兽")
+    _six = [g.baby_value(b, k) for k in ("atk", "def", "hpq", "mpq", "agi", "eva")]
     check("六项资质 = 神兽资质3 定值",
-          [g.baby_value(b, k) for k in ("atk", "def", "hpq", "mpq", "agi", "eva")]
-          == [2400, 2400, 7500, 4800, 2100, 2100],
-          [g.baby_value(b, k) for k in ("atk", "def", "hpq", "mpq", "agi", "eva")])
-    check("成长 = 1.8", abs(g.baby_value(b, "grow") - 1.8) < 1e-6,
+          _six == [_p3["atk"], _p3["def"], _p3["hp"], _p3["mp"],
+                   _p3["agi"], _p3["eva"]], _six)
+    check("成长 = 表里的 %s" % _p3["grow"],
+          abs(g.baby_value(b, "grow") - _p3["grow"]) < 1e-6,
           g.baby_value(b, "grow"))
     life = M.value_of(_deref_attr(a, "@life"))
     check("寿命 = :infinite（永生）", life == "infinite", repr(life))
@@ -92,7 +97,7 @@ def main():
     check("潜能 = 召唤兽等级 * 5（1 级 = 5）",
           g.baby_value(b, "潜能") == 5 * g.baby_value(b, "level"),
           g.baby_value(b, "潜能"))
-    # ---------------- 「经验拉满」（2026-09-20；「满级(65)」预设已去掉）
+    # ---------------- 「一键满级」（2026-09-20；「满级(65)」预设已去掉；2026-10-03 改名）
     # 为什么不能只写 @exp：召唤兽靠经验确实会自己连升（Game_Baby#change_exp 7014
     # 的 `level_up while`），但卡「主人等级 + 5」，所以顶不到 65（详见 baby_exp_full）。
     lv0 = g.baby_value(b, "level")
@@ -206,13 +211,46 @@ def main():
     names = [B2.display_name(x) for _i, x in rows]
     check("保存重开后新召唤兽还在",
           "小精灵" in names and "大海龟" in names, "、".join(names))
+    # ⚠ 按**位置**取测试新加的那只小精灵（倒数第二只，末尾是变异大海龟）：
+    #   真档里本来就可能有一只同名的「小精灵」，按名字过滤会一次命中两只
+    #   ⇒ `== ["火"]` 恒 NG（2026-10-04 查出的假 NG）。
+    _kid = rows[-2][1]
+    check("新加的小精灵在倒数第二只", B2.display_name(_kid) == "小精灵",
+          B2.display_name(_kid))
     check("重开后资质没变",
-          [g2.baby_value(x, "atk") for _i, x in rows if B2.display_name(x) == "小精灵"]
-          == [2400])
+          [g2.baby_value(_kid, "atk")] == [_p3["atk"]],
+          "%r" % [g2.baby_value(_kid, "atk")])
     check("重开后五行还在（String 节点原样写回）",
-          [g2.baby_value(x, "five") for _i, x in rows
-           if B2.display_name(x) == "小精灵"] == ["火"],
-          repr([g2.baby_value(x, "five") for _i, x in rows]))
+          g2.baby_value(_kid, "five") == "火",
+          repr(g2.baby_value(_kid, "five")))
+
+    # ---------------- @baby 不变量（2026-10-04 翻车复盘）
+    # 坏法：`set_active` 把 `@babys[index]`（**常是 '@N' 链接**）原样写进 @baby，
+    # 链接里是解析那一刻的编号，周围对象一增删就指到别的对象 → 存档里 @baby
+    # 成了数组/字符串，游戏进图 `Game_Party#battle_members` 的 `b.exist?`
+    # 直接 NoMethodError。契约：set_ivar 必须存**对象本身**。
+    # ⚠ 用**另读一份文档**做这个实验：手工塞 LinkNode 会让那份文档后续
+    #   save 的「删一只」丢掉（probe_baby_remove ⑤ 复现），留在 sv2 上会把
+    #   下面「删除落盘」那条验证带沟里。
+    _at = save.SaveDoc(path)
+    _atg = game.GameEditor(_at)
+    _ata = _at.actors()[0][1]
+    _baby0 = save._deref(save.ivar(_ata, "@babys").items[0])
+    _lk = M.LinkNode(0)
+    _lk.target = _baby0
+    game.set_ivar(_ata, "@baby", _lk)
+    check("set_ivar 把 '@N' 链接展开成对象（不把链接写进 ivar）",
+          not isinstance(save.ivar(_ata, "@baby"), M.LinkNode),
+          type(save.ivar(_ata, "@baby")).__name__)
+    _at.doc.mark_structural()          # ⚠ 它会置 dirty（doctree.py:202），别当「不落盘」
+    _at_path = os.path.join(WORK, "baby_at.rvdata2")
+    _at.doc.save(_at_path)
+    sv3 = save.SaveDoc(_at_path)
+    _a3 = sv3.actors()[0][1]
+    _b3 = save._deref(save.ivar(_a3, "@baby"))
+    check("落盘重读后 @baby 还是召唤兽（不是数组/字符串）",
+          _b3 is None or (isinstance(_b3, M.ObjNode) and _b3.cls in ("Game_Baby", "Game_Npc")),
+          type(_b3).__name__ + (("(" + _b3.cls + ")") if isinstance(_b3, M.ObjNode) else ""))
 
     # ---------------- 技能增删
     B2.clear_skills(rows[-1][1])
@@ -430,6 +468,42 @@ def main():
           all([B4.g.baby_value(_x, k)
                for k in ("体质", "潜能", "level", "grow", "five")]
               == _snap.get(id(_x)) for _aid, _x in rows_now()))
+
+    # ---------------- 全员状态拉满（2026-10-03：合并「回满气血/魔法」+「全员忠诚满」）
+    # 语义 = 所有角色所有召唤兽：hp/mp/tp 回满 + 忠诚拉满。
+    print("\n-- set_state_all：气血/魔法/愤怒回满 + 忠诚拉满 --")
+    _r = rows_now()
+    for _aid, _x in _r[:2]:
+        B4.g.set_baby(_x, "hp", 1)
+        B4.g.set_baby(_x, "mp", 1)
+        B4.g.set_baby(_x, "tp", 0)
+        B4.g.set_baby(_x, "loyalty", 11)
+    _exp = [(_aid, _x) for _aid, _x in rows_now()
+            if abs(float(B4.g.baby_value(_x, "loyalty")) - 100.0) > 1e-9]
+    _snap2 = dict((id(_x), [B4.g.baby_value(_x, k)
+                             for k in ("体质", "潜能", "level", "grow", "five")])
+                  for _aid, _x in rows_now())
+    _t, _na, _nl = B4.g.set_state_all()
+    check("set_state_all：涉及只数 ≥ 忠诚被改只数",
+          _t >= _nl >= len(_exp),
+          "t=%d nl=%d exp=%d" % (_t, _nl, len(_exp)))
+    check("set_state_all：忠诚全满",
+          all(abs(float(B4.g.baby_value(_x, "loyalty")) - 100.0) < 1e-9
+              for _aid, _x in rows_now()),
+          "%d 只" % len(rows_now()))
+    check("set_state_all：hp/mp 全满",
+          all(float(B4.g.baby_value(_x, "hp")) >= 90000
+              and float(B4.g.baby_value(_x, "mp")) >= 90000
+              and float(B4.g.baby_value(_x, "tp")) >= 199
+              for _aid, _x in rows_now()),
+          "hp/mp/tp 仍有未达上限的")
+    check("set_state_all：幂等 (0,0,0)",
+          B4.g.set_state_all() == (0, 0, 0),
+          "%r" % (B4.g.set_state_all(),))
+    check("set_state_all 不动五维/潜能/等级/成长/五行",
+          all([B4.g.baby_value(_x, k)
+               for k in ("体质", "潜能", "level", "grow", "five")]
+              == _snap2.get(id(_x)) for _aid, _x in rows_now()))
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))

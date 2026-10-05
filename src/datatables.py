@@ -732,6 +732,9 @@ def clean_desc(desc, note=""):
     - `<S:0>` / `<S:0,1>`：按备注 `state_details` 解成 `<剧毒/黑暗>`（与游戏
       运行时行为一致，只是不带颜色）；解不了才退「【状态】」占位。
     - 颜色码 `\\c[99]`、`#G/#R/#M/#Y`、6 位色号：游戏里是着色标记，纯文本无意义。
+    - **换行归一**：作者在表里两种写法混着用 —— 真换行、字面 `\\n`
+      （Items 320 处、Skills 19 处），还有 `\\r\\n`；统一成 `\\n`，否则界面上
+      会原样显示成「\\n」两个字符，真 `\\r` 在 tk.Text 里还会渲染成怪字符。
     """
     t = desc or ""
     if "<S:" in t:
@@ -753,7 +756,276 @@ def clean_desc(desc, note=""):
     t = _RE_HEX.sub("", t)
     for c in ("#G", "#R", "#M", "#Y"):
         t = t.replace(c, "")
+    t = t.replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n")
     return t
+
+
+def _note_literal(text):
+    """把备注等号右边的 Ruby 字面量粗解成 Python 值（够用就行，解不了返回原文）。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if t.startswith("["):
+        end = t.rfind("]")
+        inner = t[1:end] if end > 0 else t[1:]
+        out = []
+        for part in inner.split(","):
+            v = _note_literal(part)
+            if v is not None:
+                out.append(v)
+        return out
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+        return t[1:-1]
+    try:
+        return int(t)
+    except ValueError:
+        pass
+    try:
+        return float(t)
+    except ValueError:
+        pass
+    return t
+
+
+def note_val(note, key):
+    """备注里一行 `key = 值` → Python 值（照游戏 `ReadNote.read`：逐行匹配
+    `^\\s*key\\s*=`，等号右边按 Ruby 字面量解）。没有这一行返回 None。"""
+    m = re.search(r"^\s*%s\s*=(.*)$" % re.escape(key), note or "",
+                  re.M | re.I)
+    if not m:
+        return None
+    return _note_literal(m.group(1))
+
+
+_state_info_cache = {}
+
+
+def _state_info():
+    """`{状态 id: (名字, message1, 最短回合, 最长回合, 解除时机)}`（读不到就空）。"""
+    if "v" not in _state_info_cache:
+        out = {}
+        try:
+            for i, node in load("States")[1]:
+                out[i] = (s(node, "@name") or "",
+                          s(node, "@message1") or "",
+                          val(node, "@min_turns"), val(node, "@max_turns"),
+                          val(node, "@auto_removal_timing"))
+        except Exception:
+            out = {}
+        _state_info_cache["v"] = out
+    return _state_info_cache["v"]
+
+
+def skill_extra(note, mp_cost=0, tp_cost=0):
+    """技能说明**后面那几行附加信息** —— 口径照游戏
+    `RPG::UsableItem#description_ex` + `Window_Info_Item#get_description`
+    （本仓库 `!Tools/Github/huaji2-offline-server/scripts_dump`）：
+
+    * 状态：`state_details` 里每个状态 → `<名字>：message1，持续到战斗结束 /
+      持续到行动结束 / 持续 a~b 回合`（游戏还带 #G/#R 颜色，这里去掉）
+    * `目标数 = t_nums[0](上限…)`、`攻击次数 = t_times[0]`、`伤害 = t_dmge`、
+      `气血恢复量 = t_rvhp`、`法力恢复量 = t_rvmp`
+    * `消耗：N点魔法`（备注带 `[mmp_cost]` → 「全部魔法」）、`消耗：N点怒气`
+      （备注 `tp_cost` 优先于 `@tp_cost`）
+    * `剩余冷却：0 / N 回合`（备注 `cooling`）
+
+    ⚠ 游戏在战斗里会用「当前角色」算动态消耗，本工具一律按**非战斗**口径
+      （直接 `@mp_cost`）—— 静态工具拿不到战斗中的加成。
+    """
+    note = note or ""
+    out = []
+    ids = _state_details(note)
+    if ids:
+        info = _state_info()
+        for sid in ids:
+            nm, msg, tmin, tmax, timing = info.get(
+                sid, ("#%s" % sid, "", None, None, None))
+            line = "<%s>：%s" % (nm or "#%s" % sid, msg or "（没有说明）")
+            if timing == 0:
+                line += "，持续到战斗结束"
+            elif timing == 1:
+                line += "，持续到行动结束"
+            elif timing == 2 and tmin is not None and tmax is not None:
+                line += "，持续%s回合" % (tmin if tmin == tmax
+                                          else "%s~%s" % (tmin, tmax))
+            out.append(line)
+    for tag, key in (("目标数", "t_nums"), ("攻击次数", "t_times")):
+        v = note_val(note, key)
+        if v in (None, ""):
+            continue
+        if isinstance(v, list) and v:
+            line = "%s = %s" % (tag, v[0])
+            if len(v) > 1 and v[1]:
+                line += "(上限%s)" % v[1]
+        else:
+            line = "%s = %s" % (tag, v)
+        out.append(line)
+    for tag, key in (("伤害", "t_dmge"), ("气血恢复量", "t_rvhp"),
+                     ("法力恢复量", "t_rvmp")):
+        v = note_val(note, key)
+        if v in (None, ""):
+            continue
+        out.append("%s = %s" % (tag, v[0] if isinstance(v, list) and v else v))
+    cost = []
+    if "[mmp_cost]" in note:
+        cost.append("全部魔法")
+    else:
+        try:
+            mp = int(mp_cost or 0)
+        except (TypeError, ValueError):
+            mp = 0
+        if mp:
+            cost.append("%d点魔法" % mp)
+    tpc = note_val(note, "tp_cost")
+    if tpc is None:
+        tpc = tp_cost
+    try:
+        tpc = int(tpc or 0)
+    except (TypeError, ValueError):
+        tpc = 0
+    if tpc:
+        cost.append("%d点怒气" % tpc)
+    for c in cost:
+        out.append("消耗：%s" % c)
+    cooling = note_val(note, "cooling")
+    if cooling not in (None, "", 0):
+        out.append("剩余冷却：0 / %s 回合" % cooling)
+    return out
+
+
+def skill_map(game_dir=None):
+    """`{id: (名字, 说明)}` —— 说明 = 官方说明（解 `<S:N>`）**＋游戏浮窗那几行**。
+
+    `desc_map` 只管官方 `@description`；界面上的技能说明要跟游戏里看到的一致，
+    所以这里额外把 `skill_extra()` 那几行（伤害/恢复量/目标数/攻击次数/消耗/
+    冷却）接在后面。读不到 Data 表就退回 `desc_map`（少几行，但不会没内容）。
+    """
+    game_dir = game_dir or paths.find_game_dir()
+    ck = ("__skillmap__", game_dir)
+    if ck in _cache:
+        return _cache[ck]
+    out = {}
+    try:
+        for i, n in load("Skills", game_dir)[1]:
+            note = s(n, "@note")
+            desc = clean_desc(s(n, "@description"), note)
+            extra = skill_extra(note, val(n, "@mp_cost"), val(n, "@tp_cost"))
+            if extra:
+                desc = (desc.rstrip() + "\n" + "\n".join(extra)).strip("\n")
+            out[i] = (s(n, "@name") or "", desc)
+        if not out:
+            out = {}
+    except Exception:
+        out = {}
+    if not out:
+        out = desc_map("Skills", game_dir)
+    _cache[ck] = out
+    return out
+
+
+#: 备注里的「开关型」标记 → 人话。语义都在游戏脚本里核过
+#: （`Window_Item#use_item` / `Window_Item#ban?`、`RPG::UsableItem#single?` /
+#: `#superposition?`，见本仓库 `!Tools/Github/huaji2-offline-server/scripts_dump`）。
+ITEM_FLAGS = [
+    ("[use_for_actor]", "只能对角色使用"),
+    ("[use_for_baby]", "只能对召唤兽使用"),
+    ("[Preposition]", "要先选中它、再点另一个格子（前置道具）"),
+    ("[extend]", "可扩展（带附加属性）"),
+    ("[single]", "不可叠加"),
+    ("[superposition]", "可叠加（内容不同也不并格）"),
+    ("[dynamic_hue]", "图标颜色随机"),
+]
+
+#: 分段行：`===药品===` / `======剑=======` —— 作者给表分的段，不是能进背包的东西。
+_RE_SECTION = re.compile(r"^=+(.+?)=+$")
+
+
+def section_of(name):
+    """分段行 → 段名；不是分段行返回 None。"""
+    m = _RE_SECTION.match((name or "").strip())
+    if not m:
+        return None
+    return m.group(1).strip() or None
+
+
+def item_extra(note, kind="Items"):
+    """物品说明**后面那几行** —— 备注里能翻成人话的（等级 / 售价 / 使用限制…）。
+
+    ⚠ 只写**在游戏脚本里核过语义**的键与标记；拿不准的一律不写 —— 宁可少一行，
+      也不要编一条看起来像真的。
+    """
+    note = note or ""
+    out = [text for flag, text in ITEM_FLAGS if flag in note]
+    if kind == "Items":
+        lv = note_val(note, "lv")
+        if lv not in (None, ""):
+            out.append("等级 %s" % lv)
+    price = note_val(note, "price")
+    if price not in (None, "", 0):
+        out.append("售价 %s" % price)
+    return out
+
+
+def item_map(kind="Items", game_dir=None):
+    """`{id: (名字, 说明)}` —— 说明 = `clean_desc()` ＋ `item_extra()` 那几行。
+
+    **顺手把没意义的行滤掉**（2026-10-04 川：物品管理里别出现纯编号的东西）：
+
+    * 分段行（`===药品===` / `======剑=======`）—— 不是能写进背包的东西；
+    * **没名字**的行（含作者自己在表里写的注释行）—— 画迹2 三张表里一共
+      689 个，界面上一律显示成 `#49` 这种，选中了还会把 id 写进背包。
+
+    段名不丢，用 `item_group()` 取（给模板列表当「类别」列）。
+    """
+    game_dir = game_dir or paths.find_game_dir()
+    ck = ("__itemmap__", kind, game_dir)
+    if ck in _cache:
+        return _cache[ck]
+    out = {}
+    try:
+        for i, n in load(kind, game_dir)[1]:
+            nm = s(n, "@name") or ""
+            if section_of(nm):
+                continue
+            note = s(n, "@note")
+            desc = clean_desc(s(n, "@description"), note)
+            extra = item_extra(note, kind)
+            if extra:
+                desc = (desc.rstrip() + "\n" + "\n".join(extra)).strip("\n")
+            if not nm.strip():
+                continue        # 没名字的行列出来只有个 `#id`，选中还会写进背包
+            out[i] = (nm, desc)
+    except Exception:
+        out = {}
+    if not out:
+        out = desc_map(kind, game_dir)
+    _cache[ck] = out
+    return out
+
+
+def item_group(kind="Items", game_dir=None):
+    """`{id: 段名}` —— 扫一遍原表，遇到分段行就把后面的 id 都算进这一段。
+
+    ⚠ 扫的是**原表**（不是 `item_map()` 的结果）：分段行之间夹着大量空占位行，
+      滤掉再扫就会把后面的东西算错段。
+    """
+    game_dir = game_dir or paths.find_game_dir()
+    ck = ("__itemgrp__", kind, game_dir)
+    if ck in _cache:
+        return _cache[ck]
+    out = {}
+    cur = None
+    try:
+        for i, n in load(kind, game_dir)[1]:
+            sec = section_of(s(n, "@name"))
+            if sec:
+                cur = sec
+            if cur:
+                out[i] = cur
+    except Exception:
+        out = {}
+    _cache[ck] = out
+    return out
 
 
 def _cell(node, spec):

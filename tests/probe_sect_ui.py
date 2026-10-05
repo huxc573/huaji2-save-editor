@@ -86,7 +86,7 @@ def main():
         app.skp_actor.fill()
         app.rebuild_learn_grid()
         root.update_idletasks()
-        print("  %-8s -> 右栏一览 %3d 个；左栏清单 %2d 个：%s"
+        print("  %-8s -> 右下一览(已学) %3d 个；左栏清单 %2d 个：%s"
               % (label or "（未选）", len(app.skp_actor.choices),
                  len(app._learn_sids),
                  "、".join("#%d" % s for s in app._learn_sids[:3])))
@@ -95,7 +95,7 @@ def main():
     var_sect.set("五庄观")
     app.var_actor_skill_search.set("炼")
     app.skp_actor.fill()
-    print("  搜索「炼」 ->", app.skp_actor.choices[:3],
+    print("  搜索「炼」（只筛已学那一份） ->", app.skp_actor.choices[:3],
           "（共 %d 个）" % len(app.skp_actor.choices))
     app.var_actor_skill_search.set("")
 

@@ -208,6 +208,17 @@ def main():
         same = old == text
         print("\n--check：%s" % ("与现有表一致" if same else "和现有表**不一致**，要重跑生成"))
         return 0 if same else 1
+    if not found:
+        # ⚠ 2026-10-04 踩过：V2.201 换了机制后这里一个都抠不到，旧代码会**照写**，
+        #   把好端端的表清成空表。宁可不写。
+        print("\n⚠ 一个称谓都没抠到 —— **不写文件**（免得把现有表清空）。")
+        print("   原因（2026-10-04 查证）：V2.201 起「门派称谓」不再走")
+        print("   `add_appellation('五庄观弟子')`，改成 `Game_Party#get_apps` 按")
+        print("   `$sects[id][:nick][性别]` 现算（等级 ≥30 才开始有）；拜师事件只写")
+        print("   `$game_variables[3]` 再调 `Game_Actor#change_sect`。")
+        print("   ⇒ `src/tables/sect_appellation.py` 是**旧机制的遗留表**，")
+        print("     只在老档的 `@appellations` 里还留着那几个称谓时才用得上。")
+        return 1
     open(OUT, "w", encoding="utf-8", newline="\n").write(text)
     print("\n已写出 %s（%d 字节）" % (OUT, len(text.encode("utf-8"))))
     return 0 if not (missing or bad) else 0     # 缺项只提示，不挡生成

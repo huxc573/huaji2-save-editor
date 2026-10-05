@@ -15,6 +15,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 import paths  # noqa: E402
 import game  # noqa: E402
+import datatables  # noqa: E402
 from tables import sect  # noqa: E402
 from tables import sect_appellation  # noqa: E402
 # ⚠ 不能在模块级 import huaji2_save_editor：它 import tkinter，而没有 tkinter 的
@@ -256,11 +257,14 @@ def main():
             for c in win.winfo_children():
                 txt += c.cget("text") or ""
         check("鼠标移动弹出了浮窗", win is not None)
-        # 提醒内容按实际等级选（满级优先于封顶，见上面调色的那段说明）
-        _want = ("已满级"
-                 if app.g.actor_level(app.current_actor())
-                 >= game.MAX_LEVEL_ACTOR else "已超过")
-        check("浮窗里是乐天凌那段提醒", _want in txt,
+        # 浮窗内容就该是 `_actor_note()` 那段提醒本身。
+        # ⚠ 别再按「满级 / 已超过」二选一猜文案：那段提醒有四个分支
+        #   （已满级 / 经验封顶 / 等级越界 / 正常的「升级经验 N，还差 M」），
+        #   普通角色走的是第四支 —— 老断言只认前两支，内测版上必 NG（2026-10-04）。
+        _note = getattr(app, "_actor_tip_note", "") or ""
+        check("浮窗里就是「属性概览」那段提醒（%s…）"
+              % (_note.split("\n")[1][:20] if "\n" in _note else ""),
+              bool(_note) and _note in txt,
               txt.split("\n")[0][:40])
         # 再动一次不该重建（防闪烁靠 _tip_key）
         first = app._tip_win
@@ -272,8 +276,8 @@ def main():
         check("移开后浮窗消失", getattr(app, "_tip_win", None) is None
               and getattr(app, "_tip_key", None) is None)
 
-    # ---- 5) 「经验拉满」：等级顶到 60 + 获得经验对齐 + 潜能/五维补齐
-    print("\n--- 5) 经验拉满（等级 + 获得经验 + 潜能/五维）---")
+    # ---- 5) 「一键满级」：等级顶到 60 + 获得经验对齐 + 潜能/五维补齐
+    print("\n--- 5) 一键满级（等级 + 获得经验 + 潜能/五维）---")
     rid5 = None
     for iid in app.tv_actor.get_children():
         app.tv_actor.selection_set(iid)
@@ -313,9 +317,14 @@ def main():
         check("等级真的到了满级（%d）" % game.MAX_LEVEL_ACTOR,
               app.g.actor_level(a) == game.MAX_LEVEL_ACTOR)
         check("获得经验对齐到满级门槛", app.g.exp(a) == want_exp, str(app.g.exp(a)))
-        check("升的 40 级补了 200 点潜能（+5/级）", pot1 - pot0 == 40 * 5,
+        # ⚠ 补的级数按 `MAX_LEVEL_ACTOR` 现算（尝鲜版 60→40 级、内测版 155→135 级）。
+        #   以前写死 40，是拿尝鲜版的上限当默认 —— 内测版上必 NG（2026-10-04）。
+        _up5 = game.MAX_LEVEL_ACTOR - 20
+        check("升的 %d 级补了 %d 点潜能（+5/级）" % (_up5, _up5 * 5),
+              pot1 - pot0 == _up5 * 5,
               "%s → %s" % (pot0, pot1))
-        check("升的 40 级补了 40 点五维（+1/级）", tz1 - tz0 == 40,
+        check("升的 %d 级补了 %d 点五维（+1/级）" % (_up5, _up5),
+              tz1 - tz0 == _up5,
               "%s → %s" % (tz0, tz1))
         check("概览里的等级跟着更新",
               "级别：%d" % game.MAX_LEVEL_ACTOR in app.txt_actor.get("1.0", "end"))
@@ -328,6 +337,63 @@ def main():
         root.update()
         check("浮窗提醒切到「已满级」分支",
               "已满级" in getattr(app, "_actor_tip_note", ""))
+
+    # ---- 5b) 「经验拉满」：只写经验、**等级不动**（2026-10-03 新增）
+    # 和「一键满级」的唯一区别 = 不写 @level —— 回游戏自己点「升级」。
+    print("\n--- 5b) 经验拉满（只写经验、等级不动）---")
+    rid5b = None
+    for iid in app.tv_actor.get_children():
+        app.tv_actor.selection_set(iid)
+        app.load_actor()
+        root.update()
+        if app.actor_vars["@name"].get() == "乐天凌":
+            rid5b = iid
+            break
+    if rid5b is None:
+        check("找到乐天凌", False)
+    else:
+        app.tv_actor.selection_set(rid5b)
+        app.load_actor()
+        root.update()
+        a = app.current_actor()
+        print("  目标角色 = %s（id=%s）" % (app.sv.actor_name(a), rid5b))
+        _guard_real_save(app, paths.save_path())
+        WARNS.clear()
+        # 先压回 20 级 —— 满级角色上「等级没动」是空断言，测不出东西。
+        app.g.set_actor_level_full(a, 20)
+        app.load_actor()
+        root.update()
+        lv_before = app.g.actor_level(a)
+        app.actor_preset("expfill")
+        root.update()
+        print("  写回后：等级=%s（写前 %s）  获得经验=%s（期望 %s）"
+              % (app.g.actor_level(a), lv_before, app.g.exp(a),
+                 game.ACTOR_EXP_FILL))
+        check("获得经验 = ACTOR_EXP_FILL（%d）" % game.ACTOR_EXP_FILL,
+              app.g.exp(a) == game.ACTOR_EXP_FILL, str(app.g.exp(a)))
+        check("等级一点没动（还是 %d）" % lv_before,
+              app.g.actor_level(a) == lv_before == 20,
+              "before=%s after=%s" % (lv_before, app.g.actor_level(a)))
+        check("概览里的等级仍是 %d" % lv_before,
+              "级别：%d" % lv_before in app.txt_actor.get("1.0", "end"))
+        # 贴字按钮（2026-10-03 川）：负 padding 抵掉 vista 的主题下限
+        _fit = {}
+
+        def _collect_fit(w):
+            for c in w.winfo_children():
+                if c.winfo_class() == "TButton":
+                    _fit.setdefault(c.cget("text"), c)
+                _collect_fit(c)
+
+        _collect_fit(root)
+        root.update()
+        _base = huaji2_save_editor._btn_base(root)
+        _wa = _fit["应用修改"].winfo_reqwidth()
+        _wg = _fit["关于"].winfo_reqwidth()
+        check("按钮全部贴字（应用修改 %dpx / 关于 %dpx，主题下限 %dpx）"
+              % (_wa, _wg, _base),
+              _wa < _base and _wg < _base,
+              "角色页成排行与顶栏短按钮都收窄了")
 
     # ---- 6) 清零按钮（现在从哪调？确认还能用）
     print("\n--- 6) 清零累计获得经验 ---")
@@ -351,8 +417,9 @@ def main():
     check("SkillPicker 确实绑在这套控件上",
           app.skp_actor.tree is app.tv_actor_skills)
     check("按钮拿到的是角色版方法（不是召唤兽的）",
-          app.actor_skill_add.__self__ is app
-          and app.actor_skill_add.__func__ is not app.baby_skill_add.__func__)
+          app.actor_skill_manager.__self__ is app
+          and app.actor_skill_manager.__func__
+          is not app.baby_skill_manager.__func__)
 
     # 一一对上：每个角色的一览都要等于存档里的 @skills
     off = []
@@ -378,25 +445,119 @@ def main():
     print("  目标角色 = %s，原有技能 %d 个；候选新技能 %d 个"
           % (app.sv.actor_name(a), len(base), len(fresh)))
     if fresh:
+        # 2026-10-04 起：主界面技能区只留「已学一览 + 忘掉选中」，
+        # 学 / 忘 / 全选 / 反选 全在技能管理器窗口里 —— 这里按新交互验。
         _guard_real_save(app, paths.save_path())
-        app.var_actor_skill_pick.set("#%d %s" % (fresh[0], nm[fresh[0]]))
-        app.actor_skill_add()
+        w = app.open_skill_manager("actor")
+        root.update()
+        check("技能管理器窗口开得起来",
+              w is not None and w.win.winfo_exists())
+        # 2026-10-04 起：分段行（`===锻造技能===`）不再列进列表 —— 它不是技能，
+        # 列出来会被「全选 → 学会选中」写进存档。
+        _allnamed = [i for i in nm if nm[i]
+                     and not datatables.section_of(nm[i])]
+        check("管理器默认列出全部有名字的技能（分段行除外）",
+              len(w.tv.get_children()) == len(_allnamed),
+              "%d / %d" % (len(w.tv.get_children()), len(_allnamed)))
+        check("技能列表里没有分段行",
+              all(not datatables.section_of(w.meta[i][0])
+                  for i in [w.sid_of(x) for x in w.tv.get_children()]))
+        # 归属下拉（2026-10-04 川：「归属不是有很多吗？」）
+        _secs = sorted(set(w.groups.values()))
+        _ov = [str(v) for v in w.cb_own.cget("values")]
+        check("归属下拉 = 表里的分段名（%d 个）+ 3 个固定项" % len(_secs),
+              len(_secs) > 5 and all(s in _ov for s in _secs)
+              and "全部" in _ov and "门派技能" in _ov and "无归属" in _ov,
+              "%r" % (_ov[:6],))
+        if _secs:
+            w.var_own.set(_secs[0])
+            w.refill()
+            _seg = [w.sid_of(x) for x in w.tv.get_children()]
+            check("按分段「%s」筛出的行归属一致" % _secs[0],
+                  bool(_seg) and all(w.own_text(i) == _secs[0] for i in _seg),
+                  "%d 行 / %r" % (len(_seg),
+                                  sorted(set(w.own_text(i) for i in _seg))[:3]))
+            w.var_own.set("全部")
+            w.refill()
+        # 说明里的附加行（伤害/恢复量/目标数/攻击次数/消耗）
+        _cost = [i for i in sorted(w.meta) if "消耗：" in w.meta[i][1]]
+        _more = [i for i in sorted(w.meta)
+                 if ("伤害 = " in w.meta[i][1] or "目标数 = " in w.meta[i][1]
+                     or "恢复量 = " in w.meta[i][1])]
+        check("技能说明补了消耗行（%d 个）" % len(_cost), len(_cost) > 20,
+              "例 #%s" % (_cost[0] if _cost else "-"))
+        check("技能说明补了附加行（伤害/目标数/恢复量，%d 个）" % len(_more),
+              len(_more) > 20, "例 #%s" % (_more[0] if _more else "-"))
+        # 搜索增强三件事：`#id` 精确 id / 空格分段 AND / 能搜说明正文
+        # ⚠ 别用"纯数字"当唯一匹配项：id 1 这种数字会出现在一堆说明里
+        #   （`1` 命中名字或描述含 `1` 的全部技能）—— 这里只用它验"至少含 id 本身"。
+        w.var_kw.set("#%d" % fresh[0])
+        w.refill()
+        _vis = [w.sid_of(i) for i in w.tv.get_children()]
+        check("搜索「#id」= 精确技能 id", _vis == [fresh[0]],
+              "%r" % (_vis[:4],))
+        _nm, _ds = w.meta.get(fresh[0], ("", ""))
+        if len(_nm) >= 2:
+            w.var_kw.set(" ".join(_nm))        # 名字逐字拆开 → 每段都要命中
+            w.refill()
+            check("空格分开的多段是 AND（名字逐字）",
+                  fresh[0] in [w.sid_of(i) for i in w.tv.get_children()],
+                  _nm)
+        _dw = [c for c in (_ds or "") if not c.isspace()][:2]
+        if len(_dw) == 2 and "".join(_dw) not in _nm:
+            w.var_kw.set("".join(_dw))
+            w.refill()
+            check("能搜到说明正文里的词",
+                  fresh[0] in [w.sid_of(i) for i in w.tv.get_children()],
+                  "".join(_dw))
+        w.var_kw.set(str(fresh[0]))
+        w.refill()
+        check("纯数字搜索至少包含 id 本身",
+              fresh[0] in [w.sid_of(i) for i in w.tv.get_children()])
+        w.var_kw.set("#%d" % fresh[0])
+        w.refill()
+        w.select("all")
+        check("「全选」只作用于当前筛选结果（1 条）",
+              w.sel_sids() == [fresh[0]], w.var_sel.get())
+        w.do_learn()
         root.update()
         rows = [app.tv_actor_skills.item(r, "values")[1]
                 for r in app.tv_actor_skills.get_children()]
-        check("界面「学会」后一览里出现了新技能", str(fresh[0]) in rows,
+        check("管理器「学会选中」后一览里出现了新技能", str(fresh[0]) in rows,
               "%r" % (rows[:4],))
         check("角色技能没有召唤兽那 12 个上限（学会 = +1）",
               len(app.g.actor_skills(a)) == len(base) + 1,
               "%d -> %d" % (len(base), len(app.g.actor_skills(a))))
         check("重新载入角色后技能没丢",
               fresh[0] in app.g.actor_skills(app.current_actor()))
-        app.tv_actor_skills.selection_set("sk%d" % fresh[0])
-        app.actor_skill_del()
+        w.select("none")
+        check("「全不选」清空选中", not w.sel_sids(), w.var_sel.get())
+        w.select("all")
+        w.select("invert")
+        check("「反选」= 全选变全不选", not w.sel_sids(), w.var_sel.get())
+        w.select("invert")
+        check("再反选一次回到全选", len(w.sel_sids()) == len(_vis),
+              w.var_sel.get())
+        w.do_forget()
         root.update()
-        check("界面「忘掉」后回到原样",
+        check("管理器「忘掉选中」后回到原样",
               app.g.actor_skills(a) == sorted(set(base)),
               "%r" % (app.g.actor_skills(a),))
+        w.close()
+        root.update()
+        check("关掉管理器后 app 不再引用它", app._skill_win is None)
+        # 主界面「忘掉选中」：多选一次忘一批
+        app.g.actor_learn_many(a, fresh[:2])
+        app.load_actor()
+        root.update()
+        app.tv_actor_skills.selection_set(["sk%d" % s for s in fresh[:2]])
+        _picked = app.skp_actor.sel_ids()
+        app.actor_skill_del()
+        root.update()
+        check("主界面「忘掉选中」一次忘掉多选的一批",
+              len(_picked) == 2
+              and all(s not in app.g.actor_skills(a) for s in _picked),
+              "%r -> %r" % (_picked, app.g.actor_skills(a)))
     else:
         check("有没学过的技能可用于测试", False)
 
@@ -467,11 +628,11 @@ def main():
         check("勾选框都挂上了真回调（点一下就改写 @skills）",
               all(w.cget("command") for w in boxes))
 
-        # 全清 → 10 个都空着
+        # 全清 → 本门派那一串都空着
         app.g.actor_clear_skills(a)
         app.load_actor()
         root.update()
-        check("清空技能后 10 个都空着",
+        check("清空技能后本门派那些勾选框都空着",
               app.g.actor_skills(a) == []
               and len(app._learn_sids) == len(sids)
               and all(v.get() == 0 for v in app.learn_vars.values()),
@@ -516,6 +677,35 @@ def main():
         check("「一键学习」= 补齐本门派没学的",
               app.g.actor_skills(a) == sorted(sids),
               "%r" % app.g.actor_skills(a))
+        # 「反选」（2026-10-04 新增）：已学的忘掉、没学的学会
+        _guard_real_save(app, paths.save_path())
+        app.actor_sect_invert()
+        root.update()
+        check("「反选」= 本门派已学的全忘掉",
+              not [x for x in sids if x in app.g.actor_skills(a)],
+              "%r" % (app.g.actor_skills(a),))
+        _inv = [v.get() for v in app.learn_vars.values()]
+        check("反选后勾选框跟着全取消",
+              bool(_inv) and not any(_inv),
+              "%r" % (_inv,))
+        app.actor_sect_invert()            # 再反选一次 → 全学会
+        root.update()
+        check("再反选一次 = 本门派全学会",
+              set(sids) <= set(app.g.actor_skills(a)),
+              "%r" % (app.g.actor_skills(a),))
+        check("反选后勾选框跟着全打上",
+              all(v.get() for v in app.learn_vars.values()),
+              "%r" % ([v.get() for v in app.learn_vars.values()],))
+        # 「全不选」（2026-10-04 新增）：本门派技能全忘掉
+        _guard_real_save(app, paths.save_path())
+        app.actor_sect_none()
+        root.update()
+        check("「全不选」= 本门派技能全忘掉",
+              not [x for x in sids if x in app.g.actor_skills(a)],
+              "%r" % (app.g.actor_skills(a),))
+        app.g.actor_set_skills(a, [])      # 还原（后面还要用）
+        app.load_actor()
+        root.update()
         # 没选门派（空串，如无门派角色）→ 列不出清单，只给提示
         app.var_actor_sect.set("")
         app.rebuild_learn_grid()
@@ -592,10 +782,13 @@ def main():
     check("它和「一键学习」同一行（左栏竖向 pack，多一行就有被裁的风险）",
           "转门派" in _btnw2 and "一键学习" in _btnw2
           and _btnw2["转门派"].master is _btnw2["一键学习"].master)
-    check("下拉共 13 项、含「无门派」（2026-09-27 川要求放进去）",
-          len(huaji2_save_editor.sect_choice_labels()) == 13
+    # 2026-10-04：门派补齐到 14 个（0 无门派 + 1..13 + 20 九黎城）⇒ 下拉 15 项
+    check("下拉共 15 项、含「无门派」（2026-09-27 川要求放进去）",
+          len(huaji2_save_editor.sect_choice_labels()) == 15
           and "无门派" in huaji2_save_editor.sect_choice_labels(),
-          "、".join(huaji2_save_editor.sect_choice_labels()[:3]) + "…")
+          "%d 项：%s…"
+          % (len(huaji2_save_editor.sect_choice_labels()),
+             "、".join(huaji2_save_editor.sect_choice_labels()[:3])))
 
     rid10 = None
     for iid in app.tv_actor.get_children():
@@ -641,7 +834,7 @@ def main():
         check("→ 等级/五维也没动",
               app.g.actor_level(a) == old_lv
               and dict(app.sv.attr_items(a)) == old_five, "Lv%s" % old_lv)
-        check("→ 本门派技能清单换成新门派那 10 个",
+        check("→ 本门派技能清单换成新门派那一串",
               list(app._learn_sids) == list(sect.sect_skill_ids(new_id)),
               "%d 个" % len(app._learn_sids))
         app.doc.dirty = False
@@ -652,11 +845,12 @@ def main():
               (not app.doc.dirty) and "无需" in app.var_status.get(),
               app.var_status.get()[:50])
         try:
-            app.g.set_actor_sect(a, 13)
+            # ⚠ 用 14 当越界值（13 现在是合法的「凌波城」；id 是 0,1..13,20 不连号）
+            app.g.set_actor_sect(a, 14)
             _raised = False
         except ValueError:
             _raised = True
-        check("⚠ 越界 13 被挡下来（真写进去游戏会崩菜单）",
+        check("⚠ 越界 14 被挡下来（真写进去游戏会崩菜单）",
               _raised and app.g.actor_sect_id(a) == new_id,
               "抛 ValueError=%s" % _raised)
         check("能改回原门派（可逆）",
@@ -727,6 +921,14 @@ def main():
         a = app.current_actor()
         check("清空前：角色是有门派的", app.g.actor_sect_id(a) == old_id,
               str(app.g.actor_sect_id(a)))
+        # ⚠ 上面「全不选」刚把本门派技能全忘光 —— 这条用例验的是「清技能」，
+        #   所以先学回 3 个本门派技能当素材（否则 sk0 是空集、断言全是白跑）。
+        _seg10 = [s for s in sect.sect_skill_ids(old_id)
+                  if s not in set(app.g.actor_class_learnings(a))]
+        if _seg10:
+            app.g.actor_learn_many(a, _seg10[:3])
+            app.load_actor()
+            root.update()
         innate0 = set(app.g.actor_class_learnings(a))
         sk0 = tuple(app.g.actor_skills(a))
         lv0 = app.g.actor_level(a)

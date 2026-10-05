@@ -17,7 +17,9 @@
     换门派后旧门派技能会留着（真档李修远：五庄观却有女儿村/普陀山技能）。
   · 作弊检测 `$jiance`(29455) 只看 等级/召唤兽等级/金钱/仓库页 → **不查门派、不查技能**。
   · ⚠ 唯一的红线：`$sects[actor.sect_id]` 是**普通 Hash，没有 default** ——
-    写 13/负数这种不存在的 id，游戏一开菜单就 `nil[:name]` 崩。所以实现必须校验 0..12。
+    写 14/负数这种不存在的 id，游戏一开菜单就 `nil[:name]` 崩。
+  ⚠ 2026-10-04 起表是 `0`、`1..13`、**`20`**（九黎城）—— **不连号**，
+  所以实现只能**查表**校验（写 13 现在是合法的「凌波城」，越界例子改用 14）。
 
 用系统 Python 3.12（有 tkinter）。窗口全程 withdraw —— 不抢前台、不动鼠标。
 
@@ -161,20 +163,22 @@ def main():
 
     # ---------------- A. 门派表 / 读取端
     print("\n-- A. 门派表（工具侧）")
-    check("门派共 13 项（0 无门派 + 12 个门派）", len(sect.SECTS) == 13,
-          "%d 项" % len(sect.SECTS))
-    bad = [sid for sid, (_nm, ids) in sect.SECTS.items() if sid and len(ids) != 10]
-    check("每个门派正好 10 个技能（无门派 0 个）",
+    check("门派共 15 项（0 无门派 + 14 个门派；id 不连号 …13、20）",
+          len(sect.SECTS) == 15, "%d 项" % len(sect.SECTS))
+    bad = [sid for sid, (_nm, ids) in sect.SECTS.items() if sid and len(ids) < 10]
+    check("每个门派 ≥10 个技能（无门派 0 个）",
           not bad and len(sect.SECTS[0][1]) == 0, "%r" % (bad,))
     total = sum(len(ids) for _nm, ids in sect.SECTS.values())
     check("SKILL_TO_SECT 覆盖全部 %d 个门派技能" % total,
           len(sect.SKILL_TO_SECT) == total, len(sect.SKILL_TO_SECT))
-    check("越界 id 工具认得出（13 → 名字 None、技能空）",
-          sect.sect_name(13) is None and sect.sect_skill_ids(13) == (),
-          "%r / %r" % (sect.sect_name(13), sect.sect_skill_ids(13)))
+    check("越界 id 工具认得出（14 → 名字 None、技能空；13 现在是凌波城）",
+          sect.sect_name(14) is None and sect.sect_skill_ids(14) == ()
+          and sect.sect_name(13) == "凌波城",
+          "%r / %r" % (sect.sect_name(14), sect.sect_skill_ids(14)))
     labels = huaji2_save_editor.sect_choice_labels()
-    check("界面的门派下拉是 13 项、**含**「无门派」（2026-09-27 加的）",
-          len(labels) == 13 and "无门派" in labels, "、".join(labels[:3]) + "…")
+    check("界面的门派下拉是 15 项、**含**「无门派」与两个新门派",
+          len(labels) == 15 and "无门派" in labels and "凌波城" in labels
+          and "九黎城" in labels, "%d 项" % len(labels))
     check("门派称谓表 12 项（从拜师事件里抠的，不是拼出来的）",
           len(SA.SECT_APPELLATION) == 12
           and SA.sect_appellation(12) == "东海龙宫弟子"
@@ -228,7 +232,7 @@ def main():
           app.g.actor_sect_id(tgt))
     check("门派名跟着变", app.g.actor_sect_name(tgt) == sect.sect_name(new_sid),
           app.g.actor_sect_name(tgt))
-    check("本门派技能清单 = 新门派那 10 个",
+    check("本门派技能清单 = 新门派那一串（10~12 个，含 index 10 秘技）",
           tuple(app.g.sect_skills(tgt)) == sect.sect_skill_ids(new_sid),
           len(app.g.sect_skills(tgt)))
     now = actor_snap(tgt)
@@ -254,10 +258,11 @@ def main():
           app.g.actor_sect_id(tgt) == 0 and app.g.actor_sect_name(tgt) == "无门派"
           and app.g.sect_skills(tgt) == [], app.g.actor_sect_name(tgt))
 
-    # 越界值：工具照写 → 游戏会崩（证明实现必须校验）
-    app.sv.set_actor_field(tgt, "@sect_id", 13)
-    check("⚠ 写 13 工具**照写不拦**（读端认不出）→ 实现必须自己校验 0..12",
-          app.g.actor_sect_id(tgt) == 13 and app.g.actor_sect_name(tgt) is None,
+    # 越界值：工具照写 → 游戏会崩（证明实现必须校验。⚠ 14 才是越界的 ——
+    # 13 现在是合法门派「凌波城」，别拿它当反例）
+    app.sv.set_actor_field(tgt, "@sect_id", 14)
+    check("⚠ 写 14 工具**照写不拦**（读端认不出）→ 实现必须查表校验",
+          app.g.actor_sect_id(tgt) == 14 and app.g.actor_sect_name(tgt) is None,
           "@sect_id=%s 名字=%r" % (app.g.actor_sect_id(tgt),
                                    app.g.actor_sect_name(tgt)))
     app.sv.set_actor_field(tgt, "@sect_id", old_sid)
@@ -279,9 +284,9 @@ def main():
     btns = [w.cget("text") for w in walk(lf) if w.winfo_class() == "TButton"]
     check("门派行按钮 = 「一键学习」+「转门派」+「清空门派」",
           btns == ["一键学习", "转门派", "清空门派"], "、".join(btns))
-    check("下拉 13 项、含「无门派」（2026-09-27 川要求放进去）",
+    check("下拉 15 项、含「无门派」（2026-09-27 放进去；2026-10-04 补到 14 门派）",
           "无门派" in huaji2_save_editor.sect_choice_labels()
-          and len(huaji2_save_editor.sect_choice_labels()) == 13,
+          and len(huaji2_save_editor.sect_choice_labels()) == 15,
           "%d 项" % len(huaji2_save_editor.sect_choice_labels()))
     # 下拉不是「跟随每次刷新」而是「只在换角色时切」
     var = app.var_actor_sect
@@ -289,8 +294,10 @@ def main():
     app.rebuild_learn_grid()
     root.update_idletasks()
     kill_timers(root)
-    check("下拉切到别的门派 → 清单换成那 10 个（只是看，不改存档）",
-          len(getattr(app, "_learn_sids", [])) == 10, len(app._learn_sids))
+    check("下拉切到别的门派 → 清单换成那一串（只是看，不改存档）",
+          list(getattr(app, "_learn_sids", []))
+          == list(sect.sect_skill_ids(sect.SECT_NAME_TO_ID["龙宫"])),
+          len(app._learn_sids))
     app.load_actor()
     root.update_idletasks()
     kill_timers(root)
@@ -347,11 +354,12 @@ def main():
           (app.var_status.get() or "")[:50])
 
     try:
-        app.g.set_actor_sect(tgt, 13)
+        # ⚠ 14 才是越界值（13 现在是合法门派「凌波城」）
+        app.g.set_actor_sect(tgt, 14)
         _raised = False
     except ValueError:
         _raised = True
-    check("⚠ set_actor_sect(13) 抛 ValueError、存档里也没被写坏",
+    check("⚠ set_actor_sect(14) 抛 ValueError、存档里也没被写坏",
           _raised and app.g.actor_sect_id(tgt) == new_sid,
           "抛异常=%s / @sect_id=%s" % (_raised, app.g.actor_sect_id(tgt)))
 

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 import marshal_ruby   # noqa: E402
 import save      # noqa: E402
+import datatables  # noqa: E402
 
 LOG = os.path.join(ROOT, "tools", "_gui_quick.txt")
 WORK = os.path.join(ROOT, "tools", "_gui")
@@ -175,18 +176,24 @@ def main():
               app.var_cheat.get()[:60])
         # 手动把 @cheated 打回“作弊”状态（模拟游戏判过作弊的存档），
         # 验证「载入就提醒 + 顺手清掉」这条链路真的通。
+        # ⚠ V2.201（内测版）没有 @cheated 节点 —— 原来这里直接 set_value(None)
+        # 会 AttributeError，让**整组**早退（后面召唤兽等段全跑不到）。加守卫跳过。
         sysnode = app.sv.section("system")
         ch_node = save._deref(save.ivar(sysnode, "@cheated"))
-        app.doc.set_value(ch_node, 134700)
-        n_over = app.guard_check()
-        check("体检能把作弊标记报出来", n_over >= 1, app.var_cheat.get()[:60])
-        warned = app.warn_cheat_after_load()
-        root.update()
-        ch_now = save.M.value_of(save._deref(
-            save.ivar(app.sv.section("system"), "@cheated")))
-        check("载入带作弊标记的存档会提醒并顺手清掉",
-              warned is True and ch_now is False,
-              "warned=%r 清完=%r" % (warned, ch_now))
+        if ch_node is None:
+            print("  （内测版没有 @cheated 节点，跳过「作弊标记」这段）")
+        else:
+            app.doc.set_value(ch_node, 134700)
+            n_over = app.guard_check()
+            check("体检能把作弊标记报出来", n_over >= 1,
+                  app.var_cheat.get()[:60])
+            warned = app.warn_cheat_after_load()
+            root.update()
+            ch_now = save.M.value_of(save._deref(
+                save.ivar(app.sv.section("system"), "@cheated")))
+            check("载入带作弊标记的存档会提醒并顺手清掉",
+                  warned is True and ch_now is False,
+                  "warned=%r 清完=%r" % (warned, ch_now))
 
         say("改金钱…")
         app.var_gold.set("7654321")
@@ -200,17 +207,40 @@ def main():
         check("标签同步刷新", app.var_gold.get() == "7654321")
         check("已标记为脏（保存按钮会亮）", app.doc.dirty is True)
 
-        # 超过 30,000,000 → 自动压到 25,000,000（上限 5/6），记账同步
+        # 超过 MAX_GOLD → 自动压到 SAFE_GOLD（上限的 5/6），记账同步
+        # ⚠ 上限**取 game 的常量**，别写死尝鲜版的 30,000,000/25,000,000
+        #   （内测版 MAX_GOLD = 9,999,999,999，硬编码会让这条恒红）。
         say("改金钱超过上限…")
-        app.var_gold.set("999999999")
+        app.var_gold.set(str(game.MAX_GOLD * 2))
         app.apply_quick()
         root.update()
-        check("金钱超限自动压到 25000000（5/6）", app.sv.gold() == 25000000,
+        check("金钱超限自动压到 SAFE_GOLD（上限 5/6）", app.sv.gold() == game.SAFE_GOLD,
               app.sv.gold())
-        check("输入框显示钳制后的值", app.var_gold.get() == "25000000")
+        check("输入框显示钳制后的值", app.var_gold.get() == str(game.SAFE_GOLD))
         check("钳制后 Lock+记账仍同步",
-              app.sv.check_locks() == [] and app.g.security_gold() == 25000000)
+              app.sv.check_locks() == [] and app.g.security_gold() == game.SAFE_GOLD)
         app.var_gold.set("7654321")
+        app.apply_quick()
+        root.update()
+
+        # ---- 祈福池储备（2026-10-04 从「没用的控件」加回，补了说明）
+        say("祈福池储备…")
+        check("概览有 4 个祈福池储备输入",
+              sorted(app.var_bless) == ["actor_hp_pool", "actor_mp_pool",
+                                        "baby_hp_pool", "baby_mp_pool"],
+              "%r" % sorted(app.var_bless))
+        pool = dict((k, v) for k, _cn, v in app.g.blessing_rows())
+        check("祈福池 4 个框回填的是语义层的值",
+              all(app.var_bless[k].get() == str(pool[k]) for k in app.var_bless),
+              "%r" % (pool,))
+        app.var_bless["actor_hp_pool"].set("12345")
+        app.apply_quick()
+        root.update()
+        pool2 = dict((k, v) for k, _cn, v in app.g.blessing_rows())
+        check("祈福池储备改完能写进存档",
+              pool2["actor_hp_pool"] == 12345 and app.sv.check_locks() == [],
+              "%r" % (pool2["actor_hp_pool"],))
+        app.var_bless["actor_hp_pool"].set(str(pool["actor_hp_pool"]))
         app.apply_quick()
         root.update()
 
@@ -291,7 +321,9 @@ def main():
                                 lv_a * 5))
 
             # ---- 角色技能可视化编辑（2026-09-20 新增）
-            say("角色技能：学 / 忘 / 清空…")
+            # 2026-10-04 改版：主界面技能区 = 已学一览 + 忘掉选中 + 技能管理…
+            #   学 / 忘 / 全选 / 反选 全在技能管理器窗口里。
+            say("角色技能：一览 + 技能管理器…")
             app.tv_actor.selection_set(kids[0])
             app.load_actor()
             root.update()
@@ -302,32 +334,93 @@ def main():
                       for r in app.tv_actor_skills.get_children()]
             check("角色技能一览 = 存档里的 @skills",
                   rows_a == app.g.actor_skills(a), "%r" % (rows_a,))
+            check("一览只剩已学的那一份（「全部技能」下拉已删）",
+                  set(app.skp_actor.choices) == set(app.g.actor_skills(a)),
+                  "%d 个" % len(app.skp_actor.choices))
+            _kids_sk = app.tv_actor_skills.get_children()
+            if _kids_sk:
+                app.tv_actor_skills.selection_set(_kids_sk[0])
+                app.skp_actor.show_desc()
             _askd = app.txt_actor_skill_desc.get("1.0", "end").strip()
-            check("角色技能说明框有内容", len(_askd) > 5, _askd[:46])
+            check("选中一览某行后说明框有内容", len(_askd) > 5, _askd[:46])
             base_sk = list(app.g.actor_skills(a))
             names_a = app.skp_actor.names()
             fresh = [i for i in sorted(names_a) if i not in base_sk]
             check("有没学过的技能可以拿来测", len(fresh) >= 1, len(fresh))
             if fresh:
-                app.var_actor_skill_pick.set(
-                    "#%d %s" % (fresh[0], names_a[fresh[0]]))
-                app.actor_skill_add()
+                wa = app.open_skill_manager("actor")
                 root.update()
-                check("界面「学会」生效", fresh[0] in app.g.actor_skills(a),
+                check("技能管理器窗口开得起来",
+                      wa is not None and wa.win.winfo_exists())
+                check("管理器默认列出全部有名字的技能（分段行除外）",
+                      len(wa.tv.get_children())
+                      == len([i for i in names_a if names_a[i]
+                              and not datatables.section_of(names_a[i])]),
+                      "%d 个" % len(wa.tv.get_children()))
+                _ov = [str(v) for v in wa.cb_own.cget("values")]
+                check("归属下拉列出了表里的分段名 + 3 个固定项",
+                      len(_ov) > 8 and "全部" in _ov
+                      and "门派技能" in _ov and "无归属" in _ov,
+                      "%r" % (_ov[:6],))
+                # `#id` 才是精确 id；纯数字会命中"名字/描述里含这串数字"的一堆
+                # （id 1 这种几乎命中半张表），只验"至少含 id 本身"。
+                wa.var_kw.set("#%d" % fresh[0])
+                wa.refill()
+                _v = [wa.sid_of(i) for i in wa.tv.get_children()]
+                check("搜索「#id」= 精确技能 id", _v == [fresh[0]],
+                      "%r" % (_v[:4],))
+                wa.var_kw.set(str(fresh[0]))
+                wa.refill()
+                check("纯数字搜索至少包含 id 本身",
+                      fresh[0] in [wa.sid_of(i) for i in wa.tv.get_children()])
+                wa.var_kw.set("#%d" % fresh[0])
+                wa.refill()
+                wa.select("all")
+                check("「全选」只作用于当前筛选结果（1 条）",
+                      wa.sel_sids() == [fresh[0]], wa.var_sel.get())
+                wa.do_learn()
+                root.update()
+                check("管理器「学会选中」生效",
+                      fresh[0] in app.g.actor_skills(a),
                       app.g.actor_skills(a))
                 now_a = [app.tv_actor_skills.item(r, "values")[1]
                          for r in app.tv_actor_skills.get_children()]
-                check("学会后技能一览跟着刷新", str(fresh[0]) in now_a,
+                check("学会后主界面一览跟着刷新", str(fresh[0]) in now_a,
                       "%r" % (now_a[:4],))
                 check("角色技能不受召唤兽那 12 个上限限制",
                       len(app.g.actor_skills(a)) == len(base_sk) + 1,
                       "%d -> %d" % (len(base_sk), len(app.g.actor_skills(a))))
-                app.tv_actor_skills.selection_set("sk%d" % fresh[0])
-                app.actor_skill_del()
+                wa.select("none")
+                check("「全不选」清空选中", not wa.sel_sids(),
+                      wa.var_sel.get())
+                wa.select("all")
+                wa.select("invert")
+                check("「反选」= 全选变全不选", not wa.sel_sids(),
+                      wa.var_sel.get())
+                wa.select("invert")
+                check("再反选一次回到全选", len(wa.sel_sids()) == len(_v),
+                      wa.var_sel.get())
+                wa.do_forget()
                 root.update()
-                check("界面「忘掉」生效",
+                check("管理器「忘掉选中」生效",
                       fresh[0] not in app.g.actor_skills(a),
                       app.g.actor_skills(a))
+                wa.close()
+                root.update()
+                check("关掉管理器后 app 不再引用它", app._skill_win is None)
+                # 主界面「忘掉选中」：多选一次忘一批
+                app.g.actor_learn_many(a, fresh[:2])
+                app.load_actor()
+                root.update()
+                app.tv_actor_skills.selection_set(["sk%d" % s
+                                                   for s in fresh[:2]])
+                _pick = app.skp_actor.sel_ids()
+                app.actor_skill_del()
+                root.update()
+                check("主界面「忘掉选中」一次忘掉多选的一批",
+                      len(_pick) == 2
+                      and all(s not in app.g.actor_skills(a) for s in _pick),
+                      "%r -> %r" % (_pick, app.g.actor_skills(a)))
             n_before = len(app.g.actor_skills(a))
             app.actor_skill_clear()          # 测试里 confirm 默认放行
             root.update()
@@ -355,9 +448,10 @@ def main():
             check("召唤兽页**没有**门派下拉（召唤兽没门派）",
                   getattr(app, "cb_baby_sect", None) is None)
             vals = list(app.cb_actor_sect["values"])
-            check("门派下拉 = 13 项（无门派 + 12 门派；「全部技能」仍然没有）",
-                  len(vals) == 13
-                  and "全部技能" not in vals and "无门派" in vals,
+            check("门派下拉 = 15 项（无门派 + 14 门派；「全部技能」仍然没有）",
+                  len(vals) == 15
+                  and "全部技能" not in vals and "无门派" in vals
+                  and "凌波城" in vals and "九黎城" in vals,
                   "%r" % (vals,))
             check("门派下拉里的名字都来自 sect（含 0 无门派）",
                   set(vals) == set(sect.sect_name(s) for s in sect.SECTS),
@@ -369,17 +463,18 @@ def main():
             #   第一个角色可能无门派 → 空集 → IndexError（见下面搜索框那段）。
             # ⚠ 川 2026-09-20 改：门派下拉从右边技能区搬到左栏「门派技能」
             #   （两处都按门派筛等于重复）。右边一览恢复成「全部技能」。
-            allnamed = set(i for i in names_a if names_a[i])
+            # 右下一览 = 这个角色**已学**的技能（和门派下拉无关）
+            _have_a = set(app.g.actor_skills(a))
             app.var_actor_sect.set(sname_a)
             app.skp_actor.fill()
-            check("右边技能一览不受门派下拉影响（始终全部技能）",
-                  set(int(v[1:v.index(" ")]) for v in app.skp_actor.choices)
-                  == allnamed, "%d 个" % len(app.skp_actor.choices))
+            check("右下一览 = 已学技能（不受门派下拉影响）",
+                  set(app.skp_actor.choices) == _have_a,
+                  "%d 个" % len(app.skp_actor.choices))
             app.var_actor_sect.set("摸鱼门")
             app.skp_actor.fill()
-            check("认不出的门派名也不影响右边一览",
-                  set(int(v[1:v.index(" ")]) for v in app.skp_actor.choices)
-                  == allnamed, "%d 个" % len(app.skp_actor.choices))
+            check("认不出的门派名也不影响右下一览",
+                  set(app.skp_actor.choices) == _have_a,
+                  "%d 个" % len(app.skp_actor.choices))
             # 左栏「门派技能」清单跟着门派下拉走
             app.var_actor_sect.set(sname_a)
             app.rebuild_learn_grid()
@@ -418,20 +513,24 @@ def main():
             # ⚠ 别拿「本门派技能」当关键词：真档里第一个角色可能**没有门派**
             #   （2026-09-27 真档就是：李修远 @sect_id=0）→ `want` 是空集，
             #   `sorted(want)[0]` 直接 IndexError（测试自己脆，不是功能坏了）。
-            _pool = sorted(i for i in names_a if names_a[i])
-            if _pool:
-                _kw = names_a[_pool[0]][:1]
+            # 搜索框只筛「已学」那一份（全部技能的搜索在管理器里）
+            _have_a = sorted(app.g.actor_skills(a))
+            if _have_a:
+                _kw = (names_a.get(_have_a[0], "") or str(_have_a[0]))[:1]
                 app.var_actor_skill_search.set(" ")
                 app.skp_actor.fill()
+                _n_all = len(app.skp_actor.choices)
                 app.var_actor_skill_search.set(_kw)
                 app.skp_actor.fill()
                 _c = app.skp_actor.choices
-                check("技能一览的搜索框仍能用",
-                      _c and all(_kw in names_a[int(v[1:v.index(" ")])]
-                                 for v in _c),
-                      "%r" % (_c[:3],))
+                check("技能一览的搜索框能用（只筛已学那一份）",
+                      set(_c) <= set(_have_a) and len(_c) <= _n_all,
+                      "%r（%d/%d）" % (_c[:3], len(_c), _n_all))
                 app.var_actor_skill_search.set("")
                 app.skp_actor.fill()
+                check("清掉关键词后恢复全部已学",
+                      set(app.skp_actor.choices) == set(_have_a),
+                      "%d 个" % len(app.skp_actor.choices))
 
             # 换角色 → 门派下拉自动跟着切
             if len(kids) >= 2:
@@ -464,6 +563,31 @@ def main():
         filled = [r for r in app.tv_pack.get_children()
                   if app.tv_pack.item(r, "values")[2] != "（空）"]
         check("背包里看到东西了", len(filled) >= 1, "%d 格有货" % len(filled))
+        # ---- 背包格子搜索（2026-10-04 川：「背包格子同理」）
+        if filled:
+            _pk_nm = app.tv_pack.item(filled[0], "values")[3]
+            app.var_pack_kw.set(_pk_nm)
+            app.fill_party()
+            root.update()
+            _pk_hit = list(app.tv_pack.get_children())
+            _pk_ok = all(any(_pk_nm in str(v)
+                             for v in app.tv_pack.item(r, "values"))
+                         for r in _pk_hit)
+            check("背包格子搜索：只列命中的格子、不再列空格子",
+                  bool(_pk_hit) and len(_pk_hit) <= len(filled) and _pk_ok,
+                  "搜「%s」→ %d 行（原来 %d 格有货）"
+                  % (_pk_nm, len(_pk_hit), len(filled)))
+            app.var_pack_kw.set("绝无此物XYZ")
+            app.fill_party()
+            root.update()
+            check("背包格子搜索：搜不到就一行不列",
+                  len(app.tv_pack.get_children()) == 0,
+                  "%d 行" % len(app.tv_pack.get_children()))
+            app.pack_kw_clear()
+            root.update()
+            check("清空背包搜索 → 20 格（含空格子）都回来",
+                  len(app.tv_pack.get_children()) == 20,
+                  "%d 行" % len(app.tv_pack.get_children()))
         check("队伍信息已填充", "金钱" in app.var_party.get(),
               app.var_party.get())
         if filled:
@@ -515,6 +639,19 @@ def main():
         check("模板列表已填充（画迹1 那种右栏）",
               len(app.tv_tpl.get_children()) >= 5,
               "%d 个模板" % len(app.tv_tpl.get_children()))
+        _tn = [app.tv_tpl.item(i, "values")
+               for i in app.tv_tpl.get_children()]
+        check("模板列表滤掉了空名行与分段行（不再有 `#49` 这种）",
+              all(nm.strip() and not datatables.section_of(nm)
+                  for _i, nm, *_ in _tn),
+              "%r" % ([r[1] for r in _tn if not r[1].strip()][:3],))
+        check("模板列表多了一列「类别」（`===药品===` 那一层）",
+              all(len(r) == 3 for r in _tn) and any(r[2] for r in _tn),
+              "%r" % (_tn[0],))
+        _tids = [int(r[0]) for r in _tn]
+        check("模板 id 全是真物品（空占位 1/49/50 已不在）",
+              1 not in _tids and 49 not in _tids and 50 not in _tids,
+              "%d 个" % len(_tids))
         app.var_tpl_kw.set("草")
         app.fill_templates()
         root.update()
@@ -679,13 +816,25 @@ def main():
             check("召唤兽预设生效",
                   app.g.baby_value(app._baby(), "loyalty") == 100.0,
                   app.g.baby_value(app._baby(), "loyalty"))
-            # 2026-09-20：「满级(65)」按钮换成「经验拉满」（等级+经验一起写）
+            # 2026-09-20：「满级(65)」按钮去掉；
+            # 2026-10-03 起分为「一键满级」（等级+经验一起写）和「经验拉满」（只给经验）。
             _bg = app._baby()
             app.baby_preset("expfull")
             root.update()
-            check("召唤兽「经验拉满」把等级顶到 %d" % game.MAX_LEVEL_BABY,
+            check("召唤兽「一键满级」把等级顶到 %d" % game.MAX_LEVEL_BABY,
                   app.g.baby_value(_bg, "level") == game.MAX_LEVEL_BABY,
                   app.g.baby_value(_bg, "level"))
+            # 2026-10-03：召唤兽页新增「经验拉满」（只写 @exp，等级不动）。
+            _bg2 = app._baby()
+            _lv_before = app.g.baby_value(_bg2, "level")
+            app.baby_preset("expfill")
+            root.update()
+            check("召唤兽「经验拉满」只写经验、等级不动",
+                  app.g.baby_value(_bg2, "level") == _lv_before
+                  and app.g.baby_value(_bg2, "exp") == game.BABY_EXP_FILL,
+                  "lv=%s exp=%s"
+                  % (app.g.baby_value(_bg2, "level"),
+                     app.g.baby_value(_bg2, "exp")))
 
         # ---------------- v0.4.6：召唤兽补全（列表 / 新增 / 技能 / 出战 / 改名 / 放生）
         say("召唤兽补全（新增小孩 / 技能 / 出战 / 改名 / 放生）…")
@@ -702,11 +851,16 @@ def main():
               and any(app.g.baby_name(x) == "小精灵" for _i, x in app.baby_rows),
               "%d -> %d：%s" % (n0, len(app.baby_rows),
                                [app.g.baby_name(x) for _i, x in app.baby_rows]))
-        newb = [x for _i, x in app.baby_rows if app.g.baby_name(x) == "小精灵"][0]
+        # ⚠ 取**最后一只**：真档里本来就可能有一只同名的「小精灵」，
+        #   `[0]` 会取到旧档那只（资质是旧值）⇒ 假 NG。
+        newb = [x for _i, x in app.baby_rows
+                if app.g.baby_name(x) == "小精灵"][-1]
+        _p3 = app.babies_ed().config(181)      # 期望值从真值表取，别硬编码
         check("新召唤兽资质 = 神兽资质3 定值",
               [app.g.baby_value(newb, k)
                for k in ("atk", "def", "hpq", "mpq", "agi", "eva")]
-              == [2400, 2400, 7500, 4800, 2100, 2100],
+              == [_p3["atk"], _p3["def"], _p3["hp"], _p3["mp"],
+                  _p3["agi"], _p3["eva"]],
               app.g.baby_value(newb, "atk"))
         check("新召唤兽自带技能（神兽 = 全学）",
               len(app.babies_ed().skills(newb)) > 0,
@@ -732,7 +886,7 @@ def main():
         check("选中新那只后名字显示出来",
               app.var_baby_name.get() == "小精灵", app.var_baby_name.get())
         # 改字段「应用」后，选中的应该还是原来那一行（以前会跳回第一行）
-        # ⚠ 2026-09-20：字段表里的「等级」行已去掉（等级只由「经验拉满」写），
+        # ⚠ 2026-09-20：字段表里的「等级」行已去掉（等级只由「一键满级」写），
         # 老断言用的 iid "b_level" 不再存在，改用 "b_hp"。
         check("召唤兽字段表里不再有「等级」行",
               "b_level" not in app.tv_baby.get_children(),
@@ -802,21 +956,85 @@ def main():
               len(_rowv) == len(app.tv_babies["columns"])
               and _rowv[4] == app.g.baby_value(_bb, "five"),
               "%r / %r" % (_rowv[4], app.g.baby_value(_bb, "five")))
-        # ---- 全员忠诚满（2026-09-27：一次改所有角色所有召唤兽）
-        say("全员忠诚满…")
+        # ---- 召唤兽页布局（2026-10-04 川截图「排版还要优化」后补的自检）----
+        # ⚠ 踩过的坑：`tv_babies = ttk.Treeview(f, ...)` 的 parent 是整页 `f`，却
+        #   又 `pack(side="left")` —— Tk 的 `pack()` 只认控件自己的 parent，于是
+        #   一览表抢走整页左边缘，把横滚动条 / 改字段行 / 字段表全挤成右边一条。
+        #   判据用 `pack_slaves()`（按 pack 顺序返回），不依赖窗口有没有 mapped。
+        _bw = app.tv_babies.master
+        _mid = app.tv_baby.master.master
+        check("一览表与竖滚动条同框（parent 该是 bw，不是整页）",
+              _bw is not app.tab_baby
+              and any(c.winfo_class() == "TScrollbar"
+                      for c in _bw.winfo_children()),
+              "parent=%s 内容=%r" % (
+                  _bw.winfo_name(), [c.winfo_class() for c in _bw.winfo_children()]))
+        _order = app.tab_baby.pack_slaves()
+        check("一览表容器排在字段表容器之前（在上面，不是被挤成左右两栏）",
+              _bw in _order and _mid in _order
+              and _order.index(_bw) < _order.index(_mid),
+              "%d vs %d" % (_order.index(_bw) if _bw in _order else -1,
+                            _order.index(_mid) if _mid in _order else -1))
+        # ---- 召唤兽一览搜索（2026-10-04 川：「已有召唤兽的搜索」）
+        _keep_b = app._baby()
+        _n_b = len(app.tv_babies.get_children())
+        app.var_baby_kw.set("绝无此兽XYZ")
+        app.fill_baby_list()
+        root.update()
+        check("召唤兽搜索：搜不到就一行不列",
+              len(app.tv_babies.get_children()) == 0,
+              "%d 行" % len(app.tv_babies.get_children()))
+        app.var_baby_kw.set("")
+        app.baby_kw_clear()
+        root.update()
+        check("清空召唤兽搜索 → 全列回来",
+              len(app.tv_babies.get_children()) == _n_b,
+              "%d -> %d" % (_n_b, len(app.tv_babies.get_children())))
+        _nm_b = app.g.baby_name(app.baby_rows[0][1])
+        app.var_baby_kw.set(_nm_b)
+        app.fill_baby_list()
+        root.update()
+        check("召唤兽搜索：按名字命中（第 1 只「%s」）" % _nm_b,
+              bool(app.tv_babies.get_children())
+              and app.tv_babies.get_children()[0]
+              == "bb%d" % app.baby_rows[0][0],
+              "%r" % (app.tv_babies.get_children()[:3],))
+        # 序号也能搜（1 起）
+        app.var_baby_kw.set("%d" % (app.baby_rows[0][0] + 1))
+        app.fill_baby_list()
+        root.update()
+        check("召唤兽搜索：序号也能搜（%d）" % (app.baby_rows[0][0] + 1),
+              "bb%d" % app.baby_rows[0][0]
+              in app.tv_babies.get_children(),
+              "%r" % (app.tv_babies.get_children()[:3],))
+        app.baby_kw_clear()
+        root.update()
+        if _keep_b is not None:            # 把选中还原回去，别影响后面几段
+            app.refresh_baby_list_keep(_keep_b)
+            root.update()
+        # ---- 全员状态拉满（2026-10-03：合并「回满气血/魔法」+「全员忠诚满」）
+        say("全员状态拉满…")
         _btns = [w.cget("text") for w in walk(app.tab_baby)
                  if w.winfo_class() == "TButton"]
-        check("按钮叫「全员忠诚满」（老的「忠诚满」已换掉）",
-              "全员忠诚满" in _btns and "忠诚满" not in _btns,
-              "、".join(t2 for t2 in _btns if "忠诚" in t2) or "（没有）")
+        check("按钮叫「全员状态拉满」，老名字已消失",
+              "全员状态拉满" in _btns
+              and "全员忠诚满" not in _btns
+              and "回满气血/魔法" not in _btns,
+              "、".join(t2 for t2 in _btns if "状态" in t2 or "忠诚" in t2
+                        or "气血" in t2) or "（没有）")
         _rows = [(aid, x) for aid, a2 in app.sv.actors()
                  for _i, x in app.g.babies(a2)]
-        app.g.set_baby(_rows[0][1], "loyalty", 3)      # 先压低一只造现场
+        # 先压低一只的气血、魔法、愤怒、忠诚，造出现场
+        _tag = _rows[0][1]
+        app.g.set_baby(_tag, "hp", 1)
+        app.g.set_baby(_tag, "mp", 1)
+        app.g.set_baby(_tag, "tp", 0)
+        app.g.set_baby(_tag, "loyalty", 3)
         _low = [_x for _aid, _x in _rows
                 if abs(float(app.g.baby_value(_x, "loyalty")) - 100.0) > 1e-9]
         _nerr = len([d for d in dialogs if d[0] == "error"])
         _sel_before = app.tv_babies.selection()
-        app.baby_preset("loyalty_all")
+        app.baby_preset("state_all")
         root.update()
         _rows2 = [(aid, x) for aid, a2 in app.sv.actors()
                   for _i, x in app.g.babies(a2)]
@@ -824,12 +1042,16 @@ def main():
                  if abs(float(app.g.baby_value(_x, "loyalty")) - 100.0) > 1e-9]
         check("点一下 → 全档 %d 只召唤兽忠诚都到上限" % len(_rows2), not _left,
               "%r" % (_left[:5],))
+        _low_hp = [app.g.baby_value(_x, "hp") for _aid, _x in _rows2
+                   if float(app.g.baby_value(_x, "hp")) < 90000]
+        check("点一下 → 全档召唤兽气血/魔法/愤怒全回满",
+              not _low_hp, "%r" % (_low_hp[:5],))
         check("点一下 → 没弹错误框、标了脏",
               len([d for d in dialogs if d[0] == "error"]) == _nerr
               and app.doc.dirty, "%d 只原来低于上限" % len(_low))
-        check("再点一下是幂等的（返回 (0, 0)）",
-              app.g.set_loyalty_all() == (0, 0),
-              "%r" % (app.g.set_loyalty_all(),))
+        check("再点一下是幂等的（返回 (0, 0, 0)）",
+              app.g.set_state_all() == (0, 0, 0),
+              "%r" % (app.g.set_state_all(),))
         # ⚠ 2026-09-27 踩过：refresh_panels() 会把一览表选中重置成第一行，
         #   于是「接着操作当前选中那只」全落到第一只头上。锁住这条。
         check("点一下 → 一览表选中没被跳回第一行",
@@ -854,31 +1076,105 @@ def main():
               sum(_five_b) + app.g.baby_value(app._baby(), "潜能") == _T_b,
               "%r vs %r" % (sum(_five_b) + app.g.baby_value(app._baby(), "潜能"),
                             _T_b))
-        say("改技能…")
+        say("改技能（走技能管理器：多选 + 全选/反选）…")
         app.babies_ed().clear_skills(app._baby())
         app.load_baby()
         app.skp_baby.fill()
         _d0 = app.txt_baby_skill_desc.get("1.0", "end").strip()
-        check("搜索/默认选中后技能说明立即显示", _d0 != "", "%r" % _d0[:46])
-        pick0 = app.var_baby_skill_pick.get()
-        app.skp_baby.arrow(1)
+        check("清空技能后说明框跟着空", _d0 == "", "%r" % _d0[:46])
+        wb = app.open_skill_manager("baby")
         root.update()
-        check("下拉 ↑/↓ 直接切技能并刷新说明",
-              app.var_baby_skill_pick.get() != pick0
-              and app.txt_baby_skill_desc.get("1.0", "end").strip() != "",
-              "%r -> %r" % (pick0, app.var_baby_skill_pick.get()))
-        app.var_baby_skill_pick.set(
-            "#45 高级必杀" if "#45 高级必杀" in app.cb_baby_skill["values"]
-            else app.cb_baby_skill["values"][0])
-        app.baby_skill_add()
+        check("召唤兽技能管理器开得起来",
+              wb is not None and wb.win.winfo_exists())
+        # ⚠ 技能 id 按版本会飘（尝鲜版「高级必杀」= 45，内测版 = 81）⇒ 查表拿。
+        _hit = [s for s in wb.meta if wb.meta[s][0] == "高级必杀"]
+        wb.var_kw.set("高级必杀")
+        wb.refill()
+        _vb = [wb.sid_of(i) for i in wb.tv.get_children()]
+        check("管理器按名字搜索生效（含 高级必杀 #%s）"
+              % (_hit[0] if _hit else "?"),
+              bool(_hit) and _hit[0] in _vb, "%r" % (_vb[:5],))
+        wb.select("all")
+        check("全选后已选计数跟着变", "已选" in wb.var_sel.get(),
+              wb.var_sel.get())
+        wb.do_learn()
         root.update()
-        check("界面「学会技能」生效",
-              len(app.babies_ed().skills(app._baby())) == 1,
+        check("管理器「学会选中」生效",
+              len(app.babies_ed().skills(app._baby())) == len(_vb),
+              "%r" % (app.babies_ed().skills(app._baby()),))
+        # ---- 「已学」列 = 勾选框那种表示（2026-10-04 川：像人物学门派技能那样）
+        _iid0 = wb.tv.get_children()[0]
+        _sid0 = wb.sid_of(_iid0)
+        check("「已学」列用勾选框字形（■＝已学 / □＝未学）",
+              wb.tv.item(_iid0, "values")[0] == "\u25a0",
+              "%r" % (wb.tv.item(_iid0, "values")[0],))
+        wb.toggle_one(_sid0)
+        root.update()
+        check("点「已学」格子 → 那一行当场忘掉、字形变 □",
+              _sid0 not in app.babies_ed().skills(app._baby())
+              and wb.tv.item(_iid0, "values")[0] == "\u25a1",
+              "%r / %r" % (app.babies_ed().skills(app._baby()),
+                           wb.tv.item(_iid0, "values")[0]))
+        wb.toggle_one(_sid0)
+        root.update()
+        check("再点一次 → 又学会（来回切不用按按钮）",
+              _sid0 in app.babies_ed().skills(app._baby())
+              and wb.tv.item(_iid0, "values")[0] == "\u25a0",
+              "%r" % (wb.tv.item(_iid0, "values")[0],))
+        # 真·鼠标点那一列（走 on_click 的 identify_column / identify_row）
+        _yy = None
+        for _cand in (30, 40, 50, 60, 80):
+            if wb.tv.identify_row(_cand):
+                _yy = _cand
+                break
+        if _yy is None:
+            check("能定位到列表行（x=20 落在「已学」列）", False,
+                  "identify_row 全空（窗口没几何？）")
+        else:
+            check("x=20 落在第 1 列（「已学」）",
+                  wb.tv.identify_column(20) == "#1",
+                  wb.tv.identify_column(20))
+            _rid = wb.tv.identify_row(_yy)
+            _tsid = wb.sid_of(_rid)
+            _had = _tsid in app.babies_ed().skills(app._baby())
+            wb.tv.event_generate("<Button-1>", x=20, y=_yy)
+            root.update()
+            check("鼠标点「已学」列＝当场切换那一行（不用先选中）",
+                  (_tsid in app.babies_ed().skills(app._baby())) != _had,
+                  "#%d 原来已学=%r" % (_tsid, _had))
+            if _tsid in app.babies_ed().skills(app._baby()):
+                wb.toggle_one(_tsid)        # 还原，别干扰下面
+                root.update()
+        wb.do_forget()
+        root.update()
+        check("管理器「忘掉选中」生效",
+              app.babies_ed().skills(app._baby()) == [],
               app.babies_ed().skills(app._baby()))
-        app.tv_baby_skills.selection_set("sk%d" % app.babies_ed().skills(app._baby())[0])
+        # 空格 = 逐条反相（2026-10-04 川：「技能管理增加空格键切换学会/忘记」）
+        wb.select("all")
+        wb.toggle_selected()
+        root.update()
+        check("管理器空格键：选中的（全未学）一次全学会",
+              sorted(app.babies_ed().skills(app._baby())) == sorted(_vb),
+              "%r vs %r" % (sorted(app.babies_ed().skills(app._baby())),
+                            sorted(_vb)))
+        wb.toggle_selected()
+        root.update()
+        check("管理器空格键：再按一次（全已学）一次全忘掉",
+              app.babies_ed().skills(app._baby()) == [],
+              app.babies_ed().skills(app._baby()))
+        wb.close()
+        root.update()
+        # 主界面一览：多选 → 「忘掉选中」一次一批
+        _bd = app.babies_ed()
+        _bd.learn(app._baby(), 45)
+        _bd.learn(app._baby(), 88)
+        app.load_baby()
+        root.update()
+        app.tv_baby_skills.selection_set(["sk45", "sk88"])
         app.baby_skill_del()
         root.update()
-        check("界面「忘掉选中」生效",
+        check("主界面「忘掉选中」一次忘一批（多选）",
               app.babies_ed().skills(app._baby()) == [],
               app.babies_ed().skills(app._baby()))
         say("改名 / 出战 / 放生…")
@@ -905,12 +1201,79 @@ def main():
         check("删掉出战那只后自动换人出战",
               app.babies_ed().active_index(a0) == 0,
               app.babies_ed().active_index(a0))
+        # ---- 多选删除（2026-10-04 川：「召唤兽不能多选删除」）----------------
+        # ⚠ 必须**倒序**删：`Babies.remove` 内部是 `items.pop(index)`，正序删会
+        #   让后面所有索引一起前移、接着按原索引删就删错对象。这里特意选
+        #   **不相邻**的两只（第 1 与第 3），删完剩下必须含"中间那只"——
+        #   正序删会把这个结果做错（这正是本段要钉的坑）。
+        say("召唤兽多选删除…")
+        _cid = save.M.value_of(save._deref(
+            save.ivar(app.baby_rows[0][1], "@actor_id")))
+        _m0 = len(app.baby_rows)
+        for _ in range(3):
+            app.babies_ed().add(a0, _cid)
+        app.fill_baby_list()
+        root.update()
+        check("多选删除前先塞进 3 只临时召唤兽",
+              len(app.baby_rows) == _m0 + 3,
+              "%d -> %d" % (_m0, len(app.baby_rows)))
+        _bb = app.tv_babies.get_children()
+        _keep = app.baby_rows[1][1]                 # 中间那只：必须活下来
+        app.tv_babies.selection_set([_bb[0], _bb[2]])
+        root.update()
+        check("召唤兽列表能多选（selectmode=extended）",
+              len(app.tv_babies.selection()) == 2,
+              "%r" % (app.tv_babies.selection(),))
+        app.baby_delete()
+        root.update()
+        check("界面「放生」多选一次删一批",
+              len(app.baby_rows) == _m0 + 1,
+              "%d -> %d" % (_m0 + 3, len(app.baby_rows)))
+        check("多选删的是选中的那两只（中间那只没被误删）",
+              any(x is _keep for _i, x in app.baby_rows),
+              "剩 %d 只" % len(app.baby_rows))
         app.baby_add_dialog()          # 打开「新增召唤兽」窗口（不点确定，只建得起来）
         root.update()
         opened = [w for w in root.winfo_children()
                   if isinstance(w, app.tk.Toplevel)]
         check("「新增召唤兽」窗口能打开",
               any(w.winfo_exists() for w in opened), "%d 个窗口" % len(opened))
+        _dlg = [w for w in opened if w.winfo_exists()
+                and w.title() == "新增召唤兽"]
+        if _dlg:
+            _ws = walk(_dlg[0])
+            _tv = [w for w in _ws if w.winfo_class() == "Treeview"]
+            _ab = [w for w in _ws if w.winfo_class() == "TButton"
+                   and "加" in str(w.cget("text"))]
+            check("「新增召唤兽」列表能多选（selectmode=extended）",
+                  bool(_tv) and str(_tv[0].cget("selectmode")) == "extended",
+                  str(_tv[0].cget("selectmode")) if _tv else "（没有列表）")
+            check("筛选复选框已改名「神兽」",
+                  any(w.winfo_class() == "TCheckbutton"
+                      and str(w.cget("text")) == "神兽" for w in _ws),
+                  "、".join(str(w.cget("text")) for w in _ws
+                            if w.winfo_class() == "TCheckbutton"))
+            if _tv and _ab:
+                _kids = _tv[0].get_children()
+                _tv[0].selection_set(_kids[:2])
+                root.update()
+                # ⚠ 文字变长后必须重算贴字 padding（refit_btn）——
+                #   还挂着短文字的负 padding 就会被裁，这里拿一个新按钮当基准
+                _ref = app.ttk.Button(_dlg[0], text="加选中的 2 只")
+                _ref.update_idletasks()
+                check("选中 2 项 → 按钮变「加选中的 2 只」（且没被裁）",
+                      str(_ab[0].cget("text")) == "加选中的 2 只"
+                      and _ab[0].winfo_reqwidth()
+                      >= _ref.winfo_reqwidth() - 1,
+                      "%s / %dpx（基准 %dpx）"
+                      % (_ab[0].cget("text"), _ab[0].winfo_reqwidth(),
+                         _ref.winfo_reqwidth()))
+                _ref.destroy()
+                _tv[0].selection_set(_kids[:1])
+                root.update()
+                check("选回 1 项 → 按钮变回「加这只」",
+                      str(_ab[0].cget("text")) == "加这只",
+                      str(_ab[0].cget("text")))
         for w in opened:               # 关掉，别把 grab 留着
             try:
                 w.grab_release()
@@ -975,8 +1338,11 @@ def main():
             root.update()
             check("界面改变量生效", app.sv.get_variable(0) == 314,
                   "%r" % app.sv.get_variable(0))
-            check("变量表格同步刷新",
-                  int(app.tv_va.item("v0", "values")[1]) == 314)
+            # ⚠ 值列在源值是 nil 时是字符串 "None"（真档的 `@variables` 会整体消失），
+            # 直接 int() 会抛 ValueError 把后半段断言全带崩 ⇒ 先转字符串再比。
+            _va_cell = app.tv_va.item("v0", "values")[1]
+            check("变量表格同步刷新", str(_va_cell).strip() == "314",
+                  "%r" % (_va_cell,))
         finally:
             huaji2_save_editor.EditDialog = real_dlg
             root.wait_window = real_wait

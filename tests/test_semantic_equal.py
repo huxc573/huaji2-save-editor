@@ -16,6 +16,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.stdout.reconfigure(errors="replace")
 
+# ⚠ Python ≥3.11 默认禁止把超过 4300 位的整数转成字符串（DoS 防护）。
+# 本测试的 `canon()` 要把节点值打成 `big(%d)` 参与比较，而 `tools\_plain`
+# 下解密出来的表里确实有几千位的 Ruby Bignum ⇒ 不关这个上限，整组会在
+# 第一个 bignum 上抛 ValueError 直接中断（看着像回归，其实是测试自己的坑）。
+sys.set_int_max_str_digits(0)
+
 import codec  # noqa: E402
 import paths  # noqa: E402
 import marshal_ruby as M  # noqa: E402

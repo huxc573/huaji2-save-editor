@@ -62,7 +62,13 @@ from save import _deref, ivar
 
 #: 五行的合法值。唯一来源在 `fieldnames.BABY_FIVE`（`game.py` 校验也要用）。
 FIVE = fieldnames.BABY_FIVE
-GOD_POOLS = ("神兽资质", "神兽资质2", "神兽资质3")
+#: 「新增召唤兽」认得的所有档位（= `$baby` 的 `:type`）。**泡泡灵仙**是
+#: 230~237 那 8 只（`_灵仙资质` 池），资质和神兽不同（血/敏/防更低），
+#: 所以单独一档 —— 少认一档它们就会整批从「新增召唤兽」里消失。
+BABY_TYPES = ("普通", "神兽", "泡泡灵仙")
+#: 「定值档」＝资质/成长/五维都取表里的定值、不吃随机（神兽 + 泡泡灵仙）。
+#: ⚠ 但**寿命**不能一刀切：神兽 `life == "infinite"`（永生），灵仙是 8000。
+GOD_TYPES = ("神兽", "泡泡灵仙")
 
 #: 游戏 `Game_Baby#learn_skill` 里「升级学技能」的上限（带 `must=true` 可绕过）。
 #: ⚠ 工具**不再**据此截断：存档里写 13 个以上是合法的 ——
@@ -143,9 +149,14 @@ class Babies(object):
         """`$baby` 里的配置（type/allow_lv/六项资质上限/成长/寿命）。"""
         return baby_aptitude.config_of(int(baby_id), self.data_key(baby_id))
 
-    def is_god(self, baby_id):
+    def type_of(self, baby_id):
+        """档位（`$baby` 的 `:type`）：普通 / 神兽 / 泡泡灵仙。查不到返回 `""`。"""
         cfg = self.config(baby_id)
-        return bool(cfg) and cfg.get("type") == "神兽"
+        return (cfg or {}).get("type") or ""
+
+    def is_god(self, baby_id):
+        """「神兽档」＝神兽 + 泡泡灵仙（资质取定值那两类）。"""
+        return self.type_of(baby_id) in GOD_TYPES
 
     def class_skill_ids(self, class_id):
         """某个职业（= Data\\Classes[id]）的全部学习技能 id。
@@ -233,14 +244,16 @@ class Babies(object):
             if not self.is_baby_entry(i):
                 continue
             cfg = self.config(i)
-            if not cfg or cfg.get("type") not in ("普通", "神兽"):
+            if not cfg or cfg.get("type") not in BABY_TYPES:
                 continue
             nm = self.name_of(i)
             if not nm:
                 continue
             out.append({
                 "id": i, "name": nm, "type": cfg.get("type"),
-                "pool": self.data_key(i) or "",
+                # 备注池：`Data\Actors` 的 note 优先；没有就报「来自哪个资质池」
+                # （真值表里 id 引用池时记了 `type2`）。
+                "pool": self.data_key(i) or cfg.get("type2") or "",
                 # `inferred=True` 表示资质是**按 id 区间估的**，不是游戏真值
                 # （V2.201 的 `$baby` 表运行时才生成，静态拿不到 —— 见
                 #  tables/baby_aptitude.py 的说明）。界面据此提示用户。
@@ -276,7 +289,9 @@ class Babies(object):
         if not cfg:
             raise ValueError("$baby 表里没有 id=%d 的配置（加不了）" % baby_id)
         rnd = rnd or random.Random()
-        god = cfg.get("type") == "神兽"
+        # ⚠ 判据是「定值档」而不是「== 神兽」：泡泡灵仙（230~237）的资质也是
+        #   表里的定值，漏了它会掉进普通档、变成带随机 —— 比现状还差。
+        god = cfg.get("type") in GOD_TYPES
         scale = 1.0 if (god or not mutation) else 0.66
         # 召唤兽自己的初始等级（游戏里 @level = actor.initial_level）
         level = max(1, get_int(ivar(info, "@initial_level"), 1))
@@ -294,10 +309,16 @@ class Babies(object):
         eva = zi("eva", 201)
         if god:
             grow = float(cfg.get("grow", 1.0))
-            life = None                     # None → :infinite（永生）
         else:
             grow = round(float(cfg.get("grow", 1.0))
                          - _int_rand(rnd, 6) / 100.0 * scale, 2)
+        # 寿命：`life == "infinite"`（神兽）→ None（永生）；定值档照表写；
+        # 只有普通召唤兽才随机往下扣。
+        if cfg.get("life") == "infinite":
+            life = None                     # None → :infinite（永生）
+        elif god:
+            life = int(cfg.get("life", 10000))
+        else:
             life = int(cfg.get("life", 10000)) - _int_rand(rnd, 13) * 100
         # ⚠ 这个五维 dict 以前也叫 `five`，2026-09-27 给 build 加了同名参数
         #   `five`（五行）→ 参数被这个局部变量覆盖，`str_node(five)` 拿到个 dict
@@ -405,6 +426,20 @@ class Babies(object):
                         ("@item", nil_node())]
             return it
 
+        # ⚠ `@color_ex` = `Game_Color.new(self)`（基类 `Game_Battler#initialize` 里建的）。
+        #   以前漏写 ⇒ 面板画立绘 `Battler#get` → `nil.get_color` 崩（blob:56083）；
+        #   实测真档里 6 个 ivar 全是空 Hash（`@data` 是 `{dynamic_hues:{}, callbacks:{}}`）。
+        color_ex = M.ObjNode("Game_Color")
+        color_ex.ivars = [
+            ("@master", baby),
+            ("@hues", _hash([])),
+            ("@colors", _hash([])),
+            ("@tones", _hash([])),
+            ("@shaders", _hash([])),
+            ("@data", _hash([(M.SymbolNode("dynamic_hues"), _hash([])),
+                             (M.SymbolNode("callbacks"), _hash([]))])),
+        ]
+
         eq_slots = 4
         if isinstance(equips, M.ArrayNode) and equips.items:
             eq_slots = len(equips.items)
@@ -442,10 +477,20 @@ class Babies(object):
             ("@buffs", M.ArrayNode([int_node(0) for _ in range(8)])),
             ("@buff_turns", _hash([])),
             ("@signature", M.BignumNode(signature)),
-            ("@seed", _hash([(M.SymbolNode("skills"),
-                              M.BignumNode(rnd.getrandbits(31))),
-                             (M.SymbolNode("baby"), M.BignumNode(signature))])),
+            # ⚠ `@seed` / `@seeds` 必须照 `Game_Baby#init_seed`（V2.201）的**真实键名**写：
+            #   @seed  = {srand: true, signature: <大整数>, skills: <整数>, dans: <整数>}
+            #   @seeds = {book: [<大整数>, 0], rebirth: [<大整数>, 0]}
+            #   旧版把 signature 错写成 `:baby`、又漏了 `:srand` / `:dans` / `:rebirth`：
+            #   `Game_Baby#seed[:signature]` 取到 nil ⇒ 合宠 `nil + nil` 必崩；
+            #   `seed[:dans]` 取到 nil ⇒ 内丹那条 `a[0] + nil` 也崩。
+            ("@seed", _hash([(M.SymbolNode("srand"), M.BoolNode(True)),
+                             (M.SymbolNode("signature"), M.BignumNode(signature)),
+                             (M.SymbolNode("skills"), M.BignumNode(rnd.getrandbits(31))),
+                             (M.SymbolNode("dans"), M.BignumNode(rnd.getrandbits(31)))])),
             ("@seeds", _hash([(M.SymbolNode("book"),
+                               M.ArrayNode([M.BignumNode(rnd.getrandbits(127)),
+                                            int_node(0)])),
+                              (M.SymbolNode("rebirth"),
                                M.ArrayNode([M.BignumNode(rnd.getrandbits(127)),
                                             int_node(0)]))])),
             ("@mutation", M.BoolNode(bool(mutation))),
@@ -461,12 +506,29 @@ class Babies(object):
             ("@exp", _hash([(int_node(class_id), int_node(0))])),
             ("@equips", M.ArrayNode([base_item() for _ in range(eq_slots)])),
             ("@attr", attr),
+            # ⚠ `@attrs`（复数，纯 Hash）跟 `@attr`（单数，Game_Baby_Attr 对象）是两回事。
+            #   `Game_Baby#skill_max` 读的正是 `self.attrs[:skill_limit]`，
+            #   默认结构见 `Game_Baby#init_seed` = `{lock: [], skill_limit: 12}`。
+            #   以前整个漏写 ⇒ 官方客户端一点召唤兽面板
+            #   `NoMethodError: undefined method [] for nil` @ skill_max 必崩
+            #   （离线补丁有运行时兜底，所以只有不打补丁的客户端才暴露）。
+            ("@attrs", _hash([(M.SymbolNode("lock"), M.ArrayNode([])),
+                              (M.SymbolNode("skill_limit"), int_node(12))])),
             ("@skills", M.ArrayNode([int_node(s) for s in skills])),
             ("@battler_dir_", str_node(name)),
             ("@battler_weapon_", str_node("")),
             ("@action_input_index", int_node(0)),
             ("@dyeing", int_node(0 if god else 1)),
-            ("@last_skill", base_item()),
+            ("@color_ex", color_ex),
+            # ⚠ `@last_skill` 必须是**数组**（`Game_Baby#current_auto` 就是
+            #   `@last_skill[@action_input_index] ||= {}`，里面再取 `[:item]`）。
+            #   以前塞了个 Game_BaseItem 单对象 ⇒ 自动化战斗时对它调 `[]` 直接崩
+            #   （blob:11424，2026-10-03 第三轮实录）。
+            #   正常值形如 `[{item: $data_skills[1], target_index: 0}]`；编辑器拿不到
+            #   `Data\\Skills` 的活对象，按游戏逻辑给 `item: nil`（战斗侧会退回 1 号技能）。
+            ("@last_skill", M.ArrayNode([_hash([
+                (M.SymbolNode("item"), nil_node()),
+                (M.SymbolNode("target_index"), int_node(0))])])),
             ("@master", actor),                     # 指回主人（序列化时发 @N）
             ("@fast_mhp", M.ArrayNode([int_node(mhp), int_node(0)])),
             ("@fast_mmp", M.ArrayNode([int_node(mmp), int_node(0)])),
@@ -550,6 +612,34 @@ class Babies(object):
     def forget(self, baby, skill_id):
         ids = [s for s in self.skills(baby) if s != int(skill_id)]
         return self.set_skills(baby, ids)
+
+    def learn_many(self, baby, skill_ids):
+        """一次学一批技能，返回 `（新学会的, 本来就已经会的）`。
+
+        ⚠ 别在循环里调 `learn`：`set_skills` 每次 `mark_structural()` 整份
+        重写 `@skills`。追加顺序 = 传入顺序去重（游戏面板是按 `@skills`
+        顺序画 4 列网格的，别在这里顺手排序）。
+        """
+        ids = self.skills(baby)
+        have = set(ids)
+        added = []
+        for s in skill_ids:
+            s = int(s)
+            if s not in have and s not in added:
+                added.append(s)
+        if added:
+            self.set_skills(baby, ids + added)
+        return added, sorted({int(s) for s in skill_ids} & have)
+
+    def forget_many(self, baby, skill_ids):
+        """一次忘一批技能，返回 `（真正忘掉的, 本来就没有的）`。"""
+        ids = self.skills(baby)
+        have = set(ids)
+        want = {int(s) for s in skill_ids}
+        drop = [s for s in ids if s in want]
+        if drop:
+            self.set_skills(baby, [s for s in ids if s not in want])
+        return drop, sorted(want - have)
 
     def clear_skills(self, baby):
         return self.set_skills(baby, [])

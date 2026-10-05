@@ -64,6 +64,19 @@ MAX_GOLD = fieldnames.MAX_GOLD
 # ⚠ V2.201 的 MAX_GOLD 是 9,999,999,999（尝鲜版 30,000,000）⇒ SAFE_GOLD 约 83 亿。
 #   V2.201 实际已无`$jiance` 判作弊（见模块文档），留余量只是为了别贴死上限。
 SAFE_GOLD = MAX_GOLD * 5 // 6       # 留 1/6 安全余量
+# 「经验拉满」（角色页按钮）写的 @exp 值 —— 2026-10-03 川定 5000 万。
+# 用意：等级**不动**，把经验给足，玩家回游戏自己点「升级」（一次一级）。
+# ⚠ 内测版 V2.201 脚本里 **没有** $jiance / cheated（见 anti_cheat_report 注释），
+#   所以"经验给太多被判作弊"这一版不成立；5000 万也远低于表里最大合法值
+#   （ACTOR_EXP 末项 ≈ 22.5 亿）。@limit_exp（体验版累计上限 2 亿）是**另一个**
+#   字段，只卡打怪获得的经验，跟这里写 @exp 无关。
+ACTOR_EXP_FILL = 50000000
+# 「经验拉满」（召唤兽页按钮）写的 @exp 值 —— 2026-10-03 川要求召唤兽页也加这个按钮，
+# 沿用角色页同一个 5000 万（BABY_EXP 满级门槛只有 413 万，1→165 累计约 1.07 亿）。
+# ⚠ 召唤兽和人物**不一样**：`Game_Baby#change_exp`(7014) 里有
+#   `level_up while ...` 升级循环，所以写完经验**下一场战斗结算时自己连升**，
+#   天花板是「主人等级 + 5」和 MAX_LEVEL_BABY。等级不变是"写的那一刻"不变。
+BABY_EXP_FILL = 50000000
 MAX_ITEM = fieldnames.MAX_ITEM
 #: 仓库页号上限。**V2.201 是 12**（`Config::Game::MAX_WAREHOUSE = [0, 12]`），
 #: 尝鲜版只有 3 —— 沿用旧值会把合法的 4~12 页当成超限去"修"。
@@ -168,8 +181,25 @@ def is_ruby_false(value):
 
 
 def set_ivar(obj, name, node):
-    """替换对象的某个 ivar 的值节点（保持位置）。"""
+    """替换对象的某个 ivar 的值节点（保持位置）。
+
+    ⚠ **传进来的值若是 `'@N'` 链接，必须先展开成对象再存**：链接里记的是
+    **解析那一刻**的编号，一旦周围对象增删（编号整体重排）就会指到别的对象上。
+    2026-10-04 的翻车：`babies.set_active()` 传了 `@babys[index]`（常常就是个
+    `'@N'` 链接）→ 写回去的 `@baby` 变成**整个数组**，游戏进图第一帧
+    `Game_Party#battle_members` 的 `b.exist?` 直接
+    `NoMethodError: undefined method 'exist?' for #<Array>`。
+    展开后拿到的是**对象本身**，序列化器按对象身份发链接，不会再错位。
+
+    ⚠ 这里**只展开 `'@N'` 链接**，不走 `_deref`（`_deref` 还会顺手拆掉
+    `I "…" { :E => true }` 那层编码包装 —— 那是 Ruby 1.9 非 ASCII 字符串的
+    UTF-8 标记，拆了游戏读出来就是乱码，`hex_str_node()` 那种值尤其碰不得）。
+    """
     obj = _deref(obj)
+    _n = 0
+    while isinstance(node, M.LinkNode) and node.target is not None and _n < 8:
+        node = node.target
+        _n += 1
     for i, (k, _v) in enumerate(obj.ivars):
         if k == name:
             obj.ivars[i] = (k, node)
@@ -189,7 +219,7 @@ class GameEditor(object):
         """改金钱的统一入口（界面层都该走这里，而不是直接 sv.set_gold）。
 
         三件事一次做齐，缺一个都会被游戏判作弊：
-          1. 超过 MAX_GOLD（30,000,000）→ 自动改成 SAFE_GOLD（上限的 5/6，
+          1. 超过 MAX_GOLD（9,999,999,999）→ 自动改成 SAFE_GOLD（上限的 5/6，
              留安全余量），返回 (实际写入值, 是否被钳)；
           2. sv.set_gold 同步 Lock 的 @master 校验和；
           3. sync_gold_security 把游戏的金钱账 security[:gold] 对齐 ——
@@ -306,17 +336,23 @@ class GameEditor(object):
         """物品模板表：[(id, 名称, 说明), ...]（从 Data\\<kind>.rvdata2 读）。
 
         仿画迹1：右边一个可搜索的模板列表，选中后写进背包格子。
+
+        **只列"真物品"**（2026-10-04 川：物品管理里别出现纯编号的东西）——走
+        `datatables.item_map()`，它已经滤掉两类噪音：分段行（`===药品===`）和
+        空名空说明的占位行（界面上会显示成 `#49`，选中还会把 id 写进背包）。
+        说明里还会接上备注能翻成人话的那几行（等级 / 售价 / 使用限制…）。
+
         读不到游戏目录时退回**内置名字表**（只有 id/名字/说明）——列表还能用，
         只是「克隆整件物品」那条路（`make_item`）仍需要 Data，另见那里的提示。
         """
         import datatables
         kw = (keyword or "").strip().lower()
         try:
-            _root, items = datatables.load(kind)
-            rows = [(i, datatables.s(node, "@name") or ("#%d" % i),
-                     (datatables.s(node, "@description") or ""))
-                    for i, node in items]
+            m = datatables.item_map(kind)
+            rows = [(i, m[i][0] or ("#%d" % i), m[i][1]) for i in sorted(m)]
         except Exception:
+            rows = []
+        if not rows:
             rows = datatables.builtin_rows(kind)
         out = []
         for i, nm, desc in rows:
@@ -328,6 +364,15 @@ class GameEditor(object):
             if len(out) >= limit:
                 break
         return out
+
+    def group_map(self, kind="Items"):
+        """`{物品 id: 表里的段名}` —— 模板列表的「类别」列用（`===药品===` /
+        `======剑=======` 那一层，口径见 `datatables.item_group()`）。"""
+        import datatables
+        try:
+            return datatables.item_group(kind)
+        except Exception:
+            return {}
 
     def set_all_counts(self, kind="Items", count=99, page=None):
         """把（某一页/整本）已有的格子数量批量改成 count（仿画迹1 的批量改）。"""
@@ -601,7 +646,9 @@ class GameEditor(object):
     def _desc_map(self, kind):
         """Data 表的 {id: (名称, 完整说明)}（懒加载缓存，悬浮提示用）。
 
-        读不到游戏目录时 `datatables.desc_map()` 会退回内置表，所以这里不用再兜一次。
+        走 `datatables.item_map()`：说明带上备注那几行（等级 / 售价 / 使用限制…），
+        并且滤掉了分段行与空占位行（那些行本来也没有说明）。读不到游戏目录时
+        它会退回内置表，所以这里不用再兜一次。
         """
         if not getattr(self, "_desc_cache", None):
             self._desc_cache = {}
@@ -609,7 +656,7 @@ class GameEditor(object):
             import datatables
             m = {}
             try:
-                pairs = datatables.desc_map(kind)
+                pairs = datatables.item_map(kind)
             except Exception:
                 pairs = {}
             for i, (nm, desc) in pairs.items():
@@ -633,7 +680,11 @@ class GameEditor(object):
             pair = self._desc_map(k).get(iid)
             if pair and pair[1]:
                 return pair[1]
-        return (_as_str(ivar(n, "@description")) or "").strip()
+        # 兜底：对象自带的 @description 也可能带字面 `\n` / 裸 `\r`
+        # （表里两种写法混着用），统一过一遍 clean_desc 再显示。
+        import datatables
+        return datatables.clean_desc(
+            _as_str(ivar(n, "@description")) or "").strip()
 
     def set_count(self, kind, slot, count):
         """改某一格的数量（标量改动，安全）+ 同步物品计数校验。"""
@@ -766,36 +817,25 @@ class GameEditor(object):
         return node
 
     def item_payload(self, node):
-        """读一个物件 `@attr` 里的运行时内容：`(type, data)`，没有则 (None, None)。"""
+        """读一个物件 `@attr` 里的运行时内容：`(type, data)`，没有则 (None, None)。
+
+        ⚠ 第二项是"内容本体"：多数家族是 `@attr["data"][:data]`，
+        但 `:礼盒` 那种没有 `data` 这一层，内容直接跟 `:type` 平级
+        ⇒ 这时把外层整份 Hash 当内容返回（否则读出来是 nil）。
+        """
         a = _deref(ivar(node, "@attr"))
         d = _deref(hash_get(a, "data")) if a is not None else None
         if not isinstance(d, M.HashNode):
             return None, None
         t = M.value_of(_deref(hash_get(d, "type")))
         inner = _deref(hash_get(d, "data"))
-        return t, inner
+        return t, (d if inner is None else inner)
 
     def item_needs_payload(self, kind, item_id):
         """这件东西是不是“游戏运行时才生成内容”（孵化蛋、各类礼包…）。"""
         import datatables
         nm = datatables.name_map(kind).get(item_id, "")
         return itemattr.needs_payload(nm), nm
-
-    def baby_note_map(self):
-        """`{备注里的 data 值: [召唤兽 id, ...]}`（从 Data\\Actors 的 @note 里拓）。"""
-        import re
-        import datatables
-        out = {}
-        try:
-            _r, items = datatables.load("Actors")
-        except Exception:
-            return out
-        for i, node in items:
-            note = datatables.s(node, "@note") or ""
-            m = re.search(r"data\s*=\s*:([^\s|\r\n]+)", note)
-            if m:
-                out.setdefault(m.group(1), []).append(i)
-        return out
 
     def payload_template(self, kind, item_id):
         """从存档里任意一件**有内容**的同款物品上把 `@attr` 整份抄下来。"""
@@ -860,18 +900,25 @@ class GameEditor(object):
             if not set_ivar(node, "@attr", sib):
                 node.ivars.append(("@attr", sib))
             return node
-        spec = itemattr.build(nm, item_id, ctx=self.baby_note_map)
+        spec = itemattr.build(nm, item_id)
         if spec is None:
             return node
-        typ, data = spec
-        if kid is not None and "id" in data:
-            data["id"] = int(kid)
+        typ, payload = spec
+        if kid is not None:
+            # 指定"孵出哪只/开出什么"：蛋类那层在 payload["data"] 里，
+            # 没有 data 层（礼盒之类）就直接看 payload 自己。
+            inner = payload.get("data")
+            if not isinstance(inner, dict):
+                inner = payload
+            if "id" in inner:
+                inner["id"] = int(kid)
         attr = M.HashNode([], default=None)
         # ⚠ 这里的**外层键必须是字符串 "data"**：游戏写的就是 `@attr["data"]`，
         # 读的时候是 `item.data[:data][:id]`。早期工具写成了符号键 :data，
         # 于是“内容列”读不出来、游戏用蛋时 `item.data` 为 nil 直接报
         # NoMethodError: undefined method '[]' for nil:NilClass。
-        attr.pairs.append((self._str_key("data"), self._payload_node(typ, data)))
+        attr.pairs.append((self._str_key("data"),
+                           self._payload_node(typ, payload)))
         if not set_ivar(node, "@attr", attr):
             node.ivars.append(("@attr", attr))
         return node
@@ -897,9 +944,10 @@ class GameEditor(object):
         self.doc.mark_structural()
         return self.item_payload(it)
 
-    #: 游戏写的 type 是中文符号（脚本 `魔兽要诀/孵化蛋…` 那批方法）、
-    #: 工具生成用的是英文（itemattr.py）—— 两套都认，归一到内部键。
-    #: 参照游戏自己的物品浮窗（脚本 `when :魔兽要诀` 那段）做的口径。
+    #: 运行时内容的 `:type` → 内部家族键（用来渲染“内容”列）。
+    #: **游戏写的是中文符号，工具现在也写中文**（`itemattr` 直接给游戏符号）；
+    #: 下面那批英文键是**老版本工具写出来的**存档，只为读得出来而保留。
+    #: 口径照游戏自己的物品浮窗（脚本 `case item.data[:type]` 那段）。
     _PAYLOAD_KINDS = {
         "孵化蛋": "egg", "baby_egg": "egg",
         "魔兽要诀": "book", "高级魔兽要诀": "book", "超级魔兽要诀": "book",
@@ -916,10 +964,12 @@ class GameEditor(object):
         "人参果": "ginseng", "ginseng": "ginseng",
         "如意丹": "ruyi",
         "元宵": "yuanxiao", "yuanxiao": "yuanxiao",
+        "激进元宵丹": "yuanxiao_dan",
         "进阶石": "promote", "promote_stone": "promote",
         "导航旗": "flag", "navigation_flag": "flag",
         "点化石": "dianhua",
         "鬼谷子": "formation", "formation": "formation",
+        "礼盒": "gift",
     }
 
     def payload_summary(self, node):
@@ -1009,6 +1059,12 @@ class GameEditor(object):
             kid = dv("id")
             sk = self._name_map("Skills")
             return "点化石→%s" % sk.get(kid, "?")
+        if kind == "yuanxiao_dan":
+            return "元宵丹→可食用上限+%s" % dv("max")
+        if kind == "gift":
+            lst = _deref(hash_get(d, "list")) if d is not None else None
+            n = len(lst.items) if isinstance(lst, M.ArrayNode) else 0
+            return "礼盒→内含 %d 件" % n
         if kind == "formation":
             key = dv("key")
             return "鬼谷子→阵法·%s" % (key or "?")
@@ -1038,10 +1094,16 @@ class GameEditor(object):
     def _sym(name):
         return M.SymbolNode(name)
 
-    def _payload_node(self, typ, data):
-        """把 `(type, data)` 转成 `{:type => ..., :data => {...}}` 节点。"""
-        pairs = [(self._sym("type"), self._sym(typ)),
-                 (self._sym("data"), self._plain_node(data))]
+    def _payload_node(self, typ, payload):
+        """把 `(type, 内容)` 转成 `{:type => ..., <内容的键> => ...}` 节点。
+
+        `payload` 的形状**照游戏写的那份**：多数是 `{"data": {...}}`，
+        `:礼盒` 那种是 `{"list": [...]}` —— 所以不能写死一个 `:data` 层。
+        `typ` 本身就是游戏的中文符号（`itemattr` 给的就是它），直接写。
+        """
+        pairs = [(self._sym("type"), self._sym(typ))]
+        for k, v in payload.items():
+            pairs.append((self._sym(k), self._plain_node(v)))
         return M.HashNode(pairs, default=None)
 
     def _plain_node(self, value):
@@ -1483,7 +1545,7 @@ class GameEditor(object):
         return lv, wrote
 
     def actor_exp_full(self, actor):
-        """「经验拉满」：等级顶到满级 + `@exp` 对齐到满级门槛，一次到位。
+        """「一键满级」：等级顶到满级 + `@exp` 对齐到满级门槛，一次到位。
 
         ⚠ 为什么不能**只**写 `@exp`（2026-09-20 再核了一遍脚本，结论没变）：
         `Game_Actor#change_exp`(5960) 只做 `@exp[@class_id] = [exp,0].max; refresh`
@@ -1501,6 +1563,16 @@ class GameEditor(object):
         潜能/五维由 `set_actor_level` 里的 `_apply_level_delta` 一并补。
         """
         return self.set_actor_level_full(actor, MAX_LEVEL_ACTOR, sync_exp=True)
+
+    def actor_exp_fill(self, actor):
+        """「经验拉满」（角色页按钮）：只把 @exp 写到 `ACTOR_EXP_FILL`，
+        **不动等级** —— 玩家回游戏自己点「升级」（一次一级）。
+
+        和 `actor_exp_full`（界面「一键满级」）的唯一区别 = 不写 `@level`。
+        用途：想自己掌握升级节奏，而不是被工具直接顶到满级；
+        经验多给点，留在手里也能接着用。返回写进 @exp 的值。
+        """
+        return self.set_exp(actor, ACTOR_EXP_FILL)
 
     def set_exp(self, actor, value):
         node = self.exp_node(actor)
@@ -1672,6 +1744,36 @@ class GameEditor(object):
         return self.actor_set_skills(
             actor, [s for s in self.actor_skills(actor) if s != sid])
 
+    def actor_learn_many(self, actor, skill_ids):
+        """一次学一批技能，返回 `（新学会的, 本来就已经会的）`。
+
+        ⚠ 别在循环里调 `actor_learn_skill`：`actor_set_skills` 每次都
+        `mark_structural()` 并整份重写 `@skills` 数组 —— 批量只该写一次，
+        写 N 次等于把整档重解析 N 遍（技能管理器一次勾几十个时会很明显）。
+        """
+        ids = self.actor_skills(actor)
+        have = set(ids)
+        want = sorted({int(s) for s in skill_ids})
+        added = [s for s in want if s not in have]
+        if added:
+            self.actor_set_skills(actor, ids + added)
+        return added, [s for s in want if s in have]
+
+    def actor_forget_many(self, actor, skill_ids):
+        """一次忘一批技能，返回 `（真正忘掉的, 本来就没有的）`。
+
+        「本来就没有」的照常算成功（游戏 `forget_skill` 也不报错），只是
+        分开返回，界面上好说清"实际动了几个"。
+        """
+        ids = self.actor_skills(actor)
+        have = set(ids)
+        want = sorted({int(s) for s in skill_ids})
+        drop = [s for s in want if s in have]
+        if drop:
+            gone = set(drop)
+            self.actor_set_skills(actor, [s for s in ids if s not in gone])
+        return drop, [s for s in want if s not in have]
+
     def actor_clear_skills(self, actor):
         return self.actor_set_skills(actor, [])
 
@@ -1691,7 +1793,8 @@ class GameEditor(object):
 
     # ==================================================== 门派（存档 @sect_id）
     # ⚠ 门派**不是** Data 表 —— 是游戏脚本里硬编码的 `$sects`（表见 `sect`）。
-    #   正常游戏里角色能学的技能 = 本门派那 10 个：走 `Window_Actor_Skill` 的
+    #   正常游戏里角色能学的技能 = 本门派 `skills` 那一串（10 个、凌波城 12 个，
+    #   外加每个门派 index 10 那一个「上古××」秘技）：走 `Window_Actor_Skill` 的
     #   「门派」页，攒 `@sect_data[:门派][id]` 攒满 `max` 才 `learn_skill` 写进 `@skills`。
     #   辅助技能（强身术/冥想/…）和修炼只加属性，**不进 `@skills`**。
     def actor_sect_id(self, actor):
@@ -1727,15 +1830,19 @@ class GameEditor(object):
             **从不清理**，游戏里换门派后旧门派技能本来就留着；
           * `$jiance` 不查门派、不查技能 → 不算作弊。
 
-        ⚠ 只允许 `0..12`：`$sects` 是**没有 default 的普通 Hash**，写 13/负数这种
-          不存在的 id，游戏一开菜单就 `$sects[id][:name]` → `nil[:name]` 崩
-          （35285 / 37033 是所有角色一起画，所以是**全员崩菜单**）。
+        ⚠ 只允许 `sect.SECTS` 里有的 id（2026-10-04 起＝ `0` 无门派、
+          `1..13`、**`20` 九黎城** —— **不是 0..12 连号**）：`$sects` 是
+          **没有 default 的普通 Hash**，写个不存在的 id，游戏一开菜单就
+          `$sects[id][:name]` → `nil[:name]` 崩（35285 / 37033 是所有角色一起画，
+          所以是**全员崩菜单**）。判「认不认识」一律查表，别写区间。
           另外 `0`（无门派）会让游戏里快捷技能栏不可用、门派技能页隐藏 —— 能用，
           但那是**减功能**，界面上要不要给这个入口另说。
         """
         v = int(sect_id)
         if v not in sect.SECTS:
-            raise ValueError("门派 id 只能是 0..12（收到 %r）" % (sect_id,))
+            raise ValueError("门派 id 只能是 %s（收到 %r）"
+                             % ("/".join("%d" % k for k in sorted(sect.SECTS)),
+                                sect_id))
         self.sv.set_actor_field(actor, "@sect_id", v)
         return v
 
@@ -2040,7 +2147,7 @@ class GameEditor(object):
                 self.doc.set_value(n, 0)
 
     def baby_exp_full(self, baby):
-        """「经验拉满」：召唤兽等级顶到 65 + `@exp` 对齐 65 级门槛。
+        """「一键满级」：召唤兽等级顶到 65 + `@exp` 对齐 65 级门槛。
 
         ⚠ 召唤兽确实会**自己**升级（`Game_Baby#change_exp` 第 7014 行
         `level_up(must) while !max_level? && self.exp >= next_level_exp && ...`），
@@ -2063,6 +2170,23 @@ class GameEditor(object):
             self.doc.set_value(node, int(tbl))
             wrote = int(tbl)
         return MAX_LEVEL_BABY, wrote
+
+    def baby_exp_fill(self, baby):
+        """「经验拉满」（召唤兽页按钮，2026-10-03 川要求）：只把 `@exp` 写到
+        `BABY_EXP_FILL`，**不动等级**。
+
+        和 `baby_exp_full`（界面「一键满级」）的唯一区别 = 不写 `@level`。
+        ⚠ 但召唤兽和人物不同：`Game_Baby#change_exp`(7014) 里带升级循环
+        （`level_up(must) while !max_level? && exp >= next_level_exp
+          && @level - 5 < @master.level`），所以**下一场战斗结算**它自己就会连升，
+        顶到「主人等级 + 5」（主人不满级就顶不到 MAX_LEVEL_BABY）。
+        「等级不动」只保证写进去的那一刻不变。返回写进 @exp 的值 / None。
+        """
+        node = self._exp_node(baby)
+        if node is None:
+            return None
+        self.doc.set_value(node, int(BABY_EXP_FILL))
+        return int(BABY_EXP_FILL)
 
     def set_baby(self, baby, key, value):
         old_lv = None
@@ -2152,17 +2276,79 @@ class GameEditor(object):
                 actors += 1
         return touched, actors
 
+    def set_state_all(self):
+        """「全员状态拉满」：**所有角色**身上的**所有召唤兽** ——
+        气血 / 魔法 / 愤怒 回满 + 忠诚拉满。
+
+        2026-10-03 川要求：把老的「回满气血/魔法」（只动当前选中那只）和
+        「全员忠诚满」合成一个按钮。语义 = 两者取并集，一次把全体拉满。
+
+        上限沿用旧「回满气血/魔法」预设的写法：hp/mp → 99999、tp → 200
+        （游戏对召唤兽气血没有硬上限检查，战斗结算按 max_hp 夹）。
+        忠诚上限 100 是游戏硬规定（`add_loyalty` 里 limit），
+        详见 `set_loyalty_all`。
+
+        返回 (改了几只, 涉及几个角色, 其中忠诚被改了几只)。
+        """
+        touched = 0
+        actors = 0
+        n_loy = 0
+        for _aid, actor in self.sv.actors():
+            hit = False
+            for _i, baby in self.babies(actor):
+                changed = False
+                for k, v in (("hp", 99999), ("mp", 99999), ("tp", 200)):
+                    try:
+                        cur = self.baby_value(baby, k)
+                    except Exception:
+                        cur = None
+                    if cur is None:
+                        continue
+                    try:
+                        if float(cur) != float(v):
+                            self.set_baby(baby, k, v)
+                            changed = True
+                    except Exception:
+                        continue
+                try:
+                    cur = self.baby_value(baby, "loyalty")
+                except Exception:
+                    cur = None
+                if cur is not None:
+                    try:
+                        same = abs(float(cur) - float(MAX_BABY_LOYALTY)) < 1e-9
+                    except (TypeError, ValueError):
+                        same = False
+                    if not same:
+                        try:
+                            self.set_baby(baby, "loyalty", MAX_BABY_LOYALTY)
+                            changed = True
+                            n_loy += 1
+                        except Exception:
+                            pass
+                if changed:
+                    touched += 1
+                    hit = True
+            if hit:
+                actors += 1
+        return touched, actors, n_loy
+
     def baby_preset(self, baby, what):
-        """常用预设：经验拉满 / 回满 / 忠诚满 / 寿命满 / 资质 ±。
+        """常用预设：一键满级 / 经验拉满 / 回满 / 忠诚满 / 寿命满 / 资质 ±。
 
         ⚠ 没有「满级」预设了（2026-09-20 去掉）：等级不再单独改，
-        要满级就用 `expfull` —— 它连着等级一起写。
+        要满级就用 `expfull` —— 它连着等级一起写；只想给经验用 `expfill`。
         """
         did = []
         if what == "expfull":
             lv, wrote = self.baby_exp_full(baby)
             did.append("等级→%d、经验→%s"
                        % (lv, "满级门槛" if wrote is not None else "（取不到门槛）"))
+        elif what == "expfill":
+            wrote = self.baby_exp_fill(baby)
+            did.append("经验→%s（等级不动）"
+                       % ("%d 万" % (wrote // 10000) if wrote is not None
+                          else "（取不到 @exp）"))
         elif what == "heal":
             for k, v in (("hp", 99999), ("mp", 99999), ("tp", 200)):
                 if self.baby_value(baby, k) is not None:
@@ -2338,11 +2524,12 @@ class GameEditor(object):
         """返回 [(项目, 当前, 上限, 是否超限, 说明), ...]。
 
         覆盖游戏的全部作弊触发点：
-          ① Lock 校验和（@master）；
-          ② $jiance 周期检查（等级/召唤兽等级/金钱/仓库页/五维）；
-          ③ Change 记账（金钱/物品/变量/人气/贡献，对不上记 'NE!'）；
-          ④ @cheated 作弊标记 + @keyword；
-          ⑤ 机器码绑定。
+          ① Lock 校验和（@master）—— 两版都有；
+          ② $jiance 周期检查（等级/召唤兽等级/金钱/仓库页/五维）—— **仅尝鲜版**；
+          ③ Change 记账（金钱/物品/变量/人气/贡献）—— 两版都有：尝鲜版记 'NE!'，
+             内测版在线版弹「ne! + 密文」并当场 exit（详见模块文档第 3 条）；
+          ④ @cheated 作弊标记 + @keyword —— **仅尝鲜版**；
+          ⑤ 机器码绑定（**只提示，不算问题、工具不改**，见下面第 ⑤ 段注释）。
         """
         rows = []
 
@@ -2350,10 +2537,11 @@ class GameEditor(object):
             rows.append((name, cur, limit, cur is not None and cur > limit, why))
 
         def eq_row(name, cur, want, why):
-            # ⚠ `cur is None`＝**这个版本根本没有这笔账**（不是「账错了」）。
-            #   V2.201 的 `security` 是空 HashNode（游戏压根没建金钱/物品计数账），
-            #   而 V0.x 存档里 `cur=None` 是「读失败」—— 两种含义不同，
-            #   混为一谈会让 V2.201 一打开就报一堆假异常。
+            # ⚠ `cur is None`＝**这笔账还没建**（不是「账错了」）。
+            #   V2.201 的 security 有 gold / renqi / gongxian / variables /
+            #   achievement_point，但**物品计数**要等游戏自己发过道具才有条目；
+            #   读失败（密钥不对 / 结构变了）同样返回 None —— 两种含义不同，
+            #   混为一谈会一打开就报一堆假异常。
             #   所以：读不到 → 不标红（灰着），只提示"本版本无此校验"。
             if cur is None:
                 rows.append((name, "本版本无此校验", "—", False, why))
@@ -2392,9 +2580,9 @@ class GameEditor(object):
                     get_int(ivar(b, "@level")), MAX_LEVEL_BABY,
                     "Config::Game::MAX_LEVEL_BABY = %d" % MAX_LEVEL_BABY)
 
-        # ③ Change 记账（⚠ V2.201 的 security 是空 HashNode ⇒ 下面全部走
-        #    「本版本无此校验」分支、**不标红**。这段是尝鲜版的逻辑，
-        #    保留是为了两个版本共用一套代码，在 V2.201 上无害。）
+        # ③ Change 记账（**两版都有**：V2.201 的 security 里 gold / variables /
+        #    renqi / gongxian 都是游戏写下的真账，密钥 admin_alskmcndfj。
+        #    走 eq_row：读不到当"本版本无此校验"灰着，读到就正常比对。）
         # 金钱账：最容易漏 —— 以前工具改钱不同步它，玩一会儿必被记 'NE!'
         rec_gold = self.security_gold()
         eq_row("金钱记账 security[:gold]", rec_gold, gold,
@@ -2436,18 +2624,24 @@ class GameEditor(object):
                      "VNE=超限检查 / NE!=记账对不上 / 其余是内存修改器检测，"
                      "全部清掉才算干净"))
 
-        # ⑤ 机器码
+        # ⑤ 机器码 —— ⚠ **只报告，第 4 位一律 False（不算问题）**。
+        #   它是「存档绑定」不是违规：不在档只是"换机器时要手动加一下"。
+        #   一旦标成 True，"保存前体检"会把它列进要修的问题、自动修复时
+        #   顺手把本机码写回去 ⇒ 用户手设的机器码被覆盖
+        #   （2026-10-04 川：「明明点的替换保存重新载入后却还是加入了本机
+        #   真实机器码」）。改机器码只走「机器码」页那几个按钮。
         now, err, ids, ok = self.machine_status()
         if err:
             rows.append(("机器码（本机）", "—", "—", False,
                          "读不到：%s" % err.splitlines()[0][:70]))
         elif not ok:
-            rows.append(("机器码 %s 不在存档记录里" % now, "不在", "在", True,
-                         "存档记录的机器码：%s —— 游戏启动时会 include? 比对，"
-                         "对不上就弹「存档异常」（换机器玩就会碰到）"
+            rows.append(("机器码（本机 %s 不在存档记录里）" % now, "不在", "在", False,
+                         "存档记录的机器码：%s —— 游戏在本机启动时会 include? "
+                         "比对，对不上就弹「存档异常」（换机器玩就会碰到）。"
+                         "要加就点「机器码」页的「加入存档」——**工具不会自动改**"
                          % ("、".join(ids) or "（空）")))
         else:
-            rows.append(("机器码 %s 已在存档记录里" % now, "在", "在", False,
+            rows.append(("机器码（本机 %s 已在存档记录里）" % now, "在", "在", False,
                          "存档记录的机器码：%s" % "、".join(ids)))
         return rows
 
@@ -2507,12 +2701,12 @@ class GameEditor(object):
             n_lock = self.sv.repair_locks()
             if n_lock:
                 done.append("重算 %d 处 Lock 校验和" % n_lock)
-            # 机器码：换机器玩时，把本机机器码追加进存档
-            now, err, ids, ok = self.machine_status()
-            if now and not ok:
-                self.add_machine_id(now)
-                done.append("机器码 %s 已加进存档（原来只有 %s）"
-                            % (now, "、".join(ids) or "空"))
+            # 机器码：⚠ **这里绝不自动增删**。
+            #   原来写过「本机码不在档就追加」—— 结果川把机器码换成别人的码
+            #   （伪装/换机器），一保存就被塞回本机真实机器码，替换白做
+            #   （operation log：替换 → 存 → 重载 → 又两个）。机器码是
+            #   "存档绑定"不是违规项，要不要加由人在「机器码」页拍板，
+            #   自动修复只做数值/记账/标记这些真会出问题的事。
         if clear_flag:
             n = self.clear_cheat_flag()
             if n:

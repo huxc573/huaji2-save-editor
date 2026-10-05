@@ -49,7 +49,8 @@ def _setup_tcl_env():
 _setup_tcl_env()
 
 import tkinter as tk                              # noqa: E402
-from tkinter import filedialog, messagebox, ttk  # noqa: E402
+from tkinter import (filedialog, font as tkfont, messagebox,
+                     ttk)                            # noqa: E402
 
 import backup  # noqa: E402
 import babies    # noqa: E402
@@ -136,7 +137,7 @@ HELP_HEAD = """%s %s
 """ % (APP_NAME, VERSION, AUTHOR, HOMEPAGE, LICENSE_NAME)
 
 HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
-  界面、快捷键、右键菜单、"导出报告/导出明文"都沿用**画迹1 编辑器**的习惯，
+  界面、快捷键、右键菜单、"导出报告/导出明文"都沿用「画迹1 编辑器」的习惯，
   用过的直接上手。v0.4 新增了 4 个能改玩法数据的页：
       「背包 / 物品」（4 页×20 格，改数量/清空/加物品）
       「召唤兽」（等级·气血·魔法·六项资质·忠诚·寿命·成长·五维）
@@ -144,58 +145,69 @@ HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
       「概览 / 快捷修改」里的"防作弊体检"（一键修复 + 清除作弊标记）
   另外「数据表 (CSV)」页把 Data\\*.rvdata2 转成 CSV 查表。
   独立发行版：Release 上只挂一个 zip（huaji2-save-editor-vX.Y.Z.zip），
-  解压出来的 画迹2内测版存档工具.exe 和 XJCodec32.exe **必须放在同一个目录**。
+  解压出来的 画迹2内测版存档工具.exe 和 XJCodec32.exe 「必须放在同一个目录」。
 
 一、这个游戏的存档
   <游戏根>\\save.rvdata2（手动存档）
   <游戏根>\\AutoSave\\save00..29.rvdata2（自动存档）
-  格式：**AES-128-ECB + Zlib**（不是main.dll 那套 8 字节分组 ECB）——
+  格式：「AES-128-ECB + Zlib」（不是main.dll 那套 8 字节分组 ECB）——
     写：marshal(header)+marshal(contents) → Deflate → 零填充到 16 → AES-128-ECB
     读：AES 解密 → 首字节是'x' 就 Inflate → Marshal.load 两次
   实现见 src\\save_v201.py（纯 Python，不依赖 main.dll / 32 位宿主）。
 
 二、两套加密（内测版 V2.201 与尝鲜版完全不同，别混用）
   【本工具＝内测版 V2.201】
-  存档     153ad4v3fbdgbgd   ⚠ 15 字符，必须**零补齐**到 16 字节当 AES 密钥
+  存档     153ad4v3fbdgbgd   ⚠ 15 字符，必须「零补齐」到 16 字节当 AES 密钥
   数据表   按文件名派生的 RC4：
-           '9KQ1L0PWRESZV7HM' + b36(crc32(带扩展名的文件名))[0..13]，取**后** 16 字符
+           '9KQ1L0PWRESZV7HM' + b36(crc32(带扩展名的文件名))[0..13]，取「后」 16 字符
            ⚠ 取前 16 的话对所有文件都一样 ⇒ 谁也解不开（易踩）
            例外：main.rvdata2 是明文骨架、Scripts.rvdata2 解不开，别硬解
   【尝鲜版（main 分支，本工具不适用）】
   761205 / imoutogadaisuki / tiyan_version 三个密钥 + main.dll 的 8 字节分组 ECB
-  ⇒ **拿本工具开尝鲜版存档会失败，反之亦然**。要开尝鲜版请用 main 分支的 v0.6.0。
+  ⇒ 「拿本工具开尝鲜版存档会失败，反之亦然」。要开尝鲜版请用 main 分支的 v0.6.0。
 
 三、存档结构
   明文 = 两个 Marshal 对象相接（各自带 04 08 头）：
       { :temp => nil }                                      <- header
       { :system :timer :message :switches :variables
         :self_switches :actors :party :troop :map :player }  <- contents
-  ⚠ **内测版与尝鲜版结构有一处不同**：`variables` 内测版是**稀疏哈希**（键＝变量编号），
+  ⚠ 「内测版与尝鲜版结构有一处不同」：variables 内测版是「稀疏哈希」（键＝变量编号），
      尝鲜版是数组（下标＝编号）。实测内测版只有 {1,2,7} 三个键 ——
-     **不能按位置当编号用**。工具已自动兼容。
+     「不能按位置当编号用」。工具已自动兼容。
   角色的五维/潜能是中文实例变量，放在 Game_Actor.@attr（类 Game_Actor_Attr）：
       @体质 @法力 @力量 @耐力 @敏捷 @潜能 @人气 @贡献 @体力 @活力
 
-四、防作弊（重要，游戏查三层）
+四、防作弊（尝鲜版查三层；⚠ 内测版 V2.201 是 Lock + Change 记账两层，详见 game.py）
   1) Lock 校验和：金钱等关键数值被 Lock 包着：
         @master = @value * 91 + 45 + seed / 800   （seed = $game_system.seeds[:shield]）
      游戏读的时候会验算，不一致就 msgbox '游戏异常！' 然后 exit。
      本工具改金钱时自动重算 @master。
-  2) 周期检查（$jiance）：游戏每 300 帧（约 5 秒）查一次
+  2) 周期检查（$jiance）：「尝鲜版」每 300 帧（约 5 秒）查一次
         角色等级 > 60 / 出战召唤兽等级 > 65 / 金钱 > 30,000,000 /
         仓库页号 > 3 / 五维总点数 > 等级*10+500
-     超了就置 @cheated = 当前帧号；之后游戏会弹「存档异常！」并退出。
-     金钱填超过 30,000,000 时工具自动压到 25,000,000（上限的 5/6，留余量）。
-  3) 记账校验（Change）：尝鲜版有五类账（:gold 金钱 / :items 物品累计 /
+     超了就置 @cheated = 当前帧号，游戏弹「存档异常！」并退出。
+     ⚠ 「内测版 V2.201 没有这一层」（脚本里 cheated / $jiance 全搜不到、
+     存档也没有 @cheated / @keyword 字段）——工具只把上限值当「提示」用，
+     不再说「会被判作弊」，上限已按 V2.201 改到 fieldnames：
+        MAX_LEVEL_ACTOR 155 / MAX_LEVEL_BABY 165 / MAX_GOLD 9,999,999,999
+        MAX_WAREHOUSE [0,12] / MAX_BABY_LIFE 14000
+     金钱填超过上限时工具自动压到上限的 5/6，留余量。
+  3) 记账校验（Change）：**两版都有**五类账（:gold 金钱 / :items 物品累计 /
      :variables 变量 / :renqi 人气 / :gongxian 贡献），游戏每次数值变动都拿账
-     和实际值比对，对不上就判作弊（数值逐位 AES-ECB，密钥 admin_1941344749）。
-     ⚠ **内测版 V2.201 没有这一层** —— 实测它的 $game_system.security 是**空的**，
-     而且存档里**连 @cheated / @keyword 字段都没有**（这个版本还没做这套机制）。
-     所以工具对内测版只查前两层（Lock 校验和 + $jiance），不会误报。
-     ⇒ 内测版改钱/改背包**不会被记账校验逮到**，但仍建议别改太离谱。
+     和实际值比对，对不上就判作弊（数值逐位 AES-ECB，密钥 admin_alskmcndfj）。
+     实测内测版 V2.201 的 security **不是空的**（gold / renqi / gongxian /
+     variables / achievement_point 各一笔；物品计数要等游戏自己发过道具才有条目）。
+     ⚠ 惩罚方式两版不同：尝鲜版记 'NE!' 进 @cheated 再倒计时强退；内测版在线版是
+     `Change#inspect` 不符就截屏上传 + msgbox「ne! + 密文」+ 当场 exit（离线补丁
+     已把这段自杀网拆成只返回明文）。⇒ 工具改钱/改背包**必须**同步账，
+     统一走 GameEditor.resync_all_security() 一次对齐五类。
+     ⚠ 旧版工具读账用的是另一把密钥（admin_1941344749），自己写自己读永远「一致」、
+     对游戏侧全盲；2026-10-04 已换成游戏真钥（见 src/aes.py 自检钉子）。
+     内测版确实**没有** @cheated / @keyword 标记（脚本里 cheated / $jiance 全搜不到）
+     —— 那是尝鲜版的第 2、第 4 层，跟记账无关。
 
 五、Data 目录下的 .rvdata2
-  **全都被加密**，但**内测版用的是按文件名派生的 RC4**（不是尝鲜版的 761205），
+  「全都被加密」，但「内测版用的是按文件名派生的 RC4」（不是尝鲜版的 761205），
   实现见 src\\data_v201.py（纯 Python，实测 403/403 个表全部解出）。
   本工具直接解密＋解析，可转成 CSV 方便查表（Excel 双击即开，utf-8-sig 编码）：
       Items 物品 / Weapons 武器 / Armors 防具 / Skills 技能 / States 状态
@@ -368,9 +380,11 @@ def actor_sash_pos(h, need, lo=80):
 
 
 def sect_choice_labels():
-    """「门派」下拉的全部选项（**无门派 + 12 个门派**，共 13 项）。
+    """「门派」下拉的全部选项（**无门派 + 14 个门派**，共 15 项）。
 
     门派**不是** Data 表，来自游戏脚本的 `$sects`（见 `sect`）。
+    ⚠ 门派 id **不连号**：`0`、`1..13`、`20`（＝九黎城）—— 顺序照 id 排，
+      所以九黎城排最后（2026-10-04 按真实 `$sects` 补齐，原来只有 12 个）。
     ⚠ 2026-09-27 川要求把「无门派」也放进来（原来 2026-09-20 排除了它）：
       这个下拉同时是「当前角色门派」的显示器 —— 无门派角色得有个值显示，
       而且选它 + 点「转门派」= **只把门派改成无门派**（技能一个不动）。选它时左栏会给一句提示，
@@ -378,37 +392,62 @@ def sect_choice_labels():
     ⚠ 「全部技能」仍然没有这一项（列出来就是几百个技能，没意义）。
     """
     out = []
-    for sid in sorted(sect.SECTS):          # 0 无门派 在最前，然后 1..12
+    for sid in sorted(sect.SECTS):          # 0 无门派 在最前，然后 1..13 / 20
         nm = sect.sect_name(sid)
         if nm:
             out.append(nm)
     return out
 
 
+def sk_match(sid, name, desc, kw):
+    """技能搜索匹配 —— 技能一览和技能管理器共用这一套规则。
+
+    2026-10-04 川：搜索要能"筛一批再批量操作"，所以比原来的
+    「名字含关键词 / 关键词正好等于 id」多了两条：
+
+    * 空格分开的**每一段都要命中**（AND）—— 搜 `高级 法术` = 两个词都得有；
+    * 段以 `#` 开头（`#101`）→ 只比技能 id；
+    * 段是纯数字 → id 精确命中，**或**名字 / 描述里出现这串数字；
+    * 其余 → 名字或描述里含这个词（不区分大小写）。
+
+    `kw` 为空（或全是空格）→ 全部命中。
+    """
+    kw = (kw or "").strip().lower()
+    if not kw:
+        return True
+    hay = ("%s %s" % (name or "", desc or "")).lower()
+    for part in kw.split():
+        if part.startswith("#"):
+            if str(sid) != part[1:]:
+                return False
+        elif part.isdigit():
+            if str(sid) != part and part not in hay:
+                return False
+        elif part not in hay:
+            return False
+    return True
+
+
 class SkillPicker(object):
-    """技能选择器：搜索框 + 只读下拉 + 技能一览 + 说明框 + 悬停浮窗。
+    """技能一览的「看 + 选」逻辑：搜索过滤 + 说明框 + 悬停浮窗。
 
-    角色页和召唤兽页**共用同一套逻辑**（两边的规则本来就一样：搜名字或按 id 搜、
-    ↑/↓ 直接切换、选谁就显示谁的说明）。两页各建一份实例，互不干扰。
+    角色页和召唤兽页共用（两边规则本来就一样）。**只管展示与选择、不写存档**
+    —— 学 / 忘走 `SkillManager`（独立窗口），见那个类的说明。
 
-    ⚠ 技能一览的 iid 统一是 `sk<技能id>`；description 文本单独存了一份
-    `desc_full`，因为说明框里的字可能被截断，浮窗要用完整的那份。
+    ⚠ 2026-10-04 拆过一次：原来这里还管一个「全部技能」只读下拉（选一个 →
+      点「学会」），和下面的已学一览是**两套语义、两个入口**，搜索也只筛下拉
+      不筛一览。现在统一成「一览 + 搜索筛一览」，学 / 忘都归技能管理器。
     """
 
-    def __init__(self, app, key, tree, cb, var_search, var_pick, desc_text):
+    def __init__(self, app, key, tree, var_search, desc_text):
         self.app = app
         self.key = key                  # "baby" / "actor"，浮窗去重用
-        self.tree = tree                # 技能一览（id / 名字）
-        self.cb = cb                    # 只读下拉
+        self.tree = tree                # 技能一览（序 / id / 名字）
         self.var_search = var_search
-        self.var_pick = var_pick
         self.desc = desc_text           # 只读说明 Text
-        self.choices = []
+        self.source = []                # [(技能 id, 名字)]：这个目标已学的技能
+        self.choices = []               # 当前可见的技能 id（筛选后）
         self.desc_full = ""
-        # 下拉 popdown 悬停浮窗（照画迹1 v1.5.0 的方案移植）
-        self._lb = None                 # 下拉内部 listbox 的 Tcl 路径
-        self._cmds = {}                 # 注册过的 Tcl 回调（只注册一次）
-        self._tip_item = None           # 上次提示的下拉项（变了才重建浮窗）
 
     # ------------------------------------------------------------ 数据
     def meta(self):
@@ -417,6 +456,20 @@ class SkillPicker(object):
 
     def names(self):
         return self.app._skill_names()
+
+    def set_source(self, pairs):
+        """告诉它「这个目标已学了哪些技能」：`[(技能 id, 名字)]`，存档顺序。"""
+        self.source = list(pairs)
+
+    def sel_ids(self):
+        """一览里当前选中的技能 id（可多选，按行顺序）。"""
+        out = []
+        for iid in self.tree.selection():
+            try:
+                out.append(int(iid[2:]))
+            except (ValueError, IndexError):
+                pass
+        return out
 
     # ------------------------------------------------------------ 说明框
     def set_desc(self, text):
@@ -431,74 +484,54 @@ class SkillPicker(object):
         t.configure(state="disabled")
 
     def show_desc(self):
-        """显示选中的技能说明（技能一览选中的优先，其次下拉里选的）。"""
+        """显示选中的技能说明（多选时显示第一个，并标出还选了几个）。"""
         meta = self.meta()
-        sid = None
-        sel = self.tree.selection()
-        if sel:
-            try:
-                sid = int(sel[0][2:])
-            except ValueError:
-                sid = None
-        if sid is None:
-            sid = self.pick_id()
+        sids = self.sel_ids()
+        sid = sids[0] if sids else None
         if sid is None or sid not in meta:
             self.desc_full = ""
             self.set_desc("")
             return
         nm, desc = meta[sid]
-        text = "技能 #%d %s：%s" % (sid, nm, desc or "（没有说明）")
+        head = "技能 #%d %s" % (sid, nm)
+        if len(sids) > 1:
+            head += "（另外还选中 %d 个）" % (len(sids) - 1)
+        text = "%s：%s" % (head, desc or "（没有说明）")
         self.desc_full = text           # 浮窗要用完整文本
         self.set_desc(text)
 
-    # ------------------------------------------------------------ 下拉
+    # ------------------------------------------------------------ 列表
     def fill(self):
-        """按搜索框 + 门派筛选重填下拉（只列有名字的技能），并立刻刷说明。
+        """按搜索框重填技能一览（只列**已学**技能），并刷新说明。
 
-        ⚠ 别用 `self.cb["values"]` 反查「有哪些技能」—— 它只装筛选后的结果。
+        ⚠ `choices` 只装**筛选后**的 id —— 别拿它反查"这个角色会几招"。
+        ⚠ 重建后按 iid 恢复选中：Treeview 一重建选中就全没，不恢复的话
+          「搜索 → 再点忘掉」会莫名落空。
         """
-        nm = self.names()
-        kw = self.var_search.get().strip()
-        vals = []
-        for i in sorted(nm):
-            if not nm[i]:
+        tree = self.tree
+        keep = set(self.sel_ids())
+        tree.delete(*tree.get_children())
+        meta = self.meta()
+        self.choices = []
+        n = 0
+        for sid, nm in self.source:
+            d = meta.get(sid, ("", ""))[1]
+            if not sk_match(sid, nm, d, self.var_search.get()):
                 continue
-            if kw and kw not in nm[i] and kw != str(i):
-                continue
-            vals.append("#%d %s" % (i, nm[i]))
-        self.choices = vals
-        self.cb["values"] = vals
-        if vals and self.var_pick.get() not in vals:
-            self.var_pick.set(vals[0])
-        self.tree.selection_remove(self.tree.selection())
-        self.show_desc()                # 搜索/换选中后，说明立刻跟着变
-
-    def arrow(self, d):
-        """下拉框按 ↑/↓：不开弹层，直接切到上/下一个技能并刷新说明。"""
-        vals = self.choices or []
-        if not vals:
-            vals = list(self.cb["values"] or [])
-        if not vals:
-            return "break"
-        cur = self.var_pick.get()
-        try:
-            i = vals.index(cur)
-        except ValueError:
-            i = 0 if d > 0 else len(vals) - 1
-        self.var_pick.set(vals[(i + d) % len(vals)])
-        self.tree.selection_remove(self.tree.selection())
+            n += 1
+            self.choices.append(sid)
+            tree.insert("", "end", iid="sk%d" % sid, values=(n, sid, nm))
+        for sid in keep:
+            if tree.exists("sk%d" % sid):
+                tree.selection_add("sk%d" % sid)
+        kids = tree.get_children()
+        if kids and not tree.selection():
+            # 一行没选中（首次填充 / 换目标后旧选中不在了）→ 选中第一行。
+            # ⚠ 别省这步：说明框只认「一览里选中的行」，不做兜底就是一片空白，
+            #   看着像坏了。旧版是靠"下拉默认选中第一项"顺带兜住的（2026-10-04
+            #   下拉删掉后暴露）。
+            tree.selection_set(kids[0])
         self.show_desc()
-        return "break"
-
-    def pick_id(self):
-        """下拉里当前选中的技能 id（取不到返回 None）。"""
-        s = self.var_pick.get()
-        if s.startswith("#") and " " in s:
-            try:
-                return int(s[1:s.index(" ")])
-            except ValueError:
-                return None
-        return None
 
     # ------------------------------------------------------------ 悬停浮窗
     def row_tip(self, event):
@@ -539,101 +572,837 @@ class SkillPicker(object):
                            self.desc.winfo_rooty() + event.y + 12,
                            key=tipkey)
 
-    # -------------------------------------------- 下拉 popdown 悬停浮窗
-    def on_post(self):
-        """下拉即将弹出（ttk 的 -postcommand）：收旧提示并绑好悬停。"""
-        self.app._tip_hide()
-        self.bind_popdown()
 
-    def _tcl_cmd(self, key, func):
-        """把一个 Python 回调注册成 Tcl 命令（缓存住，别每轮注册一遍）。"""
-        if key not in self._cmds:
-            self._cmds[key] = self.app.root.register(func)
-        return self._cmds[key]
+#: 技能管理器「归属」筛选的固定项（其余归属＝门派名 / 技能表里的分段名）
+OWN_ALL, OWN_SECT, OWN_NA = "全部", "门派技能", "无归属"
+#: 技能管理器「状态」筛选的固定项
+ST_ALL, ST_HAVE, ST_NONE = "全部", "已学", "未学"
 
-    def _popdown_listbox(self):
-        """拿到下拉内部 listbox 的 Tcl 路径（拿不到返回 None）。
+import re as _re
 
-        ⚠ 别用 nametowidget：popdown 是 ttk 用 Tcl 直接建的原生 toplevel，
-          tkinter 的 children 字典里没有它 ⇒ nametowidget 直接 KeyError。
-          实测结构：<combobox>.popdown → .f → .f.l(Listbox) / .f.sb(TScrollbar)。
-        """
+#: 技能表里的分段行（`===锻造技能===`、`==特效==` …）——游戏自己没有"归属"
+#: 字段，这些分隔行就是作者给技能分的段。
+_SEC_RE = _re.compile(r"^=+(.+?)=+$")
+
+
+def skill_sections(meta):
+    """`{技能 id: 所属分段名}` —— 按 `meta`（`{id: (名字, 说明)}`）的 id 顺序
+    扫一遍，遇到 `===xxx===` 这种分段行就把后面的技能都算进这一段。
+
+    ⚠ 分段行**自己也算这一段**（它就在段首）。门派技能不在这里管 —— 它们
+      显示时会优先用门派名（见 `SkillManager.own_text`）。
+    """
+    cur = None
+    out = {}
+    for sid in sorted(meta):
+        nm = (meta[sid][0] or "").strip()
+        m = _SEC_RE.match(nm)
+        if m:
+            cur = m.group(1).strip() or None
+        if cur:
+            out[sid] = cur
+    return out
+
+
+class SkillManager(object):
+    """技能管理器 —— 批量学 / 忘技能的独立窗口（角色页、召唤兽页共用）。
+
+    为什么单开窗口（2026-10-04 川定）：主界面那块技能区只有 7 行高、筛选
+    只有"搜索"一个维度，「全选 / 反选」这种批量操作根本铺不开；再往左栏挤
+    还得跟 1080 窗宽下"门派技能"被裁那条老账打架。
+
+    这里：18 行列表 + 搜索 / 归属 / 状态 三个筛选维度，按钮一律作用在**当前
+    筛选出来的行**上 —— 所以「搜『高级』→ 全选 → 学会选中」就是刷一批。
+
+    ⚠ 不复用 `SkillPicker` 实例（那个绑死了主界面的控件），但共用同一套搜索
+      规则（模块级 `sk_match`）和说明表（`app._skills_meta()`）。
+    ⚠ 目标（哪个角色 / 哪只召唤兽）**每次现取**（`self.target()`）：存档一
+      保存，旧节点全失效（`doc.save()` 会重解析整档），窗口是常驻的，抓着
+      旧引用迟早出问题。
+    """
+
+    def __init__(self, app, key, first=False):
+        self.app = app
+        self.key = key                  # "actor" / "baby"
+        self.meta = app._skills_meta()
+        self.desc_full = ""
+        tk, ttk = app.tk, app.ttk
+
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title(self.title_text())
+        win.transient(app.root)
+        # ⚠ 宽度是按「列宽之和 + 说明框 + 滚动条」反推的，改列宽/说明框宽度
+        #   要同步改这里，否则右侧留一条空白（2026-10-04 川：窗口太空）。
+        win.geometry("760x600")
+        f = ttk.Frame(win, padding=8)
+        f.pack(fill="both", expand=True)
+
+        # ---- 筛选行
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="搜索").pack(side="left")
+        self.var_kw = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=self.var_kw, width=16)
+        ent.pack(side="left", padx=4)
+        ent.bind("<KeyRelease>", lambda e: self.refill())
+        ttk.Label(bar, text="归属").pack(side="left", padx=(8, 0))
+        self.var_own = tk.StringVar(value=OWN_ALL)
+        self.groups = skill_sections(self.meta)     # {技能 id: 分段名}
+        # 归属下拉 = 表里真实存在的分段名（特效 / 特技 / 锻造技能…）＋ 三个固定项。
+        # 2026-10-04 川：「归属不是有很多吗？」—— 原来只列固定项，13 个分段名全丢了。
+        vals = [OWN_ALL] + sorted(set(self.groups.values())) + [OWN_SECT, OWN_NA]
+        self.cb_own = ttk.Combobox(bar, textvariable=self.var_own,
+                                   state="readonly", width=10,
+                                   values=tuple(vals), height=min(len(vals), 20))
+        self.cb_own.pack(side="left", padx=4)
+        self.cb_own.bind("<<ComboboxSelected>>", lambda e: self.refill())
+        ttk.Label(bar, text="状态").pack(side="left", padx=(8, 0))
+        self.var_st = tk.StringVar(value=ST_ALL)
+        self.cb_st = ttk.Combobox(bar, textvariable=self.var_st,
+                                  state="readonly", width=8,
+                                  values=(ST_ALL, ST_HAVE, ST_NONE))
+        self.cb_st.pack(side="left", padx=4)
+        self.cb_st.bind("<<ComboboxSelected>>", lambda e: self.refill())
+        self.var_count = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.var_count, foreground="#8a8a8a"
+                  ).pack(side="left", padx=10)
+        # 「已选 …」放筛选行右侧（放操作行会把那一排按钮挤到放不下）
+        self.var_sel = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.var_sel, foreground="#8a8a8a"
+                  ).pack(side="right", padx=6)
+
+        # ---- 列表 + 说明
+        # ⚠ 说明框先 pack：空间不够时挨刀的是列表（它自带滚动条，可缩）。
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, pady=(6, 0))
+        self.desc = tk.Text(body, height=17, width=28, wrap="word",
+                            font=("Microsoft YaHei UI", 9), relief="flat",
+                            highlightthickness=1, highlightbackground="#ddd",
+                            state="disabled")
+        self.desc.pack(side="right", fill="y", padx=(6, 0))
+        tv = ttk.Treeview(body, columns=("st", "id", "name", "own"),
+                          show="headings", height=17, selectmode="extended")
+        # ⚠ 列宽一律 stretch=False：Treeview 比列总和大时，tk 会把多余宽度
+        #   摊给可拉伸的列，把「名字」撑出一大段空白（2026-10-04 川：太空）。
+        # ⚠ 「已学」列＝勾选框那种表示（2026-10-04 川：要像人物学门派技能那样）。
+        #   字形只能用微软雅黑自带的「■ / □」—— ⚠ 雅黑**没有** ☑(U+2611) /
+        #   ☐(U+2610) / ✓(U+2713)，Tk 用的是 GDI、不做字体回退，写上去就是豆腐块。
+        #   （实测过：msyh.ttc 里只有 ■□●○◆◇√×╳▪▫ 这几个可用。）
+        for c, t2, w in (("st", "已学", 52), ("id", "技能 id", 62),
+                         ("name", "名字", 300), ("own", "归属", 100)):
+            tv.heading(c, text=t2)
+            tv.column(c, width=w, stretch=False,
+                      anchor="w" if c in ("name", "own") else "center")
+        vs = ttk.Scrollbar(body, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        self.tv = tv
+
+        # ---- 操作行
+        ops = ttk.Frame(f)
+        ops.pack(fill="x", pady=(6, 0))
+        fit_btn(ops, text="全选",
+                command=lambda: self.select("all")).pack(side="left")
+        fit_btn(ops, text="反选",
+                command=lambda: self.select("invert")).pack(side="left", padx=4)
+        fit_btn(ops, text="全不选",
+                command=lambda: self.select("none")).pack(side="left")
+        ttk.Separator(ops, orient="vertical").pack(side="left", fill="y",
+                                                   padx=8)
+        b_lrn = fit_btn(ops, text="学会选中", command=self.do_learn)
+        b_lrn.pack(side="left")
+        self.app._bind_tip(b_lrn, "把选中的技能学会（已经会的自动跳过）。\n"
+                                  "快捷键：在列表里按空格＝逐条反相切换\n"
+                                  "（没学的学会、已学的忘掉）。\n"
+                                  "也可以直接点最左边「已学」那一格：\n"
+                                  "■＝已学、□＝没学，点一下当场翻面。")
+        b_fgt = fit_btn(ops, text="忘掉选中", command=self.do_forget)
+        b_fgt.pack(side="left", padx=4)
+        self.app._bind_tip(b_fgt, "把选中的技能忘掉（本来就没学的自动跳过）。\n"
+                                  "快捷键：在列表里按空格＝逐条反相切换\n"
+                                  "（已学的忘掉、没学的学会）。\n"
+                                  "也可以直接点最左边「已学」那一格：\n"
+                                  "■＝已学、□＝没学，点一下当场翻面。")
+        fit_btn(ops, text="清空已学",
+                command=self.do_clear).pack(side="left")
+        ttk.Separator(ops, orient="vertical").pack(side="left", fill="y",
+                                                   padx=8)
+        fit_btn(ops, text="复制给…",
+                command=self.do_copy_to).pack(side="left")
+        fit_btn(ops, text="刷新",
+                command=self.refill).pack(side="left", padx=(8, 0))
+        fit_btn(ops, text="关闭", command=self.close).pack(side="right")
+
+        tv.bind("<<TreeviewSelect>>", lambda e: self.on_select())
+        # 空格 = 把选中项逐条反相（没学的学会、已学的忘掉）——2026-10-04 川要求。
+        # ⚠ 必须 return "break"（见 toggle_selected）：Treeview 的类绑定里 space
+        #   没有默认动作，但留着 break 免得将来主题/平台给它加上"翻页/展开"之类。
+        tv.bind("<space>", self.toggle_selected)
+        # 点「已学」那一格 = 像勾选框一样**当场**切换（2026-10-04 川：
+        # 「就像人物学门派技能那里一样」）——不用先选中再按按钮。
+        tv.bind("<Button-1>", self.on_click)
+        tv.bind("<Motion>", self.row_tip)
+        tv.bind("<Leave>", lambda e: app._tip_hide())
+        self.desc.bind("<Motion>", self.desc_tip)
+        self.desc.bind("<Leave>", lambda e: app._tip_hide())
+
+        self.refill()
+        center_win(win, app.root)
+        esc_close(win)
+        if first:
+            ent.focus_set()             # ⚠ 得写在 esc_close 之后才优先
+        win.protocol("WM_DELETE_WINDOW", self.close)
+
+    # ------------------------------------------------------------ 目标 / 数据
+    def target(self):
+        """当前操作对象（角色节点 / 召唤兽节点）—— 每次现取，绝不缓存。"""
+        return self.app.current_actor() if self.key == "actor" \
+            else self.app._baby()
+
+    def have(self):
+        """这个目标已学的技能 id 列表（存档真值）。"""
+        t2 = self.target()
+        if t2 is None:
+            return []
+        if self.key == "actor":
+            return list(self.app.g.actor_skills(t2))
+        return list(self.app.babies_ed().skills(t2))
+
+    def who(self):
+        t2 = self.target()
+        if t2 is None:
+            return "（没选中）"
+        nm = self.app.sv.actor_name(t2) if self.key == "actor" \
+            else self.app.babies_ed().display_name(t2)
+        return "「%s」" % nm
+
+    def title_text(self):
+        return "技能管理器 — %s（已学 %d 个）" % (self.who(), len(self.have()))
+
+    @staticmethod
+    def sid_of(iid):
         try:
-            pd = self.app.root.tk.call("ttk::combobox::PopdownWindow",
-                                       str(self.cb))
-            kids = self.app.root.tk.call("winfo", "children", "%s.f" % pd)
-        except Exception:
+            return int(iid[2:])
+        except (ValueError, IndexError):
             return None
-        if not isinstance(kids, (list, tuple)):
-            kids = [kids] if kids else []
-        for ch in kids:
-            ch = str(ch)
-            try:
-                if self.app.root.tk.call("winfo", "class", ch) == "Listbox":
-                    return ch
-            except Exception:
+
+    def sel_sids(self):
+        out = []
+        for iid in self.tv.selection():
+            s = self.sid_of(iid)
+            if s is not None:
+                out.append(s)
+        return out
+
+    def own_text(self, sid):
+        """归属列的文字：**分段优先**（技能表里的 `===xxx===` 分组），
+        没分段才是门派名；都没有 →「无」。
+
+        ⚠ 门派技能里 index 10 的「上古××」秘技**两头都占**（既在 `$sects[id][:skills]`
+          里，也在技能表的「上古技能」分段里，2026-10-04 补齐门派表后才撞上）。
+          两边都算的话，「按分段筛出来的行会标着门派名」——同一个筛选里混着两种
+          归属，看着就乱。所以分段赢（它是技能表自己的组织方式，门派是另一维度）。
+        """
+        sec = getattr(self, "groups", {}).get(sid)
+        if sec:
+            return sec
+        s = sect.sect_of_skill(sid)
+        if s:
+            return sect.sect_name(s)
+        return "无"
+
+    def own_ok(self, sid):
+        """归属筛选：ALL 全放；SECT 只要门派技能；NA 要"既非门派、也没分段"；
+        其余值＝具体分段名（`===特效===` 那一层，见 `skill_sections`）。
+
+        ⚠ `SECT` 要把「有分段的那几个门派秘技」排掉（它们归分段那一档），
+          不然「门派技能」里会混进标着「上古技能」的行 —— 和 `own_text` 同一个理。
+        """
+        mode = self.var_own.get()
+        if mode == OWN_ALL:
+            return True
+        is_sect = sect.sect_of_skill(sid) is not None
+        grouped = bool(self.groups.get(sid))
+        if mode == OWN_SECT:
+            return is_sect and not grouped
+        if mode == OWN_NA:
+            return not is_sect and not grouped
+        return self.groups.get(sid) == mode
+
+    # ------------------------------------------------------------ 列表
+    def refill(self, keep_sel=True):
+        """按三个筛选条件重填列表（重建后按 iid 恢复选中）。"""
+        tv = self.tv
+        keep = set(self.sel_sids()) if keep_sel else set()
+        tv.delete(*tv.get_children())
+        have = set(self.have())
+        st = self.var_st.get()
+        kw = self.var_kw.get()
+        n = 0
+        for sid in sorted(self.meta):
+            nm, desc = self.meta[sid]
+            if not nm:
                 continue
-        return None
-
-    def bind_popdown(self):
-        """给下拉内部的 listbox 绑「鼠标移到某项就弹说明」。
-
-        ⚠ 时机：ttk 的 Post 是「先跑 -postcommand，再建/显示 popdown」，所以
-          只能挂在 -postcommand 上（我们这次调用会把 popdown 一并建出来）。
-        ⚠ 绑定走 Tcl 层且不加 '+'：ttk 自己的 <ButtonRelease-1>/<Escape> 挂在
-          ComboboxListbox / Listbox 这些 bindtag 上，不在这控件的 tag 上，
-          覆盖不到它；不加 '+' 则重复绑定只覆盖、不堆叠。
-        返回绑好的 listbox 路径；拿不到就返回 None，不影响正常使用。
-        """
-        lb = self._popdown_listbox()
-        if not lb:
-            return None
+            # 分段行（`===锻造技能===`）是作者给表分的段，不是能学的技能 —— 列出来
+            # 会被「全选 → 学会选中」写进存档。它只在算归属时有用（`skill_sections`）。
+            if _SEC_RE.match(nm.strip()):
+                continue
+            got = sid in have
+            if st == ST_HAVE and not got:
+                continue
+            if st == ST_NONE and got:
+                continue
+            if not self.own_ok(sid):
+                continue
+            if not sk_match(sid, nm, desc, kw):
+                continue
+            tv.insert("", "end", iid="sk%d" % sid,
+                      values=("\u25a0" if got else "\u25a1", sid, nm,
+                              self.own_text(sid)))
+            n += 1
+        for sid in keep:
+            if tv.exists("sk%d" % sid):
+                tv.selection_add("sk%d" % sid)
+        self.var_count.set("匹配 %d / %d" % (n, len(self.meta)))
+        self.on_select()
         try:
-            self.app.root.tk.call("bind", lb, "<Motion>", "%s %%y" %
-                                  self._tcl_cmd("motion", self._lb_motion))
-            hide = self._tcl_cmd("hide", self.app._tip_hide)
-            for ev in ("<Leave>", "<ButtonRelease-1>", "<Escape>",
-                       "<FocusOut>"):
-                self.app.root.tk.call("bind", lb, ev, hide)
-            pd = self.app.root.tk.call("ttk::combobox::PopdownWindow",
-                                       str(self.cb))
-            self.app.root.tk.call("bind", pd, "<Unmap>", hide)  # 收起即收提示
+            self.win.title(self.title_text())
         except Exception:
-            return None
-        self._lb = lb
-        return lb
+            pass
 
-    def _lb_motion(self, y):
-        """下拉 listbox 上鼠标移动：把该项的说明弹出来（Tcl <Motion> 回调）。"""
-        lb = self._lb
-        if not lb:
+    def on_select(self):
+        sids = self.sel_sids()
+        if sids:
+            have = set(self.have())
+            n_have = len([s for s in sids if s in have])
+            self.var_sel.set("已选 %d 项（已学 %d / 未学 %d）　"
+                             "点「已学」格子 / 按空格＝切换"
+                             % (len(sids), n_have, len(sids) - n_have))
+        else:
+            self.var_sel.set("")
+        self.show_desc()
+
+    def select(self, mode):
+        """全选 / 反选 / 全不选 —— 只作用于**当前筛选出来的行**。"""
+        kids = list(self.tv.get_children())
+        if not kids:
             return
-        try:
-            idx = int(self.app.root.tk.call(lb, "nearest", int(float(y))))
-            if idx < 0 or idx >= int(self.app.root.tk.call(lb, "size")):
-                self.app._tip_hide()
-                return
-            txt = str(self.app.root.tk.call(lb, "get", idx))
-        except Exception:
+        if mode == "all":
+            self.tv.selection_set(kids)
+        elif mode == "none":
+            self.tv.selection_remove(*kids)
+        else:
+            cur = set(self.tv.selection())
+            self.tv.selection_set([i for i in kids if i not in cur])
+        self.on_select()
+
+    # ------------------------------------------------------------ 说明
+    def set_desc(self, text):
+        t2 = self.desc
+        t2.configure(state="normal")
+        t2.delete("1.0", "end")
+        if text:
+            t2.insert("1.0", text)
+        t2.configure(state="disabled")
+
+    def show_desc(self):
+        sids = self.sel_sids()
+        if not sids:
+            self.desc_full = ""
+            self.set_desc("")
             return
-        if txt == self._tip_item:
-            return
-        self._tip_item = txt
-        sid = None
-        if txt.startswith("#") and " " in txt:
-            try:
-                sid = int(txt[1:txt.index(" ")])
-            except ValueError:
-                sid = None
-        meta = self.meta()
-        if sid is None or sid not in meta:
+        sid = sids[0]
+        nm, desc = self.meta.get(sid, ("?", ""))
+        head = "技能 #%d %s" % (sid, nm)
+        if len(sids) > 1:
+            head += "（另外还选中 %d 个）" % (len(sids) - 1)
+        text = "%s\n\n%s" % (head, desc or "（没有说明）")
+        self.desc_full = text
+        self.set_desc(text)
+
+    def row_tip(self, event):
+        row = self.tv.identify_row(event.y)
+        if not row:
             self.app._tip_hide()
             return
-        nm, desc = meta[sid]
-        r = self.app.root
-        self.app._tip_show("技能 #%d %s\n%s" % (sid, nm, desc or "（没有说明）"),
-                           r.winfo_pointerx() + 18, r.winfo_pointery() + 16,
-                           key="%s:lb:%s" % (self.key, txt))
+        tipkey = "skm:%s" % row
+        if getattr(self.app, "_tip_key", None) == tipkey:
+            return
+        sid = self.sid_of(row)
+        if sid is None or sid not in self.meta:
+            self.app._tip_hide()
+            return
+        nm, desc = self.meta[sid]
+        self.app._tip_show("技能 #%d %s\n%s" % (sid, nm,
+                                              desc or "（没有说明）"),
+                           self.tv.winfo_rootx() + event.x + 12,
+                           self.tv.winfo_rooty() + event.y + 12, key=tipkey)
+
+    def desc_tip(self, event):
+        if not self.desc_full:
+            self.app._tip_hide()
+            return
+        tipkey = "skm:desc"
+        if getattr(self.app, "_tip_key", None) == tipkey:
+            return
+        self.app._tip_show(self.desc_full,
+                           self.desc.winfo_rootx() + event.x + 12,
+                           self.desc.winfo_rooty() + event.y + 12, key=tipkey)
+
+    # ------------------------------------------------------------ 批量操作
+    def _need_sel(self):
+        sids = self.sel_sids()
+        if not sids:
+            messagebox.showinfo("提示",
+                                "先在列表里选技能（Ctrl 点选、Shift 连选；\n"
+                                "或用「全选」「反选」）。", parent=self.win)
+            return None
+        return sids
+
+    def warn_limit(self, msg):
+        """召唤兽技能数超游戏上限时补一句警告（角色 `@skills` 没有上限）。"""
+        if self.key != "baby":
+            return msg
+        n = len(self.have())
+        if n > babies.GAME_LEARN_LIMIT:
+            msg += ("；⚠ 现在 %d 个，超过游戏「升级学技能」的 %d 上限"
+                    "（读取端没限制，实战能不能用要实机验证）"
+                    % (n, babies.GAME_LEARN_LIMIT))
+        return msg
+
+    def do_learn(self):
+        sids = self._need_sel()
+        t2 = self.target()
+        if sids is None or t2 is None:
+            return
+        try:
+            if self.key == "actor":
+                added, already = self.app.g.actor_learn_many(t2, sids)
+            else:
+                added, already = self.app.babies_ed().learn_many(t2, sids)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.win)
+            return
+        if not added:
+            self.app.set_status("选中的 %d 个技能本来就都会了" % len(sids))
+            return
+        self.app.mark_dirty()
+        msg = "已学会 %d 个技能" % len(added)
+        if already:
+            msg += "（%d 个本来就会，跳过）" % len(already)
+        self.after_change(self.warn_limit(msg))
+
+    def do_forget(self):
+        sids = self._need_sel()
+        t2 = self.target()
+        if sids is None or t2 is None:
+            return
+        try:
+            if self.key == "actor":
+                drop, missing = self.app.g.actor_forget_many(t2, sids)
+            else:
+                drop, missing = self.app.babies_ed().forget_many(t2, sids)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.win)
+            return
+        if not drop:
+            self.app.set_status("选中的 %d 个技能本来就没学" % len(sids))
+            return
+        self.app.mark_dirty()
+        msg = "已忘掉 %d 个技能" % len(drop)
+        if missing:
+            msg += "（%d 个本来就没学，跳过）" % len(missing)
+        self.after_change(msg)
+
+    def toggle_selected(self, _e=None):
+        """空格＝把选中项**逐条反相**：没学的学会、已学的忘掉。
+
+        2026-10-04 川要求。"逐条反相"而不是"全学 / 全忘"，所以在混合选中的
+        一份列表上按一下，恰好把所有行翻个面（这也是它能当开关用的原因）。
+
+        写档：分两批各写**一次**数组（`learn_many` / `forget_many` 都是
+        "一次写一份 `@skills`"），不会有"边改边遍历"的索引问题，也不会
+        一次切一批就重解析 N 遍整档。
+        """
+        sids = self.sel_sids()
+        t2 = self.target()
+        if not sids or t2 is None:
+            return "break"
+        have = set(self.have())
+        learn = [s for s in sids if s not in have]
+        forget = [s for s in sids if s in have]
+        try:
+            if self.key == "actor":
+                ga = self.app.g
+                la, _a = ga.actor_learn_many(t2, learn) if learn else ([], [])
+                fd, _f = ga.actor_forget_many(t2, forget) if forget else ([], [])
+            else:
+                bd = self.app.babies_ed()
+                la, _a = bd.learn_many(t2, learn) if learn else ([], [])
+                fd, _f = bd.forget_many(t2, forget) if forget else ([], [])
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.win)
+            return "break"
+        if not la and not fd:
+            self.app.set_status("选中的 %d 个技能没有变化" % len(sids))
+            return "break"
+        self.app.mark_dirty()
+        msg = "空格切换：学会 %d 个、忘掉 %d 个" % (len(la), len(fd))
+        self.after_change(self.warn_limit(msg))
+        return "break"
+
+    def on_click(self, event):
+        """点最左边「已学」那一格 → 像勾选框一样当场切换那一行。
+
+        2026-10-04 川：「学会没学会的用多选框表示，就像人物学门派技能那里
+        一样」—— 人物那页是真的 ttk.Checkbutton，Treeview 里塞不进控件，
+        所以用字形当勾选框 + 点格子直接翻面（语义等价）。
+
+        ⚠ 只有第 1 列（`#1`，就是 `st`）吞掉点击（`return "break"`，免得
+          Treeview 顺手把选中改掉）；点别的列照旧走正常的选中逻辑。
+        """
+        if self.tv.identify_column(event.x) != "#1":
+            return None
+        row = self.tv.identify_row(event.y)
+        sid = self.sid_of(row) if row else None
+        if sid is None:
+            return None
+        self.toggle_one(sid)
+        return "break"
+
+    def toggle_one(self, sid):
+        """把**某一个**技能在「已学 / 未学」之间翻面（一次写一份 `@skills`）。"""
+        t2 = self.target()
+        if t2 is None:
+            return
+        got = sid in set(self.have())
+        nm = (self.meta.get(sid) or ("", ""))[0] or "#%d" % sid
+        try:
+            if got:
+                if self.key == "actor":
+                    done, _skip = self.app.g.actor_forget_many(t2, [sid])
+                else:
+                    done, _skip = self.app.babies_ed().forget_many(t2, [sid])
+                what = "忘掉"
+            else:
+                if self.key == "actor":
+                    done, _skip = self.app.g.actor_learn_many(t2, [sid])
+                else:
+                    done, _skip = self.app.babies_ed().learn_many(t2, [sid])
+                what = "学会"
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.win)
+            return
+        if not done:
+            return
+        self.app.mark_dirty()
+        self.after_change(self.warn_limit(
+            "%s技能 #%d %s" % (what, sid, nm)))
+
+    def do_clear(self):
+        t2 = self.target()
+        if t2 is None:
+            return
+        n = len(self.have())
+        if not n:
+            self.app.set_status("%s现在没学会技能" % self.who())
+            return
+        if not self.app.confirm("清空技能",
+                                "把%s的技能全忘掉（%d 个）？"
+                                % (self.who(), n)):
+            return
+        try:
+            if self.key == "actor":
+                self.app.g.actor_clear_skills(t2)
+            else:
+                self.app.babies_ed().clear_skills(t2)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.win)
+            return
+        self.app.mark_dirty()
+        self.after_change("已清空%s的技能" % self.who())
+
+    def _copy_targets(self, src):
+        """「复制给…」的可选目标 —— 同类型的**其他**目标（排除自己）。
+
+        召唤兽 → 存档里别的召唤兽（别的角色身上的也行）；角色 → 别的角色。
+        """
+        if self.key == "baby":
+            return [r for r in self.app.babies_ed().all_babies()
+                    if r["baby"] is not src]
+        return [(aid, x) for aid, x in self.app.sv.actors() if x is not src]
+
+    def do_copy_to(self):
+        """把**选中的技能**复制给另一个同类型目标（追加去重，不动目标原有技能）。
+
+        和「从…克隆」（整套抄、可选覆盖）方向相反：这里只搬选中的那几个，
+        目标已有的自动跳过 —— 语义等同 `learn_many`。
+        """
+        sids = self._need_sel()
+        src = self.target()
+        if sids is None or src is None:
+            return
+        rows = self._copy_targets(src)
+        if not rows:
+            messagebox.showinfo("提示", "存档里没有别%s可以当目标。"
+                                % ("的召唤兽" if self.key == "baby" else "的角色"),
+                                parent=self.win)
+            return
+        meta = self.meta
+        tk, ttk = self.app.tk, self.app.ttk
+
+        def skill_text(ids):
+            out = []
+            for s in ids:
+                out.append(meta.get(s, ("", ""))[0] or "#%d" % s)
+            return "、".join(out) or "（没有技能）"
+
+        # 目标清单（统一成 dict，两种 key 共用一套渲染）
+        items = []
+        if self.key == "baby":
+            for r in rows:
+                items.append({
+                    "iid": "c%d_%d" % (r["actor_id"], r["index"]),
+                    "who": "%s(#%d)" % (r["actor_name"], r["actor_id"]),
+                    "no": r["index"] + 1,
+                    "name": "%s / %s" % (r["name"], r["tpl"]),
+                    "tname": r["name"],
+                    "skills": r["skills"], "obj": r["baby"]})
+        else:
+            for aid, x in rows:
+                nm = self.app.sv.actor_name(x)
+                items.append({
+                    "iid": "a%d" % aid, "who": nm, "no": aid,
+                    "name": "(角色)", "tname": nm,
+                    "skills": self.app.g.actor_skills(x), "obj": x})
+
+        win = tk.Toplevel(self.win)
+        win.title("复制 %d 个技能 → 选目标" % len(sids))
+        win.transient(self.win)
+        win.grab_set()
+        f = ttk.Frame(win, padding=8)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="要复制的 %d 个技能：%s"
+                  % (len(sids), skill_text(sids)), foreground="#8a8a8a",
+                  wraplength=600, justify="left").pack(fill="x", pady=(0, 6))
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="搜索（名字 / 序号 / 技能）：").pack(side="left")
+        var_kw = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=var_kw, width=16)
+        ent.pack(side="left", padx=4)
+        ent.bind("<KeyRelease>", lambda e: refill())
+
+        cols = ("who", "no", "name", "n", "skills")
+        heads = ("角色", "序", "名字", "已有", "技能")
+        widths = (130, 34, 190, 46, 330)
+        tv = ttk.Treeview(f, columns=cols, show="headings", height=12,
+                          selectmode="browse")
+        for c, h, w in zip(cols, heads, widths):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="w")
+        vs = ttk.Scrollbar(f, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        tv.pack(fill="both", expand=True, pady=6)
+
+        items_map = {}
+
+        def refill(_e=None):
+            tv.delete(*tv.get_children())
+            items_map.clear()
+            kw = var_kw.get().strip()
+            for it in items:
+                hay = "%s %s %s %s" % (it["who"], it["no"], it["name"],
+                                       skill_text(it["skills"]))
+                if kw and kw not in hay:
+                    continue
+                items_map[it["iid"]] = it
+                tv.insert("", "end", iid=it["iid"],
+                          values=(it["who"], it["no"], it["name"],
+                                  len(it["skills"]), skill_text(it["skills"])))
+            kids = tv.get_children()
+            if kids:
+                tv.selection_set(kids[0])
+
+        refill()
+
+        def do_copy(_e=None):
+            sel = tv.selection()
+            it = items_map.get(sel[0]) if sel else None
+            if it is None:
+                return
+            tgt, tname = it["obj"], it["tname"]
+            if not self.app.confirm(
+                    "复制技能",
+                    "把选中的 %d 个技能加给「%s」？\n"
+                    "（目标原有的技能不动，已经会的自动跳过）"
+                    % (len(sids), tname)):
+                return
+            try:
+                if self.key == "actor":
+                    added, already = self.app.g.actor_learn_many(tgt, sids)
+                else:
+                    added, already = self.app.babies_ed().learn_many(tgt, sids)
+            except Exception as e:
+                messagebox.showerror("复制失败", zh_error(e), parent=win)
+                return
+            win.destroy()
+            self.app.mark_dirty()
+            if added:
+                msg = "已把 %d 个技能复制给「%s」" % (len(added), tname)
+                if already:
+                    msg += "（%d 个目标本来就会，跳过）" % len(already)
+            else:
+                msg = "「%s」这些技能本来就都会（%d 个）" % (tname, len(already))
+            if self.key == "baby":
+                n = len(self.app.babies_ed().skills(tgt))
+                if n > babies.GAME_LEARN_LIMIT:
+                    msg += ("；⚠ 目标现在 %d 个，超过游戏「升级学技能」的 %d 上限"
+                            "（读取端没限制，实战能不能用要实机验证）"
+                            % (n, babies.GAME_LEARN_LIMIT))
+            self.app.set_status(msg + "（记得点「保存修改」）")
+            self.sync_main()
+            self.refill()
+
+        tv.bind("<Double-1>", do_copy)
+        bf = ttk.Frame(f)
+        bf.pack(fill="x")
+        fit_btn(bf, text="复制给选中的目标",
+                command=do_copy).pack(side="right", padx=4)
+        fit_btn(bf, text="取消", command=win.destroy).pack(side="right")
+        esc_close(win)
+        ent.focus_set()                 # 焦点给搜索框（在 esc_close 之后才优先）
+        center_win(win, self.win)
+
+    def after_change(self, msg):
+        """改完存档之后统一收尾：状态栏 + 刷主界面 + 重填自己。"""
+        self.app.set_status(msg + "（记得点「保存修改」）")
+        self.sync_main()
+        self.refill()
+
+    def sync_main(self):
+        """把主界面那块技能区 / 召唤兽列表刷成新状态。"""
+        if self.key == "actor":
+            self.app.load_actor()
+        else:
+            self.app.load_baby()
+            b = self.target()
+            if b is not None:
+                self.app.refresh_baby_list_keep(b)
+
+    def close(self):
+        try:
+            self.app._skill_win = None
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+
+# ---- 按钮统一贴字 ---------------------------------------------------------
+# vista 主题给 ttk.Button 硬设 ~87px 最小宽（文字宽完全不参与计算），
+# 短文字按钮全被顶到下限、看着"宽度固定"。widget 级 padding 用负值抵掉
+# 下限后，宽度 ≈ 文字宽 + 左右各 8px。控件类型与全仓一致（都是 ttk.Button），
+# 只是收掉多余内边距 —— 全仓按钮一律用 fit_btn() 创建（2026-10-03 川）。
+_BTN_BASE = None
+
+
+def _btn_base(master):
+    """量一次当前主题给 ttk.Button 的最小宽度（跨主题/跨机器自适应）。"""
+    global _BTN_BASE
+    if _BTN_BASE is None:
+        probe = ttk.Button(master, text="试")       # ⚠ 这里必须是 ttk.Button
+        probe.place(x=-999, y=-999)                 # 用 fit_btn 会递归
+        probe.update_idletasks()
+        _BTN_BASE = probe.winfo_reqwidth() or 87
+        probe.destroy()
+    return _BTN_BASE
+
+
+def _fit_pad(text, master):
+    """贴字要用的负 padding（文字够宽、不用收窄时返回 0）。"""
+    w = tkfont.nametofont("TkDefaultFont").measure(text)
+    base = _btn_base(master)
+    if w + 16 < base:
+        return -int((base - w - 16) / 2)
+    return 0
+
+
+def fit_btn(master, text=None, command=None, **kw):
+    """ttk.Button + 按文字宽度贴字（负 padding 抵掉 vista 的主题下限）。
+
+    指定了 `width=` 的按钮跳过（那是"固定 N 字符宽"的显式要求）。
+    """
+    if text and "width" not in kw:
+        pad = _fit_pad(text, master)
+        if pad:
+            kw["padding"] = "%d 0" % pad
+    return ttk.Button(master, text=text, command=command, **kw)
+
+
+def refit_btn(btn, text):
+    """改按钮文字后按新文字重算贴字宽度（fit_btn 只在创建时算一次）。
+
+    文字会变的按钮（例：新增召唤兽的「加这只」/「加选中的 N 只」）必须走它，
+    不然负 padding 是按旧文字算的，换长文字会被裁掉。
+    """
+    pad = _fit_pad(text, btn)
+    # padding="" = 清掉自定义值、回到主题默认（写 0 会少 2px，看着不齐）
+    btn.configure(text=text, padding=("%d 0" % pad) if pad else "")
+
+
+def center_win(win, parent=None, y_ratio=3):
+    """把子窗口摆到父窗口上方 1/3、水平居中（父窗口没映射就摆屏幕居中）。
+
+    ⚠ 必须在控件都 pack/grid 完再调（内部 update_idletasks 才知道窗口多大）。
+    """
+    try:
+        win.update_idletasks()
+        ww, wh = win.winfo_width(), win.winfo_height()
+        if ww <= 1:
+            ww = win.winfo_reqwidth()
+        if wh <= 1:
+            wh = win.winfo_reqheight()
+        if parent is not None and parent.winfo_exists() \
+                and parent.winfo_width() > 1:
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        else:
+            pw = win.winfo_screenwidth()
+            ph = win.winfo_screenheight()
+            px = py = 0
+        win.geometry("+%d+%d" % (max(0, px + (pw - ww) // 2),
+                                 max(0, py + (ph - wh) // y_ratio)))
+    except Exception:
+        pass
+
+
+def esc_close(win, action=None):
+    """给子窗口挂「按 Esc 关掉」（默认就是关窗，可换成"取消"回调）。
+
+    ⚠ 两层都得要：
+    * 只绑 Toplevel 一层就够收事件 —— Tk 的 bindtags 里含所属 Toplevel，
+      焦点在列表/输入框上也收得到；
+    * 但**必须把焦点收进窗口**：Esc 是键盘事件，Tk 只投给「当前焦点所在
+      窗口」，对话框刚开时焦点还留在主窗口上（实测：不抢过来按 Esc 毫无
+      反应）。`focus_set()` 是 Tk 内部焦点，不会抢系统前台。
+    调用方若要指定焦点（搜索框等），把 widget.focus_set() 写在**它之后**。
+    """
+    def _do(_e=None):
+        try:
+            (action or win.destroy)()
+        except Exception:
+            pass
+        return "break"
+    win.bind("<Escape>", _do)
+    win.focus_set()
+    return win
 
 
 class App(object):
@@ -685,17 +1454,17 @@ class App(object):
         tk, ttk = self.tk, self.ttk
         top = ttk.Frame(self.root, padding=6)
         top.pack(fill="x")
-        ttk.Button(top, text="选择存档…", command=self.choose_file).pack(side="left")
+        fit_btn(top, text="选择存档…", command=self.choose_file).pack(side="left")
         self.var_path = tk.StringVar(value=save_path or "")
         ttk.Entry(top, textvariable=self.var_path, width=58).pack(side="left", padx=6)
-        ttk.Button(top, text="重新载入", command=self.reload).pack(side="left")
+        fit_btn(top, text="重新载入", command=self.reload).pack(side="left")
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(top, text="保存修改(Ctrl+S)",
+        fit_btn(top, text="保存修改(Ctrl+S)",
                    command=self.save_save).pack(side="left")
-        ttk.Button(top, text="放弃修改", command=self.reload).pack(side="left", padx=4)
+        fit_btn(top, text="放弃修改", command=self.reload).pack(side="left", padx=4)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(top, text="导出报告", command=self.export_report).pack(side="left")
-        ttk.Button(top, text="导出明文", command=self.export_plain).pack(side="left",
+        fit_btn(top, text="导出报告", command=self.export_report).pack(side="left")
+        fit_btn(top, text="导出明文", command=self.export_plain).pack(side="left",
                                                                        padx=4)
         self.root.bind("<Control-s>", lambda e: self.save_save())
 
@@ -711,9 +1480,9 @@ class App(object):
                         font=("Consolas", 9, "underline"))
         link.pack(side="left")
         link.bind("<Button-1>", lambda e: self.open_homepage())
-        ttk.Button(info, text="关于", command=self.show_about,
+        fit_btn(info, text="关于", command=self.show_about,
                    width=6).pack(side="left", padx=8)
-        ttk.Button(info, text="复制地址", command=self.copy_homepage,
+        fit_btn(info, text="复制地址", command=self.copy_homepage,
                    width=9).pack(side="left")
         ttk.Label(info, text=LICENSE_NAME, foreground="#888").pack(side="left", padx=8)
 
@@ -767,9 +1536,13 @@ class App(object):
                 row=0, column=col_label, sticky="w", padx=(4, 2), pady=3)
             ttk.Entry(g, textvariable=var, width=10).grid(
                 row=0, column=col_entry, sticky="we", padx=(0, 8))
-        # ---- 祈福池储备（4 个值，party.@hash 的 *_pool，单行 4 列）----
-        ttk.Separator(g, orient="horizontal").grid(
-            row=1, column=0, columnspan=8, sticky="we", pady=(8, 6))
+        # ---- 祈福池储备（party.@hash 的 *_pool，4 个值一行）----
+        # ⚠ 别只写「气血 / 魔法」：这 4 个是**祈福池的储备量**，不是角色的当前值。
+        #   游戏战斗结束时 Game_Party#pool_apply 按池给角色/宠物补满血·灵，
+        #   但只在 $game_party.hash[:pool_effective] 挂了这个单位时才生效。
+        #   （2026-10-04 川以为是没用的控件要求删掉 —— 补上说明后加回。）
+        lf = ttk.LabelFrame(g, text="祈福池储备", padding=6)
+        lf.grid(row=1, column=0, columnspan=8, sticky="we", pady=(8, 2))
         self.var_bless = {}
         bless_flat = [
             ("角色气血", "actor_hp_pool"),
@@ -777,23 +1550,36 @@ class App(object):
             ("宠物气血", "baby_hp_pool"),
             ("宠物魔法", "baby_mp_pool"),
         ]
+        bless_tip = ("祈福池的储备量（不是角色当前气血/魔法）。\n"
+                     "游戏里用物品往池里加：左键＝角色池、右键＝宠物池；\n"
+                     "战斗结束时按池给角色/宠物补满气血·灵力。\n"
+                     "⚠ 前提是游戏里把这个单位挂到了池子上（pool_effective），\n"
+                     "没挂过（4 个值都是 0）时填了也不生效。")
         for i, (label, key) in enumerate(bless_flat):
-            col_label = i * 2
-            col_entry = i * 2 + 1
-            ttk.Label(g, text=label + "：", anchor="w").grid(
-                row=2, column=col_label, sticky="w", padx=(4, 2), pady=3)
-            var = tk.StringVar(); self.var_bless[key] = var
-            ttk.Entry(g, textvariable=var, width=10).grid(
-                row=2, column=col_entry, sticky="we", padx=(0, 8))
-        # v0.5.0 灰字提示：金钱说明
-        ttk.Label(g, text="金钱上限 3000 万；超限自动压到 2500 万（上限 5/6）\n"
-                          "改钱会同步重算 Lock 校验和 + 游戏内金钱记账，不会被判定作弊",
+            ttk.Label(lf, text=label + "：", anchor="w").grid(
+                row=0, column=i * 2, sticky="w", padx=(4, 2), pady=3)
+            var = tk.StringVar()
+            self.var_bless[key] = var
+            ent = ttk.Entry(lf, textvariable=var, width=10)
+            ent.grid(row=0, column=i * 2 + 1, sticky="we", padx=(0, 8))
+            lf.columnconfigure(i * 2 + 1, weight=1)
+            self._bind_tip(ent, bless_tip)
+        ttk.Label(lf, text=("战斗结束按池给角色/宠物补满气血·灵力；\n"
+                            "没在游戏里挂到池子上时（4 个都是 0）填了不生效。"),
+                  foreground="#888", justify="left").grid(
+            row=1, column=0, columnspan=8, sticky="w", padx=4, pady=(2, 0))
+        ttk.Separator(g, orient="horizontal").grid(
+            row=2, column=0, columnspan=8, sticky="we", pady=(8, 4))
+        # 金钱说明：上限/安全值直接取 game 常量（内测版 MAX_GOLD = 9,999,999,999）
+        ttk.Label(g, text=("金钱上限 {:,}（约 100 亿）；超限自动压到 {:,}（上限 5/6）\n"
+                           "改钱会同步重算 Lock 校验和，游戏读档不会报「游戏异常」"
+                           ).format(game.MAX_GOLD, game.SAFE_GOLD),
                   foreground="#888", justify="left", wraplength=420).grid(
             row=3, column=0, columnspan=8, sticky="w", pady=(4, 0))
         bar = ttk.Frame(g)
         bar.grid(row=4, column=0, columnspan=8, sticky="w", pady=(8, 0))
-        ttk.Button(bar, text="应用", command=self.apply_quick).pack(side="left")
-        ttk.Button(bar, text="防作弊检测并修复",
+        fit_btn(bar, text="应用", command=self.apply_quick).pack(side="left")
+        fit_btn(bar, text="防作弊检测并修复",
                    command=self.detect_and_fix_cheats).pack(side="left", padx=8)
         self.var_lock = tk.StringVar(value="防作弊检测：—")
         ttk.Label(g, textvariable=self.var_lock, foreground="#c00"
@@ -818,10 +1604,10 @@ class App(object):
         body.add(h, weight=1)
         # v0.5.0 灰字提示：体检说明（精简，加 wraplength 自动换行）
         ttk.Label(h, text=
-                  "游戏每 300 帧检查：等级、召唤兽、金钱(≤3000万)、仓库、五维点数；\n"
-                  "另有五类记账(金钱/物品/变量/人气/贡献)、Lock 校验和随时比对；\n"
-                  "越界/不符 → 存档标记作弊(@cheated + @keyword VNE/NE!)，\n"
-                  "20 分钟后画面转圈、25 分钟后退出；鼠标悬浮条目看具体说明。",
+                  "内测版有两层：Lock 校验和（金钱等关键数值受它保护）+ 记账校验\n"
+                  "（金钱/物品/变量/人气/贡献五类账，账实不符会被踢出游戏）；\n"
+                  "没有周期检查、没有作弊标记 —— 越界本身只是提示，账不符才致命。\n"
+                  "下表按游戏 Config::Game 的上限列出越界项；悬浮条目看具体说明。",
                   foreground="#555", justify="left", wraplength=420).pack(anchor="w")
         self.var_cheat = tk.StringVar(value="")
         ttk.Label(h, textvariable=self.var_cheat, foreground="#c00",
@@ -845,15 +1631,15 @@ class App(object):
         self.tv_guard.pack(fill="both", expand=True)
         gbar = ttk.Frame(h)
         gbar.pack(fill="x")
-        ttk.Button(gbar, text="体检",
+        fit_btn(gbar, text="体检",
                    command=self.guard_check).pack(side="left")
-        ttk.Button(gbar, text="一键按规则修复",
+        fit_btn(gbar, text="一键按规则修复",
                    command=self.guard_fix).pack(side="left", padx=6)
-        ttk.Button(gbar, text="清除作弊标记",
+        fit_btn(gbar, text="清除作弊标记",
                    command=self.guard_clear).pack(side="left", padx=6)
-        ttk.Button(gbar, text="同步物品计数校验",
+        fit_btn(gbar, text="同步物品计数校验",
                    command=self.guard_resync).pack(side="left", padx=6)
-        ttk.Button(gbar, text="清理所有存档（含 AutoSave）",
+        fit_btn(gbar, text="清理所有存档（含 AutoSave）",
                    command=self.guard_fix_all).pack(side="left", padx=(18, 6))
         # 初始把 PanedWindow 分隔条放到 50%（等窗口实际尺寸出来后再设）
         self.root.after(150, lambda: body.sashpos(0, body.winfo_width() // 2))
@@ -871,7 +1657,9 @@ class App(object):
         ttk.Label(f, text="游戏用 System\\main.dll 的 get_hard_disk_character() 取本机机器码，"
                           "存在存档的 $game_system.config[:hard_disk_code]（一个数组）。\n"
                           "游戏启动时会 include? 比对，不在里面就 msgbox「存档异常」然后退出 ——\n"
-                          "所以存档换到别的电脑上打不开；把新机器的机器码「加入」进去就行了。",
+                          "所以存档换到别的电脑上打不开；把新机器的机器码「加入」进去就行了。\n"
+                          "⚠ 保存时不会自动改机器码 —— 你把它换成谁的，存盘、重载后还是那个；"
+                          "要不要加本机码，只由下面这几个按钮决定。",
                   foreground="#555", justify="left").pack(anchor="w", pady=(4, 10))
 
         box = ttk.LabelFrame(f, text="当前情况", padding=10)
@@ -892,22 +1680,22 @@ class App(object):
         self.var_machine_id = tk.StringVar()
         ttk.Entry(bar1, textvariable=self.var_machine_id, width=22
                   ).pack(side="left")
-        ttk.Button(bar1, text="读取本机机器码",
+        fit_btn(bar1, text="读取本机机器码",
                    command=self.machine_fill_local).pack(side="left", padx=6)
-        ttk.Button(bar1, text="读存档里第一个",
+        fit_btn(bar1, text="读存档里第一个",
                    command=self.machine_fill_saved).pack(side="left", padx=6)
-        ttk.Button(bar1, text="刷新",
+        fit_btn(bar1, text="刷新",
                    command=self.machine_show).pack(side="left", padx=6)
 
         bar2 = ttk.Frame(eb)
         bar2.pack(fill="x", pady=8)
-        ttk.Button(bar2, text="加入存档（追加，推荐）",
+        fit_btn(bar2, text="加入存档（追加，推荐）",
                    command=self.machine_add).pack(side="left")
-        ttk.Button(bar2, text="替换成这个（只留一个）",
+        fit_btn(bar2, text="替换成这个（只留一个）",
                    command=self.machine_set).pack(side="left", padx=6)
-        ttk.Button(bar2, text="用本机机器码替换",
+        fit_btn(bar2, text="用本机机器码替换",
                    command=self.machine_use_local).pack(side="left", padx=6)
-        ttk.Button(bar2, text="清空存档记录",
+        fit_btn(bar2, text="清空存档记录",
                    command=self.machine_clear).pack(side="left", padx=6)
         ttk.Label(eb, text="改完记得 Ctrl+S 保存。只改存档是安全的：游戏只对 Game.exe 和\n"
                            "System\\main.dll 做 md5 校验，不管存档。",
@@ -945,23 +1733,23 @@ class App(object):
 
         bar = ttk.Frame(f)
         bar.pack(fill="x")
-        ttk.Button(bar, text="立即备份",
+        fit_btn(bar, text="立即备份",
                    command=self.saves_backup).pack(side="left")
-        ttk.Button(bar, text="编辑备注",
+        fit_btn(bar, text="编辑备注",
                    command=self.saves_edit_note).pack(side="left", padx=6)
-        ttk.Button(bar, text="恢复选中",
+        fit_btn(bar, text="恢复选中",
                    command=self.saves_restore).pack(side="left", padx=6)
-        ttk.Button(bar, text="恢复最新",
+        fit_btn(bar, text="恢复最新",
                    command=self.saves_restore_newest).pack(side="left", padx=6)
-        ttk.Button(bar, text="删除选中",
+        fit_btn(bar, text="删除选中",
                    command=self.saves_delete).pack(side="left", padx=6)
-        ttk.Button(bar, text="删除无备注",
+        fit_btn(bar, text="删除无备注",
                    command=self.saves_delete_no_note).pack(side="left", padx=6)
-        ttk.Button(bar, text="删除非最新",
+        fit_btn(bar, text="删除非最新",
                    command=self.saves_delete_old).pack(side="left", padx=6)
-        ttk.Button(bar, text="刷新",
+        fit_btn(bar, text="刷新",
                    command=self.saves_refresh).pack(side="left", padx=6)
-        ttk.Button(bar, text="打开备份目录",
+        fit_btn(bar, text="打开备份目录",
                    command=self.saves_open_dir).pack(side="left", padx=6)
 
         cols = ("idx", "time", "kind", "size", "name", "note")
@@ -1110,7 +1898,7 @@ class App(object):
             return
         if not self.confirm(
                 "恢复最新",
-                "把存档换回**上一次修改之前**的状态吗？\n\n"
+                "把存档换回「上一次修改之前」的状态吗？\n\n"
                 "  用的备份：%s\n  %s\n\n"
                 "（这份是目前最新的一份备份）" % (r["stamp"], r["name"])):
             return
@@ -1233,10 +2021,10 @@ class App(object):
         ent = ttk.Entry(bar, textvariable=self.var_search, width=30)
         ent.pack(side="left")
         ent.bind("<Return>", lambda e: self.global_search())
-        ttk.Button(bar, text="搜索", command=self.global_search).pack(side="left",
+        fit_btn(bar, text="搜索", command=self.global_search).pack(side="left",
                                                                      padx=4)
-        ttk.Button(bar, text="清空结果", command=self.clear_search).pack(side="left")
-        ttk.Button(bar, text="全部折叠", command=self.collapse_all).pack(side="left",
+        fit_btn(bar, text="清空结果", command=self.clear_search).pack(side="left")
+        fit_btn(bar, text="全部折叠", command=self.collapse_all).pack(side="left",
                                                                        padx=4)
         ttk.Label(bar, text="　（搜字段名或值 → 双击结果跳到树上；右键可改标量）",
                   foreground="#777").pack(side="left")
@@ -1368,11 +2156,13 @@ class App(object):
                                     "⚠ 人物升级只有两条路：地图上点「升级」\n"
                                     "按钮（一次一级），或事件指令 —— 打怪拿经验\n"
                                     "不会自动升级，所以改这里游戏里基本没反应。\n"
-                                    "要满级请点下面的「经验拉满」。")
+                                    "想自己点升级就点下面的「经验拉满」（只给经验）；\n"
+                                    "要直接满级点「一键满级」（连等级一起写）。")
             elif k == "#level":
                 self._bind_tip(ent, "当前等级（存档 @level）。只读。\n"
-                                    "人物不会因为经验多而自动升级 —— 要满级请点\n"
-                                    "下面的「经验拉满」，它会连着等级一起写。")
+                                    "人物不会因为经验多而自动升级 —— 要直接满级点\n"
+                                    "「一键满级」（连着等级一起写）；只想要经验、\n"
+                                    "自己回游戏点升级，就点「经验拉满」。")
             elif k == "#next_exp":
                 self._bind_tip(ent, "升到下一级还需要的经验（查游戏表 $exps，\n"
                                     "下标就是当前等级）。存档里没有这个字段，\n"
@@ -1399,32 +2189,47 @@ class App(object):
 
         bar = ttk.Frame(left)
         bar.pack(fill="x", pady=(4, 0))
-        ttk.Button(bar, text="应用修改", command=self.apply_actor).pack(side="left")
-        # 「经验拉满」= 等级顶到 60 + 获得经验对齐满级门槛（语义层 actor_exp_full）。
+        fit_btn(bar, "应用修改",
+                   self.apply_actor).pack(side="left")
+        # 「一键满级」= 等级顶到 60 + 获得经验对齐满级门槛（语义层 actor_exp_full）。
         # 为什么不是「+10000」：人物打怪拿经验**不会**自动升级（脚本里
         # change_exp 没有升级循环，见 game.actor_exp_full 的说明），
-        # 只加经验在游戏里毫无反应；要"拉满"就得连着等级一起写。
-        btn_full = ttk.Button(bar, text="经验拉满",
-                              command=lambda: self.actor_preset("expfull"))
+        # 只加经验在游戏里毫无反应；要一步到满级就得连着等级一起写。
+        btn_full = fit_btn(bar, "一键满级",
+                              lambda: self.actor_preset("expfull"))
+        self._bind_tip(btn_full,
+                       "等级直接给到 %d 级，获得经验对齐该级门槛。\n"
+                       "⚠ 人物不会因为经验多而自动升级，\n"
+                       "所以这里连着等级一起写。" % game.MAX_LEVEL_ACTOR)
         btn_full.pack(side="left", padx=6)
-        self._bind_tip(btn_full, "等级直接给到 %d 级，获得经验对齐该级门槛。\n"
-                                 "⚠ 人物不会因为经验多而自动升级，\n"
-                                 "所以这里连着等级一起写。" % game.MAX_LEVEL_ACTOR)
-        ttk.Button(bar, text="回满 HP/MP",
-                   command=lambda: self.actor_preset("heal")).pack(side="left", padx=6)
-        ttk.Button(bar, text="属性全 +10",
-                   command=lambda: self.actor_preset("attr")).pack(side="left", padx=6)
+        # 「经验拉满」（2026-10-03 川）：只写经验（ACTOR_EXP_FILL），**等级不动**。
+        # 回游戏在地图界面自己点「升级」（一次一级）—— 和「一键满级」只差这一点。
+        btn_fill = fit_btn(bar, "经验拉满",
+                              lambda: self.actor_preset("expfill"))
+        self._bind_tip(btn_fill,
+                       "获得经验写到 %d 万，等级不动。\n"
+                       "回游戏在地图界面点「升级」按钮，\n"
+                       "点几次升几级（一次一级），节奏自己控。"
+                       % (game.ACTOR_EXP_FILL // 10000))
+        btn_fill.pack(side="left", padx=6)
+        fit_btn(bar, "回满 HP/MP",
+                   lambda: self.actor_preset("heal")).pack(side="left",
+                                                            padx=6)
+        fit_btn(bar, "属性全 +10",
+                   lambda: self.actor_preset("attr")).pack(side="left",
+                                                            padx=6)
         # 「重置潜力/属性」= 洗点，复刻游戏里「拜师」那一下（语义层
         # game.actor_reset_attr → 脚本 `Game_Actor_Attr#reset_point`）：
         # 五维回到 20+等级-1、潜能回到 等级*5，已分配的点全部退回潜能。
         # ⚠ 和上面几个一样**并进这一行**（不新起一行）—— 左栏是竖向 pack，
         #   多一行就多一分被裁的风险（参考「一键学习」被裁那次）。
-        btn_reset = ttk.Button(bar, text="重置潜力/属性",
-                               command=lambda: self.actor_preset("reset_attr"))
+        btn_reset = fit_btn(bar, "重置潜力/属性",
+                               lambda: self.actor_preset("reset_attr"))
+        self._bind_tip(btn_reset,
+                       "洗点：五维→20+等级-1，潜能→等级*5。\n"
+                       "＝ 游戏里「拜师」那一下的效果。\n"
+                       "已分配的点全部退回潜能，可重新分配。")
         btn_reset.pack(side="left", padx=(6, 0))
-        self._bind_tip(btn_reset, "洗点：五维→20+等级-1，潜能→等级*5。\n"
-                                 "＝ 游戏里「拜师」那一下的效果。\n"
-                                 "已分配的点全部退回潜能，可重新分配。")
 
         # ---- 门派技能（勾选 = 学会 / 取消勾选 = 忘掉）
         # ⚠ 2026-09-23 改语义（川反馈：勾选/取消勾选之后点保存，工具却说「没有改动」）：
@@ -1458,7 +2263,7 @@ class App(object):
         # ⚠ 「一键学习」**贴在门派下拉右边**（2026-09-20 川截图反馈：原来单独占
         #   一行放最底下，左栏高度不够时它会先被裁掉 —— 按钮就是看不见）。
         #   放同一行后它和下拉一起永远完整，也不再占一行高度。
-        btn_learn = ttk.Button(srow, text="一键学习",
+        btn_learn = fit_btn(srow, text="一键学习",
                                command=self.actor_learn_checked)
         btn_learn.pack(side="left", padx=(6, 0))
         self._bind_tip(btn_learn, "把本门派还没学的技能一次学满\n"
@@ -1466,7 +2271,7 @@ class App(object):
         # 「转门派」：把当前角色的门派改成**下拉里选的那个**（2026-09-27 加）。
         # ⚠ 故意**不**做成「下拉即改」——那个下拉的既定语义是「只换下面这份清单」，
         #   顺手改存档会在「只想看看别的门派技能」时把门派改掉。
-        btn_sect = ttk.Button(srow, text="转门派", command=self.actor_set_sect)
+        btn_sect = fit_btn(srow, text="转门派", command=self.actor_set_sect)
         btn_sect.pack(side="left", padx=(6, 0))
         self._bind_tip(btn_sect, "把当前角色的门派改成下拉里选的那个。\n"
                                  "只改门派本身（@sect_id）：\n"
@@ -1477,16 +2282,30 @@ class App(object):
         # （2026-09-27 川的要求）。⚠ 下拉里也有「无门派」，但两条路**不一样**：
         # 「转门派」只改门派（技能一个不动），连技能一起重置只有这个按钮
         # （川 260927 22:5x 明确：「无门派不清技能，清空门派才清技能」）。
-        btn_nosect = ttk.Button(srow, text="清空门派", command=self.actor_clear_sect)
+        btn_nosect = fit_btn(srow, text="清空门派", command=self.actor_clear_sect)
         btn_nosect.pack(side="left", padx=(6, 0))
         self._bind_tip(btn_nosect, "把当前角色改成「无门派」（@sect_id=0），\n"
                                    "并把技能重置成职业天生技能。\n"
                                    "⚠ 游戏里快捷技能栏、门派技能页会不可用；\n"
                                    "   门派技能和技能书学的技能都会没。")
+        # ⚠ 统计和「反选 / 全不选」同一行（不新起一行）：左栏是竖向 pack，
+        #   多一行就多一分被裁的风险（1080 窗宽下本来只差 43px）。
+        #   「全选」不用加 —— 上面那个「一键学习」就是（没学的全学会）。
+        nrow = ttk.Frame(self.lf_learn)
+        nrow.pack(fill="x", pady=(2, 0))
         self.var_learn_note = tk.StringVar(value="")
-        ttk.Label(self.lf_learn, textvariable=self.var_learn_note,
-                  foreground="#8a8a8a", justify="left", wraplength=560
-                  ).pack(anchor="w", pady=(2, 0))
+        ttk.Label(nrow, textvariable=self.var_learn_note,
+                  foreground="#8a8a8a", justify="left", wraplength=300
+                  ).grid(row=0, column=0, sticky="w")
+        b_none = fit_btn(nrow, text="全不选", command=self.actor_sect_none)
+        b_none.grid(row=0, column=2, sticky="e", padx=(4, 0))
+        self._bind_tip(b_none, "把本门派的技能全部忘掉（勾选框全取消）。\n"
+                               "只动这一份清单里的技能，别的技能不碰。")
+        b_inv = fit_btn(nrow, text="反选", command=self.actor_sect_invert)
+        b_inv.grid(row=0, column=1, sticky="e", padx=(6, 0))
+        self._bind_tip(b_inv, "把下面这份清单反过来：\n"
+                              "已学的忘掉、没学的学会。")
+        nrow.columnconfigure(0, weight=1)
         self.learn_grid = ttk.Frame(self.lf_learn)
         self.learn_grid.pack(fill="x", pady=(2, 0))
         self.learn_vars = {}        # 技能 id → IntVar(0/1)
@@ -1580,7 +2399,7 @@ class App(object):
             ttk.Radiobutton(bar, text=cn, value=key,
                             variable=self.var_bag_kind,
                             command=self.fill_party).pack(side="left", padx=2)
-        ttk.Button(bar, text="刷新", command=self.fill_party).pack(side="right")
+        fit_btn(bar, text="刷新", command=self.fill_party).pack(side="right")
 
         ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；左键选格子，右边模板里双击物品＝写进去"
                   ).pack(anchor="w", pady=(6, 2))
@@ -1590,6 +2409,17 @@ class App(object):
 
         # ---- 左：格子列表
         left = ttk.Frame(body)
+        # ---- 搜索行（2026-10-04 川：跟召唤兽一览一样，格子也得能搜）
+        # 只在有输入时过滤；空关键词照旧列满 20 格（含空格子），
+        # 因为「往哪个空格子放东西」本身也要看着格子编号点。
+        srow = ttk.Frame(left)
+        srow.pack(fill="x")
+        ttk.Label(srow, text="搜索：").pack(side="left")
+        self.var_pack_kw = tk.StringVar()
+        ent_pk = ttk.Entry(srow, textvariable=self.var_pack_kw, width=14)
+        ent_pk.pack(side="left", padx=4)
+        ent_pk.bind("<KeyRelease>", lambda e: self.fill_party())
+        fit_btn(srow, text="清空", command=self.pack_kw_clear).pack(side="left")
         ttk.Label(left, text="背包格子（“内容”列是孵化蛋/礼包那种运行时内容；"
                              "鼠标停在物品上可看完整说明）"
                   ).pack(anchor="w")
@@ -1619,15 +2449,17 @@ class App(object):
         ent = ttk.Entry(tr, textvariable=self.var_tpl_kw, width=16)
         ent.pack(side="left")
         ent.bind("<Return>", lambda e: self.fill_templates())
-        ttk.Button(tr, text="找", width=4,
+        fit_btn(tr, text="找", width=4,
                    command=self.fill_templates).pack(side="left", padx=3)
         ttk.Label(right, text="物品模板（Data\\%s.rvdata2）"
                   % "Items").pack(anchor="w")
-        self.tv_tpl = ttk.Treeview(right, columns=("id", "name"),
+        self.tv_tpl = ttk.Treeview(right, columns=("id", "name", "grp"),
                                    show="headings", height=11)
-        for c, w, t in (("id", 60, "ID"), ("name", 190, "名称")):
+        # ⚠ 只让「名称」列 stretch：多余宽度全摊给它会撑出一段空白（同技能管理器）。
+        for c, w, t in (("id", 52, "ID"), ("name", 170, "名称"),
+                        ("grp", 88, "类别")):
             self.tv_tpl.heading(c, text=t)
-            self.tv_tpl.column(c, width=w, anchor="w")
+            self.tv_tpl.column(c, width=w, anchor="w", stretch=(c == "name"))
         vs2 = ttk.Scrollbar(right, orient="vertical", command=self.tv_tpl.yview)
         self.tv_tpl.configure(yscrollcommand=vs2.set)
         vs2.pack(side="right", fill="y")
@@ -1638,9 +2470,9 @@ class App(object):
         self.var_tpl_note = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.var_tpl_note, foreground="#555",
                   wraplength=300, justify="left").pack(anchor="w", pady=2)
-        ttk.Button(right, text="写入选中的格子（双击模板也行）",
+        fit_btn(right, text="写入选中的格子（双击模板也行）",
                    command=self.bag_use_template).pack(fill="x", pady=2)
-        ttk.Button(right, text="放进第一个空格子",
+        fit_btn(right, text="放进第一个空格子",
                    command=lambda: self.bag_use_template(False)).pack(fill="x")
         body.add(right, weight=2)
 
@@ -1652,19 +2484,19 @@ class App(object):
         ttk.Label(act, text="数量：").pack(side="left", padx=(8, 0))
         self.var_bag_cnt = tk.StringVar(value="1")
         ttk.Entry(act, textvariable=self.var_bag_cnt, width=6).pack(side="left")
-        ttk.Button(act, text="改数量",
+        fit_btn(act, text="改数量",
                    command=self.bag_set_count).pack(side="left", padx=6)
-        ttk.Button(act, text="按 id 写入",
+        fit_btn(act, text="按 id 写入",
                    command=self.bag_add).pack(side="left", padx=6)
-        ttk.Button(act, text="清空格子",
+        fit_btn(act, text="清空格子",
                    command=self.bag_clear).pack(side="left", padx=6)
-        ttk.Button(act, text="本页全部 99",
+        fit_btn(act, text="本页全部 99",
                    command=lambda: self.bag_all(99)).pack(side="left", padx=6)
-        ttk.Button(act, text="背包体检",
+        fit_btn(act, text="背包体检",
                    command=self.bag_check).pack(side="left", padx=6)
-        ttk.Button(act, text="一键修复",
+        fit_btn(act, text="一键修复",
                    command=self.bag_fix).pack(side="left", padx=6)
-        ttk.Button(act, text="同步计数校验",
+        fit_btn(act, text="同步计数校验",
                    command=self.guard_resync).pack(side="left", padx=6)
 
         pay = ttk.Frame(f)
@@ -1673,7 +2505,7 @@ class App(object):
         ttk.Label(pay, text="孵出/开出对象 id（孵化蛋类用，留空＝随机）："
                   ).pack(side="left")
         ttk.Entry(pay, textvariable=self.var_bag_kid, width=8).pack(side="left")
-        ttk.Button(pay, text="给选中的格子重抽内容",
+        fit_btn(pay, text="给选中的格子重抽内容",
                    command=self.bag_reroll).pack(side="left", padx=6)
         ttk.Label(pay, text="　（召唤兽 id 看 Data\\Actors；留空就是按游戏范围随机）",
                   foreground="#777").pack(side="left")
@@ -1701,19 +2533,24 @@ class App(object):
         self.cb_baby_actor.pack(side="left")
         self.cb_baby_actor.bind("<<ComboboxSelected>>",
                                 lambda e: self.fill_baby_list())
-        ttk.Button(top, text="新增召唤兽",
+        fit_btn(top, text="新增召唤兽",
                    command=self.baby_add_dialog).pack(side="left", padx=(10, 4))
-        ttk.Button(top, text="设为出战",
+        fit_btn(top, text="设为出战",
                    command=self.baby_set_active).pack(side="left")
-        ttk.Button(top, text="放生（删除）",
-                   command=self.baby_delete).pack(side="left", padx=4)
-        ttk.Button(top, text="恢复模板名",
+        b_del = fit_btn(top, text="放生（删除）",
+                        command=self.baby_delete)
+        b_del.pack(side="left", padx=4)
+        self._bind_tip(b_del, "把列表里选中的召唤兽从这只角色身上删掉。\n"
+                              "Ctrl 点选 / Shift 连选 → 一次删一批；\n"
+                              "其余按钮只作用于「第一个选中项」。\n"
+                              "不可撤销：删了只能重新加一只。")
+        fit_btn(top, text="恢复模板名",
                    command=self.baby_restore_name).pack(side="left")
         # 宠物「重置潜力/属性」= 洗点（游戏里没有这个功能，语义见
         # game.baby_reset_attr：自己加的属性点全部退回潜能，五维回到自然成长量）。
         # ⚠ 放这一行、不放下面那排预设 —— 预设行已经有 8 个按钮，再加一个会被
         #   pack 切掉（Tk 的 pack 先来先分，空间不够切的是最后 pack 的）。
-        btn_breset = ttk.Button(top, text="重置潜力/属性",
+        btn_breset = fit_btn(top, text="重置潜力/属性",
                                 command=lambda: self.baby_preset("reset_attr"))
         btn_breset.pack(side="left", padx=(8, 0))
         self._bind_tip(btn_breset, "洗点：自己加的属性点全部退回潜能，\n"
@@ -1721,9 +2558,25 @@ class App(object):
                                    "总点数不变（五维和+潜能守恒）→ 战力不变，\n"
                                    "只是让你能在游戏里重新分配。")
 
+        # ---- 搜索行（2026-10-04 川：召唤兽一多，一览表得能搜）
+        # ⚠ 单独一行、不挤上面那排按钮 —— 那排已经有 7 个控件，1080 窗宽下再加
+        #   输入框会被 pack 切掉（空间不够先切最后 pack 的）。
+        srow = ttk.Frame(f)
+        srow.pack(fill="x", pady=(4, 0))
+        ttk.Label(srow, text="搜索：").pack(side="left")
+        self.var_baby_kw = tk.StringVar()
+        ent_bk = ttk.Entry(srow, textvariable=self.var_baby_kw, width=18)
+        ent_bk.pack(side="left", padx=4)
+        ent_bk.bind("<KeyRelease>", lambda e: self.fill_baby_list())
+        fit_btn(srow, text="清空", command=self.baby_kw_clear).pack(side="left")
+        ttk.Label(srow, text="（名字 / 模板 / 序号 / 模板 id；留空＝全列）",
+                  foreground="#888").pack(side="left", padx=6)
+
         self.var_baby_note = tk.StringVar(value="")
+        # ⚠ wraplength 别写死 1180：默认窗口才 1220 宽、川还常缩到 ~1080，写太大会
+        #   让这行提示横着溢出被裁。1000 在最小窗宽下也能完整折行。
         ttk.Label(f, textvariable=self.var_baby_note, foreground="#555",
-                  justify="left", wraplength=1180).pack(anchor="w", pady=(4, 4))
+                  justify="left", wraplength=1000).pack(anchor="w", pady=(4, 4))
 
         # ---------------- 召唤兽列表（画迹1 那种一览）
         # ⚠ 2026-09-27：在「成长」左边插了一列「五行」（`@attr.@five`）。
@@ -1733,18 +2586,34 @@ class App(object):
         heads = ("序", "名字", "模板", "等级", "五行", "成长", "忠诚", "寿命",
                  "攻资", "防资", "体资", "法资", "速资", "躲资", "技能", "出战")
         widths = (34, 104, 108, 50, 44, 54, 54, 66, 60, 60, 60, 60, 60, 60, 44, 44)
-        self.tv_babies = ttk.Treeview(f, columns=cols, show="headings",
-                                      height=6, selectmode="browse")
+        # ⚠ selectmode="extended"（2026-10-04 川要求「多选删除」）：Ctrl 点选、
+        #   Shift 连选，一次放生一批。别的按钮（设为出战 / 改字段 / 技能）只认
+        #   「第一个选中项」（见 `_baby()`），多选不影响它们。
+        # ⚠ 竖滚动条必须和列表装进**同一个子 frame**（2026-10-04 川截图反馈：
+        #   原来直接 pack 进整页 `f`，`side="right" + fill="y"` 会让它撑满整页高、
+        #   贴在窗口最右边 —— 看着像"整个窗口的滚动条"，离 6 行高的列表老远，
+        #   也长得离谱）。Tk 的 pack 是"先来先分地盘"：先 pack 的 side="right"
+        #   拿的是**整块**右边缘，所以必须先把容器缩到只有列表那么高。
+        #   ⚠ 顺序也别动：子 frame 里先 pack 滚动条（side="right"）再 pack 列表。
+        bw = ttk.Frame(f)
+        bw.pack(fill="x")
+        # ⚠⚠ `Treeview` 的 parent 必须是 `bw`：Tk 的 `widget.pack()` **永远 pack 到
+        #   控件自己的 parent**，不是"最近 pack 过的那个 frame"。2026-10-04 就是
+        #   在这儿写错的 —— 父仍是 `f` 却 `pack(side="left")`，一览表于是抢走整页
+        #   左边缘（顶到窗口底），把横滚动条 / 改字段行 / 字段表全挤成右边一条。
+        self.tv_babies = ttk.Treeview(bw, columns=cols, show="headings",
+                                      height=6, selectmode="extended")
         for c, h, w in zip(cols, heads, widths):
             self.tv_babies.heading(c, text=h)
             self.tv_babies.column(c, width=w, anchor="w")
         self.tv_babies.tag_configure("active", foreground="#0a0")
-        vs_bab = ttk.Scrollbar(f, orient="vertical", command=self.tv_babies.yview)
+        vs_bab = ttk.Scrollbar(bw, orient="vertical",
+                               command=self.tv_babies.yview)
         self.tv_babies.configure(yscrollcommand=vs_bab.set)
         hs = ttk.Scrollbar(f, orient="horizontal", command=self.tv_babies.xview)
         self.tv_babies.configure(xscrollcommand=hs.set)
         vs_bab.pack(side="right", fill="y")
-        self.tv_babies.pack(fill="x")
+        self.tv_babies.pack(side="left", fill="x", expand=True)
         hs.pack(fill="x")
         self.tv_babies.bind("<<TreeviewSelect>>", lambda e: self.on_baby_select())
 
@@ -1770,31 +2639,41 @@ class App(object):
                                         state="readonly")
         self.cb_baby_val.grid(row=0, column=0, sticky="w")
         self.cb_baby_val.grid_remove()          # 默认是数字输入框
-        ttk.Button(edit, text="应用", command=self.apply_baby).pack(side="left",
-                                                                   padx=6)
+        fit_btn(edit, "应用", self.apply_baby).pack(side="left", padx=6)
         # ⚠ 「满级(65)」按钮没了（2026-09-20 去掉所有页签的等级修改）：
-        # 改成「经验拉满」—— 它连着等级一起写（见 game.baby_exp_full）。
-        for txt, what in (("经验拉满", "expfull"), ("回满气血/魔法", "heal"),
-                          ("全员忠诚满", "loyalty_all"), ("寿命满", "life"),
+        # 2026-10-03 起，这个"连等级一起写"的按钮统一叫「一键满级」
+        # （角色页同款，见 game.baby_exp_full）。
+        # 2026-10-03 川要求：①加「经验拉满」（只给 @exp、等级不动，同角色页）；
+        #   ②老「回满气血/魔法」+「全员忠诚满」合并＝「全员状态拉满」
+        #   （一次把全体召唤兽的气血/魔法/愤怒回满 + 忠诚拉满）。
+        tips = {
+            "expfull": ("一键满级：等级给到 %d 级 + 经验对齐该级门槛。\n"
+                        "⚠ 召唤兽靠经验最多升到「主人等级+5」，\n"
+                        "所以这里直接把等级写满，不再单独给等级输入框。"
+                        % game.MAX_LEVEL_BABY),
+            "expfill": ("获得经验写到 %d 万，等级不动。\n"
+                        "⚠ 和人物不同：召唤兽自己有升级循环，\n"
+                        "打完下一场战斗结算时它会自己连升\n"
+                        "（顶到「主人等级+5」）。"
+                        % (game.BABY_EXP_FILL // 10000)),
+            "state_all": ("一次把「所有角色」身上的「所有召唤兽」：\n"
+                          "气血/魔法/愤怒 回满 + 忠诚拉到 %d。\n"
+                          "忠诚只决定能不能参战（<%d 不能上），\n"
+                          "没有属性加成，也不会触发作弊检测。\n"
+                          "上限 %d 是游戏规定：写更高，打完一场战斗\n"
+                          "结束时会被游戏自己夹回去。"
+                          % (game.MAX_BABY_LOYALTY,
+                             game.BABY_ALLOW_LOYALTY,
+                             game.MAX_BABY_LOYALTY)),
+        }
+        for txt, what in (("一键满级", "expfull"), ("经验拉满", "expfill"),
+                          ("全员状态拉满", "state_all"), ("寿命满", "life"),
                           ("六项资质+100", "qual"), ("六项资质+500", "qual500"),
                           ("成长+0.1", "grow"), ("五维+10", "five10")):
-            b = ttk.Button(edit, text=txt,
-                           command=lambda w=what: self.baby_preset(w))
+            b = fit_btn(edit, txt, lambda w=what: self.baby_preset(w))
             b.pack(side="left", padx=2)
-            if what == "expfull":
-                self._bind_tip(b, "等级给到 %d 级 + 经验对齐该级门槛。\n"
-                                  "⚠ 召唤兽靠经验最多升到「主人等级+5」，\n"
-                                  "所以这里直接把等级写满，不再单独给等级输入框。"
-                               % game.MAX_LEVEL_BABY)
-            if what == "loyalty_all":
-                self._bind_tip(b, "一次把「所有角色」身上的「所有召唤兽」忠诚拉满（%d）。\n"
-                                  "游戏里忠诚只决定能不能参战（<%d 不能上），\n"
-                                  "没有属性加成，也不会触发作弊检测。\n"
-                                  "上限 %d 是游戏规定：写更高，打完一场战斗\n"
-                                  "结束时会被游戏自己夹回去。"
-                               % (game.MAX_BABY_LOYALTY,
-                                  game.BABY_ALLOW_LOYALTY,
-                                  game.MAX_BABY_LOYALTY))
+            if tips.get(what):
+                self._bind_tip(b, tips[what])
 
         mid = ttk.Frame(f)
         mid.pack(fill="both", expand=True, pady=(6, 0))
@@ -1824,7 +2703,7 @@ class App(object):
         ttk.Label(name_row, text="名字：").pack(side="left")
         self.var_baby_name = tk.StringVar()
         ttk.Entry(name_row, textvariable=self.var_baby_name, width=16).pack(side="left")
-        ttk.Button(name_row, text="改显示名",
+        fit_btn(name_row, text="改显示名",
                    command=self.baby_rename).pack(side="left", padx=3)
 
         # ---- 技能（和角色页同一套控件，见 _build_skill_editor）
@@ -1834,7 +2713,10 @@ class App(object):
         # ---- 详细信息
         infof = ttk.LabelFrame(right, text="详细信息", padding=6)
         infof.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        self.txt_baby = tk.Text(infof, height=2, wrap="word",
+        # ⚠ `tk.Text` 必须显式给 width（项目铁律）：不给的话 Tk 按 80 字符算请求宽
+        #   （≈660px），会把「常用 / 详细信息」那行顶到 1332 px —— 页 frame 的请求宽
+        #   虚高、窄窗口下整块被挤。实际显示宽由 grid 决定，这里只压请求宽。
+        self.txt_baby = tk.Text(infof, height=2, width=30, wrap="word",
                                 relief="flat", highlightthickness=1,
                                 highlightbackground="#ddd",
                                 font=("Microsoft YaHei UI", 10))
@@ -1884,6 +2766,25 @@ class App(object):
             return "永生"
         return "" if v is None else v
 
+    @staticmethod
+    def _baby_hit(kw, i, name, tpl, tpl_id):
+        """召唤兽搜索匹配：名字 / 模板名 / 模板 id / 序号（1 起）都能搜。
+
+        ⚠ 「序号」= 列表里那个 1 起的行号（`i + 1`），不是槽号 —— 参照背包
+          格子那边的 `slot`，它是一眼能看到的那个数。
+        """
+        if not kw:
+            return True
+        for s in (name, tpl, str(tpl_id), str(i + 1), "#%d" % tpl_id):
+            if s and kw in s:
+                return True
+        return False
+
+    def baby_kw_clear(self):
+        """清空召唤兽搜索框并重列。"""
+        self.var_baby_kw.set("")
+        self.fill_baby_list()
+
     def fill_baby_list(self):
         """刷召唤兽列表（画迹1 那种一览表）。"""
         self.baby_rows = []
@@ -1895,25 +2796,39 @@ class App(object):
             return
         self.baby_rows = self.g.babies(a)
         act_i = bd.active_index(a)
+        # 关键词过滤（2026-10-04 川）：只影响**列出来的行**，`baby_rows` 仍是全量
+        # —— `_baby()` / `refresh_baby_list_keep()` 都按原始下标找，不能让筛选改下标。
+        kw = (self.var_baby_kw.get() if hasattr(self, "var_baby_kw")
+              else "").strip()
+        n_hit = 0
         for i, b in self.baby_rows:
             def v(k, _b=b):
                 return self.g.baby_value(_b, k)
+            nm = self.g.baby_name(b)
+            tpl = bd.template_name(b)
+            tpl_id = _IV.ival(b, "@actor_id")
+            if not self._baby_hit(kw, i, nm, tpl, tpl_id):
+                continue
+            n_hit += 1
             tags = ("active",) if i == act_i else ()
             self.tv_babies.insert(
                 "", "end", iid="bb%d" % i,
-                values=("%d" % (i + 1), self.g.baby_name(b),
-                        "%s(%s)" % (bd.template_name(b), _IV.ival(b, "@actor_id")),
+                values=("%d" % (i + 1), nm,
+                        "%s(%s)" % (tpl, tpl_id),
                         v("level"), v("five"), v("grow"), v("loyalty"),
                         self._life_text(v("life")),
                         v("atk"), v("def"), v("hpq"), v("mpq"), v("agi"), v("eva"),
                         len(bd.skills(b)), "★" if i == act_i else ""),
                 tags=tags)
+        # ⚠ 这行是 `ttk.Label`，**不认 Markdown**：`**粗体**` / `` `等宽` ``
+        #   会原样显示成星号、反引号（2026-10-04 川截图里就是「拿不到的**小孩**」）。
+        #   所以提示文案里一律不用标记，要强调就靠「」和换行。
         self.var_baby_note.set(
-            "共 %d 只（★ = 当前出战）；「新增召唤兽」可以加任意一种，"
-            "包括正常玩法拿不到的**小孩**（小精灵/小毛头/小魔头/小仙灵/"
-            "小仙女/小丫丫 —— 这几个在游戏数据里属于 `神兽资质3` 池，"
-            "**没有任何道具的开蛋池包含它们**）。"
-            % len(self.baby_rows))
+            ("匹配 %d / 共 %d 只" % (n_hit, len(self.baby_rows)) if kw
+             else "共 %d 只" % len(self.baby_rows))
+            + "（★ = 当前出战）；「新增召唤兽」可加任意一种，含正常玩法"
+              "拿不到的小孩（小精灵～小丫丫，属「神兽资质3」池，"
+              "只有「珍藏神兽蛋」能开出 179~186）。")
         kids = self.tv_babies.get_children()
         if kids:
             self.tv_babies.selection_set(kids[0])
@@ -1961,7 +2876,7 @@ class App(object):
             if key == "level":
                 # ⚠ 等级不再单独改（2026-09-20 川要求去掉所有页签的等级修改）。
                 # 字段还在 BABY_FIELDS 里（set_baby / baby_value 还要用），
-                # 只是不进这张「可改字段」表；等级去左边「经验拉满」一起写。
+                # 只是不进这张「可改字段」表；等级去左边「一键满级」一起写。
                 continue
             v = self.g.baby_value(b, key)
             if key == "life":
@@ -1972,24 +2887,21 @@ class App(object):
         tpl_id = _IV.ival(b, "@actor_id")
         idx = [k for k, x in self.baby_rows if x is b]
         meta = self._skills_meta()
-        for n, sid in enumerate(bd.skills(b), 1):
-            nm, desc = meta.get(sid, ("?", ""))
-            self.tv_baby_skills.insert("", "end", iid="sk%d" % sid,
-                                       values=(n, sid, nm))
-        self.skp_baby.show_desc()
+        self.skp_baby.set_source([(sid, meta.get(sid, ("?", ""))[0])
+                                  for sid in bd.skills(b)])
         self.var_baby_name.set(bd.display_name(b))
         self.skp_baby.fill()
         self.txt_baby.insert("1.0", "\n".join([
             "第 %d 只：%s（模板 %s #%d，%s）　等级 %s / 忠诚 %s / 寿命 %s / 成长 %s"
             % (idx[0] if idx else -1, bd.display_name(b), bd.template_name(b),
-               tpl_id, "神兽" if bd.is_god(tpl_id) else "普通",
+               tpl_id, bd.type_of(tpl_id) or "普通",
                self.g.baby_value(b, "level"), self.g.baby_value(b, "loyalty"),
                self._life_text(self.g.baby_value(b, "life")),
                self.g.baby_value(b, "grow")),
             "已学技能：%s" % ("、".join("#%d %s" % (i, n) for i, n in sk) or "（无）"),
-            "提示：游戏的周期检查只看「当前出战那只」的等级（>65 算作弊）；"
-            "五维总点数也有上限（等级×10+500）。改完记得 Ctrl+S。",
-            "等级不再单独改：用上面「经验拉满」（等级给到 65 + 经验对齐），"
+            "提示：内测版（V2.201）没有周期检查、也没有作弊标记，改数值不会被判作弊；"
+            "召唤兽等级上限 165、五维参考上限＝等级×10+500。改完记得 Ctrl+S。",
+            "等级不再单独改：用上面「一键满级」（等级给到 165 + 经验对齐），"
             "已学会的技能见「技能」区。",
         ]))
         kids = self.tv_baby.get_children()
@@ -2005,15 +2917,21 @@ class App(object):
     def _skills_meta(self):
         """{技能 id: (名字, 描述)}（Data\\Skills 表，带缓存）。
 
-        走 `datatables.desc_map()`：读不到游戏目录会退回**内置名字表**，
-        所以技能一览 / 说明框在"没放在游戏目录里"的机器上照样有内容。
+        走 `datatables.skill_map()`：说明＝官方说明（解 `<S:N>`）**＋游戏浮窗
+        里那几行**（状态详情 / 伤害 / 恢复量 / 目标数 / 攻击次数 / 消耗 / 冷却）
+        —— 2026-10-04 川要「把附加的描述、耗蓝耗血补上」。
+        读不到游戏目录会退回内置名字表，所以技能一览 / 说明框在"没放在游戏
+        目录里"的机器上照样有内容（只是少那几行附加信息）。
+
+        ⚠ 保留作者写的换行（原来把换行压成空格）：附加行本来就是一行一条，
+          压掉就看不清哪行是哪条了。字面 `\n` / `\r\n` 的归一到
+          `datatables.clean_desc()` 里统一做，这儿别再重复一遍。
         """
         if getattr(self, "_skill_meta", None) is None:
             meta = {}
             try:
-                for i, (nm, desc) in datatables.desc_map("Skills").items():
-                    desc = (desc or "").replace("\\n", " ").replace("\n", " ").strip()
-                    meta[i] = (nm or "", desc)
+                for i, (nm, desc) in datatables.skill_map().items():
+                    meta[i] = (nm or "", (desc or "").strip())
             except Exception:
                 meta = {}
             self._skill_meta = meta
@@ -2025,53 +2943,64 @@ class App(object):
     def _build_skill_editor(self, parent, key, list_height=7, desc_height=3):
         """在 parent 里建一整块技能编辑控件，返回 SkillPicker。
 
-        搜索框 + 只读下拉 + 四个按钮（学会/忘掉/清空/从…克隆）+ 技能一览 + 说明框。
-        2026-09-20 抽出来的：**角色页和召唤兽页共用这一套**（两边规则一模一样），
-        以前这些控件和逻辑都只写在召唤兽页里。
+        搜索框 + 一排按钮（技能管理… / 忘掉选中 / 清空 / 从…克隆）+ 技能一览
+        + 说明框。2026-09-20 抽出来的：**角色页和召唤兽页共用这一套**（两边
+        规则一模一样），以前这些控件和逻辑都只写在召唤兽页里。
 
-        ⚠ 这里列的是**全部技能**（几百个，不筛）。角色页的「门派」下拉在左栏
-          「门派技能」区块里，只管那份勾选清单，不动这里（2026-09-20 川反馈：
-          两处都按门派筛等于重复）。
+        ⚠ 一览只列这个目标**已学**的技能（存档 `@skills` 顺序），搜索也只筛
+          这一份。要学新技能、要批量操作，走「技能管理…」那个窗口。
+          2026-10-04 之前这里还挂着一个"全部技能"只读下拉 + 「学会」按钮：
+          下拉是另一个入口，搜索也只筛它、筛不到一览，两块语义混在一起。
 
         建的控件按 key 挂到 self 上（测试和别处引用用得上）：
-          `tv_<key>_skills` / `cb_<key>_skill` / `var_<key>_skill_search` /
-          `var_<key>_skill_pick` / `txt_<key>_skill_desc` / `skp_<key>`
-        四个按钮分别调 `<key>_skill_add` / `_del` / `_clear` / `_clone`。
+          `tv_<key>_skills` / `var_<key>_skill_search` /
+          `txt_<key>_skill_desc` / `skp_<key>`
+        （`cb_<key>_skill` / `var_<key>_skill_pick` 随下拉一起去掉了。）
+        四个按钮分别调 `<key>_skill_manager` / `_del` / `_clear` / `_clone`。
         """
         tk, ttk = self.tk, self.ttk
         row = ttk.Frame(parent)
         row.pack(fill="x")
-        ttk.Label(row, text="搜索").pack(side="left")
+        ttk.Label(row, text="搜索已学").pack(side="left")
         var_search = tk.StringVar()
-        ent = ttk.Entry(row, textvariable=var_search, width=8)
+        ent = ttk.Entry(row, textvariable=var_search, width=14)
         ent.pack(side="left", padx=3)
-        var_pick = tk.StringVar()
-        cb = ttk.Combobox(row, textvariable=var_pick, state="readonly", width=18)
-        cb.pack(side="left")
+        self._bind_tip(ent, "只筛下面这份「已学」技能一览。\n"
+                            "要搜全部技能（几千条里的任意一条）\n"
+                            "用「技能管理…」。")
 
-        # 学会那一排单独放一行（挤在搜索后面会把下拉框压没）
+        # 按钮单独放一行（挤在搜索后面会把搜索框压没）
         btns = ttk.Frame(parent)
         btns.pack(fill="x", pady=(4, 0))
-        ttk.Button(btns, text="学会",
-                   command=getattr(self, "%s_skill_add" % key)
-                   ).pack(side="left", padx=(0, 4))
-        ttk.Button(btns, text="忘掉",
-                   command=getattr(self, "%s_skill_del" % key)).pack(side="left")
-        ttk.Button(btns, text="清空",
-                   command=getattr(self, "%s_skill_clear" % key)
-                   ).pack(side="left", padx=4)
-        ttk.Button(btns, text="从…克隆",
-                   command=getattr(self, "%s_skill_clone" % key)).pack(side="left")
+        b_mgr = fit_btn(btns, text="技能管理…",
+                        command=getattr(self, "%s_skill_manager" % key))
+        b_mgr.pack(side="left", padx=(0, 4))
+        self._bind_tip(b_mgr, "开一个技能管理器窗口：\n"
+                              "能搜全部技能、Ctrl/Shift 多选，\n"
+                              "有全选 / 反选 / 全不选，批量学会或忘掉。")
+        b_del = fit_btn(btns, text="忘掉选中",
+                        command=getattr(self, "%s_skill_del" % key))
+        b_del.pack(side="left")
+        self._bind_tip(b_del, "忘掉一览里选中的技能\n"
+                              "（Ctrl 点选、Shift 连选，可一次忘一批）。")
+        b_clr = fit_btn(btns, text="清空",
+                        command=getattr(self, "%s_skill_clear" % key))
+        b_clr.pack(side="left", padx=4)
+        b_clone = fit_btn(btns, text="从…克隆",
+                          command=getattr(self, "%s_skill_clone" % key))
+        b_clone.pack(side="left")
 
         # 技能一览只放 id + 名字，说明另外显示（描述太长塞进表格会看不全）
         body = ttk.Frame(parent)        # 先建、后 pack（pack 顺序见下面说明）
+        # ⚠ selectmode="extended"（2026-10-04）：Ctrl / Shift 多选，
+        #   「忘掉选中」一次一批。原来 browse 是单选，一次只能忘一个。
         tree = ttk.Treeview(body, columns=("no", "id", "name"), show="headings",
-                            height=list_height, selectmode="browse")
-        # 总宽保持 262px（原 62+200）："名字" 让 30px 给新增的序号列，
+                            height=list_height, selectmode="extended")
+        # 总宽保持 262px（原 62+200）："名字" 让 30px 给序号列，
         # 免得把角色页/召唤兽页的宽度需求顶上去（那两页以前就因为太宽被裁过）。
-        for c, t, w in (("no", "序", 34), ("id", "技能 id", 58),
-                        ("name", "名字", 170)):
-            tree.heading(c, text=t)
+        for c, t2, w in (("no", "序", 34), ("id", "技能 id", 58),
+                         ("name", "名字", 170)):
+            tree.heading(c, text=t2)
             tree.column(c, width=w, anchor="center" if c == "no" else "w",
                         stretch=True)
         vs = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
@@ -2095,20 +3024,13 @@ class App(object):
         body.pack(fill="both", expand=True, pady=(6, 0))
 
         setattr(self, "var_%s_skill_search" % key, var_search)
-        setattr(self, "var_%s_skill_pick" % key, var_pick)
-        setattr(self, "cb_%s_skill" % key, cb)
         setattr(self, "tv_%s_skills" % key, tree)
         setattr(self, "txt_%s_skill_desc" % key, desc)
 
-        skp = SkillPicker(self, key, tree, cb, var_search, var_pick, desc)
+        skp = SkillPicker(self, key, tree, var_search, desc)
         setattr(self, "skp_%s" % key, skp)
 
         ent.bind("<KeyRelease>", lambda e: skp.fill())
-        cb.bind("<<ComboboxSelected>>", lambda e: skp.show_desc())
-        cb.bind("<Down>", lambda e: skp.arrow(1))
-        cb.bind("<Up>", lambda e: skp.arrow(-1))
-        # 下拉展开时给内部 listbox 绑悬停浮窗（-postcommand 在弹出前触发）
-        cb.configure(postcommand=lambda: skp.on_post())
         tree.bind("<<TreeviewSelect>>", lambda e: skp.show_desc())
         # 鼠标放技能行 / 说明框上都弹浮窗（说明太长时窗口里看不全）
         tree.bind("<Motion>", skp.row_tip)
@@ -2117,43 +3039,34 @@ class App(object):
         desc.bind("<Leave>", lambda e: self._tip_hide())
         return skp
 
-    def baby_skill_add(self):
+    def baby_skill_del(self):
+        """忘掉技能一览里选中的技能（可多选，一次一批）。"""
         b = self._baby()
-        sid = self.skp_baby.pick_id()
-        if b is None or sid is None:
-            messagebox.showinfo("提示", "先在列表里选一只召唤兽、再选一个技能。",
+        sids = self.skp_baby.sel_ids()
+        if b is None or not sids:
+            messagebox.showinfo("提示", "先在技能一览里选要忘掉的技能"
+                                        "（Ctrl / Shift 可多选）。",
                                 parent=self.root)
             return
         try:
-            self.babies_ed().learn(b, sid)
+            drop, missing = self.babies_ed().forget_many(b, sids)
         except Exception as e:
             messagebox.showerror("改不了", zh_error(e), parent=self.root)
             return
-        self.mark_dirty()
-        self.load_baby()
-        self.refresh_baby_list_keep(b)
-        # 2026-09-20 解除 12 上限后：技能可以超过 12，但游戏面板是按 4 列网格画的，
-        # 到底能不能在战斗里正常使出来只有实机知道 —— 超了就提示一声。
-        _n = len(self.babies_ed().skills(b))
-        _over = ("　⚠ 现在 %d 个，超过游戏「升级学技能」的 %d 上限"
-                 "（读取端没限制，实战待验证）"
-                 % (_n, babies.GAME_LEARN_LIMIT)) \
-            if _n > babies.GAME_LEARN_LIMIT else ""
-        self.set_status("已学会技能 #%d（共 %d 个）%s" % (sid, _n, _over))
-
-    def baby_skill_del(self):
-        b = self._baby()
-        sel = self.tv_baby_skills.selection()
-        if b is None or not sel:
-            messagebox.showinfo("提示", "先在技能列表里选一个要忘掉的技能。",
-                                parent=self.root)
+        if not drop:
+            self.set_status("选中的 %d 个技能本来就没学" % len(sids))
             return
-        sid = int(sel[0][2:])
-        self.babies_ed().forget(b, sid)
         self.mark_dirty()
         self.load_baby()
         self.refresh_baby_list_keep(b)
-        self.set_status("已忘掉技能 #%d" % sid)
+        msg = "已忘掉 %d 个技能" % len(drop)
+        if missing:
+            msg += "（%d 个本来就没学，跳过）" % len(missing)
+        self.set_status(msg)
+
+    def baby_skill_manager(self):
+        """打开召唤兽技能管理器窗口。"""
+        return self.open_skill_manager("baby")
 
     def baby_skill_clear(self):
         b = self._baby()
@@ -2279,9 +3192,12 @@ class App(object):
         tv.bind("<Double-1>", do_clone)
         bf = ttk.Frame(f)
         bf.pack(fill="x")
-        ttk.Button(bf, text="克隆给「%s」" % bd.display_name(b),
+        fit_btn(bf, text="克隆给「%s」" % bd.display_name(b),
                    command=do_clone).pack(side="right", padx=4)
-        ttk.Button(bf, text="取消", command=win.destroy).pack(side="right")
+        fit_btn(bf, text="取消", command=win.destroy).pack(side="right")
+        esc_close(win)
+        ent.focus_set()                 # 焦点给搜索框（在 esc_close 之后才优先）
+        center_win(win, self.root)
 
     def baby_add_dialog(self):
         """新增召唤兽：列出全部可选项（含小孩），挑一个加给当前角色。"""
@@ -2305,8 +3221,11 @@ class App(object):
         ent = ttk.Entry(bar, textvariable=var_kw, width=18)
         ent.pack(side="left", padx=4)
         var_god = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="只看神兽（含小孩）",
-                        variable=var_god).pack(side="left", padx=6)
+        cb_god = ttk.Checkbutton(bar, text="神兽", variable=var_god)
+        cb_god.pack(side="left", padx=6)
+        # 标签缩短（原来"只看神兽（含小孩）"太长），含义挂 tooltip 里
+        self._bind_tip(cb_god, "只看神兽档。\n"
+                               "含小孩和泡泡灵仙（两类的资质都是定值，不带随机）。")
         var_mut = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="变异（普通召唤兽资质区间 ×0.66）",
                         variable=var_mut).pack(side="left", padx=6)
@@ -2329,8 +3248,9 @@ class App(object):
         cols = ("id", "name", "type", "pool", "lv", "zi", "grow", "life")
         heads = ("id", "名字", "类型", "备注池", "携带等级", "六项资质", "成长", "寿命")
         widths = (46, 116, 50, 90, 60, 230, 50, 60)
+        # 2026-10-03 川：可多选（Ctrl 点选 / Shift 连选）→ 一次加一批
         tv = ttk.Treeview(f, columns=cols, show="headings", height=16,
-                          selectmode="browse")
+                          selectmode="extended")
         for c, h, w in zip(cols, heads, widths):
             tv.heading(c, text=h)
             tv.column(c, width=w, anchor="w")
@@ -2350,7 +3270,7 @@ class App(object):
             kw = var_kw.get().strip()
             rows = []
             for c in all_c:
-                if var_god.get() and c["type"] != "神兽":
+                if var_god.get() and c["type"] not in bd.GOD_TYPES:
                     continue
                 if kw and kw not in c["name"] and kw != str(c["id"]) \
                         and kw not in c["pool"]:
@@ -2365,12 +3285,11 @@ class App(object):
                                                          c["mp"], c["agi"], c["eva"]),
                                   c["grow"], life))
             n_est = sum(1 for c in rows if c.get("inferred"))
-            info.set("共 %d 种可选。神兽（含小孩）资质取定值；"
+            info.set("共 %d 种可选。神兽 / 小孩 / 泡泡灵仙资质取定值；"
                      "普通召唤兽资质带随机（勾了“变异”则区间 ×0.66）。"
                      "%s" % (len(rows),
-                             ("\n⚠ 其中 %d 种的资质是**按 id 区间估算**的"
-                              "（内测版的 $baby 表运行时才生成、静态取不到，"
-                              "所以这几项数值不是游戏真值，用后可在召唤兽页手动修正）。"
+                             ("\n⚠ 其中 %d 种的资质不在表里（按 id 区间估了个量级），"
+                              "加出来后可到召唤兽页手动修正。"
                               % n_est) if n_est else ""))
             self._add_rows = rows
             kids = tv.get_children()
@@ -2391,14 +3310,19 @@ class App(object):
             sel = tv.selection()
             if not sel:
                 return
-            cid = int(sel[0][1:])
             # 五行选「随机」→ 传 None（build 里按游戏原样 rnd.choice）
             five = var_five.get().strip()
-            try:
-                self.babies_ed().add(a, cid, mutation=bool(var_mut.get()),
-                                     five=None if five == "随机" else five)
-            except Exception as e:
-                messagebox.showerror("加不了", zh_error(e), parent=self.root)
+            ok, bad = [], []
+            for iid in sel:                 # 多选：挨个加，坏的跳过不中断
+                cid = int(iid[1:])
+                try:
+                    self.babies_ed().add(a, cid, mutation=bool(var_mut.get()),
+                                         five=None if five == "随机" else five)
+                    ok.append(cid)
+                except Exception as e:
+                    bad.append((cid, zh_error(e)))
+            if not ok:
+                messagebox.showerror("加不了", bad[0][1], parent=self.root)
                 return
             self.mark_dirty()
             win.destroy()
@@ -2407,21 +3331,27 @@ class App(object):
             if kids:
                 self.tv_babies.selection_set(kids[-1])
                 self.on_baby_select()
-            self.set_status("已新增召唤兽：%s（id=%d）" % (bd.name_of(cid), cid))
+            msg = "已新增召唤兽：%s（id=%d）" % (bd.name_of(ok[0]), ok[0]) \
+                if len(ok) == 1 else "已新增 %d 只召唤兽" % len(ok)
+            if bad:
+                msg += "；%d 只加不了（%s）" % (len(bad), bad[0][1])
+            self.set_status(msg)
 
-        ttk.Button(btns, text="加这只", command=do_add).pack(side="left")
-        ttk.Button(btns, text="取消", command=win.destroy).pack(side="left", padx=6)
+        btn_add = fit_btn(btns, text="加这只", command=do_add)
+        btn_add.pack(side="left")
+        fit_btn(btns, text="取消", command=win.destroy).pack(side="left", padx=6)
 
-        # 让窗口在主窗口上居中（不然会跑到屏幕左上角）
-        w_ = win
-        w_.update_idletasks()
-        pw, ph = self.root.winfo_width(), self.root.winfo_height()
-        px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
-        ww, wh = w_.winfo_width(), w_.winfo_height()
-        if pw > 1 and ph > 1:
-            w_.geometry("+%d+%d" % (max(0, px + (pw - ww) // 2),
-                                    max(0, py + (ph - wh) // 3)))
-        self.set_status("新增召唤兽：选一只 → 「加这只」")
+        def _sync_sel(*_a):
+            """按钮文字跟着选中数量走（列表可多选）。"""
+            n = len(tv.selection())
+            refit_btn(btn_add, "加这只" if n <= 1 else "加选中的 %d 只" % n)
+
+        tv.bind("<<TreeviewSelect>>", _sync_sel)
+
+        esc_close(win)
+        ent.focus_set()
+        center_win(win, self.root)      # 在主窗口上居中（不然跑到屏幕左上角）
+        self.set_status("新增召唤兽：选一只 → 「加这只」（Ctrl / Shift 可多选）")
 
     def _quick_add(self, actor, cid):
         try:
@@ -2439,25 +3369,57 @@ class App(object):
                         % (self.babies_ed().name_of(cid), cid))
 
     def baby_delete(self):
-        b = self._baby()
-        if b is None:
-            messagebox.showinfo("提示", "先在列表里选一只召唤兽。", parent=self.root)
+        """放生（删除）—— 支持 Ctrl / Shift 多选，一次删一批。
+
+        ⚠ 多选删除必须**按索引从大到小**删：`Babies.remove` 内部是
+          `arr.items.pop(index)`，先删小索引会让后面所有索引一起前移，
+          接着按原索引删就会删错对象（2026-10-04 加多选时踩过）。
+        ⚠ 删掉的正好是「出战」那只时，`remove` 自己会把 `@baby` 挪到剩下
+          的第一只（见 babies.remove），这里不用再管。
+        """
+        rows = []
+        for iid in self.tv_babies.selection():
+            try:
+                i = int(iid[2:])
+            except ValueError:
+                continue
+            for k, b in self.baby_rows:
+                if k == i:
+                    rows.append((i, b))
+                    break
+        if not rows:
+            messagebox.showinfo("提示", "先在列表里选一只召唤兽"
+                                        "（Ctrl 点选 / Shift 连选，可一次放生多只）。",
+                                parent=self.root)
             return
-        idx = [k for k, x in self.baby_rows if x is b][0]
-        name = self.g.baby_name(b)
-        if not self.confirm("放生（删除）",
-                            "把「%s」从这只角色身上删掉？（不可撤销）\n\n"
-                            "游戏里相当于放生：数据没了，想找回来只能重新加一只。"
-                            % name):
+        names = [self.g.baby_name(b) for _i, b in rows]
+        if len(rows) == 1:
+            tip = ("把「%s」从这只角色身上删掉？（不可撤销）\n\n"
+                   "游戏里相当于放生：数据没了，想找回来只能重新加一只。"
+                   % names[0])
+        else:
+            shown = "、".join(names[:8]) + ("…" if len(names) > 8 else "")
+            tip = ("把这 %d 只召唤兽从这只角色身上删掉？（不可撤销）\n"
+                   "%s\n\n"
+                   "游戏里相当于放生：数据没了，想找回来只能重新加一只。"
+                   % (len(rows), shown))
+        if not self.confirm("放生（删除）", tip):
             return
-        try:
-            self.babies_ed().remove(self._baby_actor(), idx)
-        except Exception as e:
-            messagebox.showerror("删不了", zh_error(e), parent=self.root)
+        actor = self._baby_actor()
+        n = 0
+        for i, _b in sorted(rows, key=lambda r: -r[0]):
+            try:
+                self.babies_ed().remove(actor, i)
+                n += 1
+            except Exception as e:
+                messagebox.showerror("删不了", zh_error(e), parent=self.root)
+                break
+        if not n:
             return
         self.mark_dirty()
         self.fill_baby_list()
-        self.set_status("已放生：%s" % name)
+        self.set_status("已放生：%s" % names[0] if n == 1
+                        else "已放生 %d 只（%s）" % (n, "、".join(names[:5])))
 
     def baby_set_active(self):
         b = self._baby()
@@ -2551,8 +3513,11 @@ class App(object):
         self.set_status("召唤兽「%s」的 %s 已改" % (self.g.baby_name(b), label))
 
     def baby_preset(self, what):
+        if what == "state_all":
+            # 「全员状态拉满」不依赖「当前选中哪一只」→ 走专用路径，见下
+            return self.baby_state_all()
         if what == "loyalty_all":
-            # 「全员忠诚满」不依赖「当前选中哪一只」→ 走专用路径，见下
+            # 老按钮「全员忠诚满」已并入「全员状态拉满」；留这条只为兼容旧调用
             return self.baby_loyalty_all()
         b = self._baby()
         if b is None or self.g is None:
@@ -2596,6 +3561,37 @@ class App(object):
         if keep is not None:
             self.refresh_baby_list_keep(keep)
         self.set_status("全员忠诚满：改了 %d 只（%d 个角色）" % (n, na))
+
+    def baby_state_all(self):
+        """「全员状态拉满」（2026-10-03 川要求，合并老两个按钮）：
+        **所有角色**身上的**所有召唤兽** —— 气血/魔法/愤怒 回满 + 忠诚拉满。
+
+        老按钮是「回满气血/魔法」（只动当前选中那只）+「全员忠诚满」，
+        合并后语义 = 两者并集。一次全改没有副作用：忠诚只有「<60 不能参战」
+        一个作用、没有属性加成，内测版 V2.201 也没有周期检查（详见
+        `game.GameEditor.set_state_all`）。
+
+        ⚠ 刷新一览表时必须**记住当前选中**再恢复：`refresh_panels()` 走
+        `fill_babies` → `fill_baby_list`，会把一览表选中重置回第一行
+        （2026-09-27 踩过，同 `baby_loyalty_all`）。
+        """
+        if self.g is None:
+            return
+        try:
+            n, na, nl = self.g.set_state_all()
+        except Exception as e:
+            messagebox.showerror("修改失败", human(str(e)), parent=self.root)
+            return
+        if not n:
+            self.set_status("全员状态拉满：所有召唤兽都已经是上限，无需改动")
+            return
+        self.mark_dirty()
+        keep = self._baby()
+        self.refresh_panels()
+        if keep is not None:
+            self.refresh_baby_list_keep(keep)
+        self.set_status("全员状态拉满：改了 %d 只（%d 个角色，其中忠诚 %d 只）"
+                        % (n, na, nl))
 
     # -------------------------------------------------- 5 开关 / 变量（已隐藏页签）
     def _tab_switch(self, add_to_notebook=True):
@@ -2651,11 +3647,11 @@ class App(object):
         bar.pack(fill="x")
         ttk.Label(bar, text="Data\\*.rvdata2 都是加密的（密钥 761205），"
                             "本工具解密后可直接转 CSV：").pack(side="left")
-        ttk.Button(bar, text="全部导出",
+        fit_btn(bar, text="全部导出",
                    command=self.db_export_all).pack(side="right", padx=4)
-        ttk.Button(bar, text="导出选中表",
+        fit_btn(bar, text="导出选中表",
                    command=self.db_export_selected).pack(side="right", padx=4)
-        ttk.Button(bar, text="选输出目录…",
+        fit_btn(bar, text="选输出目录…",
                    command=self.db_choose_dir).pack(side="right", padx=4)
 
         body = ttk.Panedwindow(f, orient="horizontal")
@@ -3082,14 +4078,34 @@ class App(object):
             % (p, ("存档管理里也留了一份：%s" % os.path.basename(auto))
                if auto else "原文件已备份为 %s.bak.<时间>" % os.path.basename(p)),
             parent=self.root)
-        self.set_status("已保存")
+        self.set_status("已保存" + self._machine_note_after_save())
+
+    def _machine_note_after_save(self):
+        """保存后在状态栏缀一句机器码提醒 —— **只提示，绝不代写**。
+
+        本机机器码不在存档里时，游戏在本机启动会弹「存档异常」；但那是
+        「换机器玩」的正常状态，工具不替用户改（2026-10-04 川：把机器码换成
+        别的一保存又被塞回本机码）。走 `machine_status()`，机器码在进程内
+        有缓存，这里不会再起一次 exe。
+        """
+        try:
+            now, err, ids, ok = self.g.machine_status()
+        except Exception:
+            return ""
+        if now and not ok:
+            return ("　机器码：本机 %s 不在存档里（工具没动它；"
+                    "要加去「机器码」页）" % now)
+        return ""
 
     def _pre_save_guard(self):
         """存盘前体检：有超限项 / 作弊标记就说清楚，并问要不要顺手修好。
 
-        为什么必须提醒：游戏的周期检查一旦把 `@cheated` 记下来，20 分钟后就会
-        开始“惩罚”（脚本 29485-29495 行：画面转圈、缩放），而那段代码在**战斗中**
-        会去碰已经 dispose 的 `$game_player.sprite` → `RGSSError: disposed sprite`。
+        为什么必须提醒（**尝鲜版**口径）：周期检查一旦把 `@cheated` 记下来，
+        20 分钟后就会开始“惩罚”（脚本 29485-29495 行：画面转圈、缩放），
+        那段代码在**战斗中**会去碰已经 dispose 的 `$game_player.sprite`
+        → `RGSSError: disposed sprite`。⚠ 内测版 V2.201 没有周期检查 /
+        @cheated —— 在这里只剩「上限提示」的意义（超了游戏也不正常），
+        不会再说「会被判作弊」。
         """
         if not self.g:
             return True
@@ -3234,7 +4250,7 @@ class App(object):
                           (self.var_battlecnt, "@battle_count")):
             v = self.sv.sys_get(name)
             var.set("" if v is None else str(v))
-        # 祈福池 4 个储备量回填
+        # 祈福池 4 个储备量回填（2026-10-04 加回控件）
         if hasattr(self, "var_bless") and self.g:
             for key, _cn, val in self.g.blessing_rows():
                 self.var_bless[key].set(str(val))
@@ -3282,9 +4298,9 @@ class App(object):
             if self.var_battlecnt.get().strip():
                 self.sv.sys_set("@battle_count",
                                 parse_num(self.var_battlecnt.get()))
-            # 祈福池储备（4 个值共享同一个「应用」按钮）
+            # 祈福池储备（4 个值共用同一个「应用」按钮）
             if self.g and hasattr(self, "var_bless"):
-                for key, _cn, old in self.g.blessing_rows():
+                for key, _cn, _old in self.g.blessing_rows():
                     raw = self.var_bless[key].get().strip()
                     if raw:
                         self.g.set_blessing(key, parse_num(raw))
@@ -3305,11 +4321,11 @@ class App(object):
 
         检查/修复范围：
           ① Lock 校验和（金钱等数值的 @master）；
-          ② $jiance 周期规则（金钱≤3000万，超限压到 2500 万；等级/召唤兽/
+          ② 上限规则（金钱超过 MAX_GOLD 压到 5/6；等级/召唤兽/
              仓库页/五维）；
           ③ 五类 Change 记账（金钱/物品/变量/人气/贡献）对齐实际值；
           ④ @cheated 置回 Ruby false、@keyword 清空（VNE/NE!/修改器关键字）；
-          ⑤ 机器码绑定（换机器时追加本机码）。
+          ⑤ 机器码绑定（**只提示，不动手** —— 改机器码去「机器码」页）。
         """
         if not self.g:
             return
@@ -3511,7 +4527,7 @@ class App(object):
             self.refresh_panels()
         messagebox.showinfo("清理所有存档",
                             "已修好 %d 个存档（各自备份在 .huaji2-save-editor）。\n\n"
-                            "如果游戏里已经弹过「存档异常」，请把游戏**整个关掉再重开**；"
+                            "如果游戏里已经弹过「存档异常」，请把游戏「整个关掉再重开」；"
                             "读档后就不会再被惩罚了。" % n, parent=self.root)
 
     def warn_cheat_after_load(self, quiet=False):
@@ -3816,7 +4832,7 @@ class App(object):
             if k == "#next_exp":
                 v = self.g.next_level_exp(a)      # 查表：升级经验
             elif k == "#level":
-                v = self.g.actor_level(a)         # 只读展示（改等级走「经验拉满」）
+                v = self.g.actor_level(a)         # 只读展示（改等级走「一键满级」）
             elif k == "@exp":
                 v = self.g.exp(a)
             else:
@@ -3905,7 +4921,7 @@ class App(object):
         if lv >= game.MAX_LEVEL_ACTOR:
             P.append("⚠ 已满级：游戏对满级角色直接不发经验，")
             P.append("  改「获得经验」在游戏里看不出任何变化。")
-            P.append("  等级已被写满，「经验拉满」对这个角色是空操作。")
+            P.append("  「经验拉满」「一键满级」对这个角色都是空操作。")
         elif gate:
             P.append("⚠ 累计获得经验 %d 已超过 %d：" % (lim, self.g.LIMIT_EXP_MAX))
             P.append("  游戏判定「经验累计获得已达上限」，")
@@ -3922,7 +4938,8 @@ class App(object):
         P.append("")
         P.append("提示：「获得经验」光改游戏里不会升级 ——")
         P.append("人物只能在地图界面点「升级」按钮（一次一级）。")
-        P.append("要满级用左边的「经验拉满」，它会连着等级一起写。")
+        P.append("想自己点升级用「经验拉满」（只给经验）；要直接满级用")
+        P.append("「一键满级」（连着等级一起写）。")
         return "\n".join(P)
 
     def _actor_tip_motion(self, event):
@@ -3944,7 +4961,7 @@ class App(object):
             return
         try:
             # ⚠ 2026-09-20：**「级别」输入框已去掉**，这里不再处理等级
-            # （等级只有「经验拉满」会连带写，见 actor_preset / game.actor_exp_full）。
+            # （等级只有「一键满级」会连带写，见 actor_preset / game.actor_exp_full）。
             for k, var in self.actor_vars.items():
                 if k.startswith("#"):
                     continue      # 只读项（「升级经验」是查表算的）
@@ -4005,10 +5022,15 @@ class App(object):
         note = ""
         try:
             if what == "expfull":
-                # 等级顶到满级 + 获得经验对齐满级门槛（一步到位，理由见
-                # game.actor_exp_full：人物不会因经验多而自动升级）
+                # 「一键满级」：等级顶到满级 + 获得经验对齐满级门槛（一步到位，
+                # 理由见 game.actor_exp_full：人物不会因经验多而自动升级）
                 lv, wrote = self.g.actor_exp_full(a)
                 note = "等级→%d、获得经验→%s" % (lv, wrote)
+            elif what == "expfill":
+                # 「经验拉满」：只写经验、**等级不动** —— 回游戏自己点升级
+                wrote = self.g.actor_exp_fill(a)
+                note = ("获得经验→%s（等级没动，回游戏自己点「升级」）"
+                        % wrote)
             elif what == "heal":
                 for k, v in (("@hp", 9999), ("@mp", 9999), ("@tp", 100)):
                     if self.sv.actor_field(a, k) is not None:
@@ -4071,14 +5093,14 @@ class App(object):
             var_sect.set(label)
         if a is None or self.g is None:
             if hasattr(self, "skp_actor"):
-                self.skp_actor.set_desc("")
+                self.skp_actor.set_source([])
+                self.skp_actor.fill()
             if grid:
                 self.rebuild_learn_grid()   # 没角色 → 左栏清单也清掉
             return
         meta = self._skills_meta()
-        for n, sid in enumerate(self.g.actor_skills(a), 1):
-            nm, _d = meta.get(sid, ("?", ""))
-            tree.insert("", "end", iid="sk%d" % sid, values=(n, sid, nm))
+        self.skp_actor.set_source([(sid, meta.get(sid, ("?", ""))[0])
+                                   for sid in self.g.actor_skills(a)])
         self.skp_actor.fill()
         # 左栏「门派技能」清单跟着刷（勾选状态 = 存档真值）
         if grid:
@@ -4152,6 +5174,65 @@ class App(object):
                            % (s, nm, dsc or "（没有说明）"))
         grid.columnconfigure(0, weight=1, uniform="lrn")
         grid.columnconfigure(1, weight=1, uniform="lrn")
+
+    def actor_sect_invert(self):
+        """门派技能清单「反选」：已学的忘掉、没学的学会（各写一次）。"""
+        a = self.current_actor()
+        if a is None or self.g is None or not self._learn_sids:
+            messagebox.showinfo("提示", "左栏没有门派技能清单。\n"
+                                        "先在「门派技能」里选一个门派。",
+                                parent=self.root)
+            return
+        have = set(self.g.actor_skills(a))
+        will_learn = [s for s in self._learn_sids if s not in have]
+        will_forget = [s for s in self._learn_sids if s in have]
+        if not will_learn and not will_forget:
+            return
+        if will_forget and not self.confirm(
+                "反选门派技能",
+                "反选「%s」的技能：\n学会 %d 个、忘掉 %d 个？"
+                % (self.var_actor_sect.get(), len(will_learn),
+                   len(will_forget))):
+            return
+        try:
+            if will_forget:
+                self.g.actor_forget_many(a, will_forget)
+            if will_learn:
+                self.g.actor_learn_many(a, will_learn)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        self.load_actor_skills(a)       # grid=True → 清单按新真值重建
+        self.set_status("反选完成：学会 %d 个、忘掉 %d 个（记得点「保存修改」）"
+                        % (len(will_learn), len(will_forget)))
+
+    def actor_sect_none(self):
+        """门派技能清单「全不选」：把本门派的技能全部忘掉。"""
+        a = self.current_actor()
+        if a is None or self.g is None or not self._learn_sids:
+            messagebox.showinfo("提示", "左栏没有门派技能清单。\n"
+                                        "先在「门派技能」里选一个门派。",
+                                parent=self.root)
+            return
+        have = set(self.g.actor_skills(a))
+        drop = [s for s in self._learn_sids if s in have]
+        if not drop:
+            self.set_status("本门派技能现在一个都没学")
+            return
+        if not self.confirm("忘掉门派技能",
+                            "忘掉「%s」的技能 %d 个？"
+                            % (self.var_actor_sect.get(), len(drop))):
+            return
+        try:
+            self.g.actor_forget_many(a, drop)
+        except Exception as e:
+            messagebox.showerror("改不了", zh_error(e), parent=self.root)
+            return
+        self.mark_dirty()
+        self.load_actor_skills(a)
+        self.set_status("已忘掉本门派技能 %d 个（记得点「保存修改」）"
+                        % len(drop))
 
     def actor_toggle_sect_skill(self, sid):
         """门派技能勾选框：勾上＝学会，取消＝忘掉（立刻写 `@skills` + 标 dirty）。
@@ -4291,7 +5372,7 @@ class App(object):
                      % self.sv.actor_name(a),
                      "",
                      "· 只改存档里的门派本身（@sect_id）",
-                     "· **技能一个不动**（原来是「%s」的技能会留着）" % old_nm,
+                     "· 技能一个不动（原来是「%s」的技能会留着）" % old_nm,
                      "  ⚠ 要连技能一起重置成天生技能 → 用「清空门派」那个按钮",
                      "  ⚠ 游戏里快捷技能栏、门派技能页都会不可用"]
         else:
@@ -4380,6 +5461,11 @@ class App(object):
         innate = set(self.g.actor_class_learnings(a))
         cur = set(self.g.actor_skills(a))
         drop = sorted(cur - innate)
+        # ⚠ 还有「**天生技能没学全**」这一种（2026-10-04 真档实测：李修远
+        #   `@skills` 是空的，而职业自带是 9/204/211）。以前只看 `drop`，
+        #   这种档点完「清空门派」技能还是个空 —— 而提示却说「已经只剩天生
+        #   技能，不动」。两边都得管：重置就是「`@skills` = 职业自带」。
+        missing = sorted(innate - cur)
         # 称谓（@appellations）：门派称谓也得一起回收（2026-09-27 川指出）。
         # ⚠ 真档里有「已经无门派、却还挂着门派称谓」的角色（李修远：@sect_id=0
         #   但称谓是「五庄观弟子」）→ 早退条件里必须算上称谓，否则点了一直
@@ -4387,8 +5473,8 @@ class App(object):
         apps, app_idx = self.g.actor_appellations(a)
         cur_app = apps[app_idx] if 0 <= app_idx < len(apps) else None
         old_apps = self.g.sect_appellations_of(a)
-        if old_id == 0 and not drop and not old_apps:
-            # 门派是 0、技能只剩天生、也没门派称谓 → 真没什么可做的
+        if old_id == 0 and not drop and not missing and not old_apps:
+            # 门派是 0、技能和天生技能一模一样、也没门派称谓 → 真没什么可做的
             self.set_status("「%s」已经是「无门派」、技能也只剩天生技能、"
                             "也没有门派称谓，无需改动" % nm)
             return
@@ -4398,14 +5484,19 @@ class App(object):
         if old_id != 0:
             lines.append("· 门派：%s → 无门派" % old_nm)
             lines.append("  ⚠ 游戏里快捷技能栏、门派技能页都会不可用")
-        if drop:
+        if drop or missing:
             keep_nm = "、".join("#%d %s" % (s, sname.get(s, ""))
                                for s in sorted(innate))
             lines.append("· 技能：%d 个 → 只剩职业自带的 %d 个"
                          % (len(cur), len(innate)))
             if keep_nm:
                 lines.append("  留下：%s" % keep_nm)
-            lines.append("  清掉 %d 个（含门派技能、技能书/剧情给的）" % len(drop))
+            if drop:
+                lines.append("  清掉 %d 个（含门派技能、技能书/剧情给的）" % len(drop))
+            if missing:
+                lines.append("  补上没学的 %d 个（%s）"
+                             % (len(missing),
+                                "、".join("#%d" % s for s in missing)))
             lines.append("  ⚠ 游戏自己换门派不会清技能，这一步是工具额外做的")
         else:
             lines.append("· 技能：已经是只剩天生技能，不动")
@@ -4423,7 +5514,7 @@ class App(object):
             return
         try:
             self.g.set_actor_sect(a, 0)
-            if drop:
+            if drop or missing:
                 self.g.actor_reset_skills_to_class(a)
             removed, _added, _ap, _ai = self.g.set_actor_sect_appellation(a, 0)
         except Exception as e:
@@ -4437,7 +5528,7 @@ class App(object):
         keep = self.tv_actor.selection()
         self.fill_actors(keep_id=keep[0] if keep else None)
         self.load_actor()
-        if drop:
+        if drop or missing:
             msg = ("「%s」已清成无门派，技能重置为天生技能 %d 个"
                    % (nm, len(innate)))
         else:
@@ -4447,40 +5538,58 @@ class App(object):
         self.set_status("%s（游戏里快捷技能栏/门派技能页不可用；记得点「保存修改」）"
                         % msg)
 
-    def actor_skill_add(self):
-        """把下拉里选的技能教给当前角色（已学过的不重复加）。"""
-        a = self.current_actor()
-        sid = self.skp_actor.pick_id()
-        if a is None or sid is None:
-            messagebox.showinfo("提示", "先在角色列表选一个角色、再选一个技能。",
+    def open_skill_manager(self, key):
+        """开技能管理器窗口（已经开着就抬到前面；目标没了就给一句提示）。
+
+        ⚠ 窗口是**常驻**的：操作完不自动关，可以连着刷几批。`_skill_win`
+          留着引用，这样重复点按钮不会开出第二个一模一样的窗口。
+        """
+        if key == "actor" and self.current_actor() is None:
+            messagebox.showinfo("提示", "先在角色列表选一个角色。",
                                 parent=self.root)
-            return
-        try:
-            self.g.actor_learn_skill(a, sid)
-        except Exception as e:
-            messagebox.showerror("改不了", zh_error(e), parent=self.root)
-            return
-        self.mark_dirty()
-        self.load_actor()
-        self.set_status("已学会技能 #%d（记得点「保存修改」）" % sid)
+            return None
+        if key == "baby" and self._baby() is None:
+            messagebox.showinfo("提示", "先在列表里选一只召唤兽。",
+                                parent=self.root)
+            return None
+        w = getattr(self, "_skill_win", None)
+        if w is not None and getattr(w, "win", None) is not None \
+                and w.win.winfo_exists():
+            w.win.lift()
+            w.win.focus_set()
+            w.refill()
+            return w
+        w = SkillManager(self, key, first=True)
+        self._skill_win = w
+        return w
+
+    def actor_skill_manager(self):
+        """打开角色技能管理器窗口。"""
+        return self.open_skill_manager("actor")
 
     def actor_skill_del(self):
-        """忘掉技能一览里选中的那个技能。"""
+        """忘掉技能一览里选中的技能（可多选，一次一批）。"""
         a = self.current_actor()
-        sel = self.tv_actor_skills.selection()
-        if a is None or not sel:
-            messagebox.showinfo("提示", "先在技能一览里选一个要忘掉的技能。",
+        sids = self.skp_actor.sel_ids()
+        if a is None or not sids:
+            messagebox.showinfo("提示", "先在技能一览里选要忘掉的技能"
+                                        "（Ctrl / Shift 可多选）。",
                                 parent=self.root)
             return
-        sid = int(sel[0][2:])
         try:
-            self.g.actor_forget_skill(a, sid)
+            drop, missing = self.g.actor_forget_many(a, sids)
         except Exception as e:
             messagebox.showerror("改不了", zh_error(e), parent=self.root)
             return
+        if not drop:
+            self.set_status("选中的 %d 个技能本来就没学" % len(sids))
+            return
         self.mark_dirty()
         self.load_actor()
-        self.set_status("已忘掉技能 #%d（记得点「保存修改」）" % sid)
+        msg = "已忘掉 %d 个技能" % len(drop)
+        if missing:
+            msg += "（%d 个本来就没学，跳过）" % len(missing)
+        self.set_status(msg + "（记得点「保存修改」）")
 
     def actor_skill_clear(self):
         a = self.current_actor()
@@ -4607,11 +5716,33 @@ class App(object):
         tv.bind("<Double-1>", do_clone)
         bf = ttk.Frame(f)
         bf.pack(fill="x")
-        ttk.Button(bf, text="克隆给「%s」" % self.sv.actor_name(a),
+        fit_btn(bf, text="克隆给「%s」" % self.sv.actor_name(a),
                    command=do_clone).pack(side="right", padx=4)
-        ttk.Button(bf, text="取消", command=win.destroy).pack(side="right")
+        fit_btn(bf, text="取消", command=win.destroy).pack(side="right")
+        esc_close(win)
+        ent.focus_set()
+        center_win(win, self.root)
 
     # ================================================== 4 队伍 / 物品
+    @staticmethod
+    def _pack_hit(kw, slot, i, iid, name, content):
+        """背包格子搜索匹配：名称 / 物品 id / 槽号 / 格子号 / 「内容」列。
+
+        ⚠ 只搜**当前这一页**（背包页是分页显示的，跨页搜要另做一套；
+          这里的需求是"这一页东西多了找一件"，够用）。
+        """
+        if not kw:
+            return True
+        for s in (name, content, str(iid), str(slot), str(i)):
+            if s and kw in s:
+                return True
+        return False
+
+    def pack_kw_clear(self):
+        """清空背包格子搜索框并重列。"""
+        self.var_pack_kw.set("")
+        self.fill_party()
+
     def fill_party(self):
         """刷背包页（当前页 20 格 + 物品计数校验状态）。"""
         self._tip_hide()
@@ -4626,6 +5757,9 @@ class App(object):
                               self.sv.party_member_ids(),
                               self.g.warehouse_page()))
         rows = dict((r[0], r) for r in self.g.bag(kind, page))
+        kw = (self.var_pack_kw.get() if hasattr(self, "var_pack_kw")
+              else "").strip()
+        n_hit = 0
         for i in range(game.PACK_PAGE_SIZE):
             slot = self.g.slot_key(page, i)
             r = rows.get(slot)
@@ -4635,9 +5769,14 @@ class App(object):
                         self.g._item_node(kind, slot))
                 except Exception:
                     cnt_txt = ""
+                if kw and not self._pack_hit(kw, slot, i, r[3], r[4], cnt_txt):
+                    continue
+                n_hit += 1
                 self.tv_pack.insert("", "end", iid="s%d" % slot,
                                     values=(slot, i, r[3], r[4], r[5], cnt_txt))
-            else:
+            elif not kw:
+                # 搜索时不列空格子：找东西的时候空格子只是噪音。
+                # （⚠ 空关键词仍要列满 20 格 —— 「放进第一个空格子」要看着格子挑。）
                 self.tv_pack.insert("", "end", iid="s%d" % slot,
                                     values=(slot, i, "（空）", "", "", ""))
         bad = [r for r in self.g.security_rows() if r[2] != r[3]]
@@ -4645,10 +5784,13 @@ class App(object):
             self.bag_bad = self.g.pack_report(kinds=(kind,))
         except Exception:
             self.bag_bad = []
-        note = ("物品计数校验（游戏自己的 `$game_system.security`）：%d 条记录%s"
+        note = ("物品计数校验（游戏自己的 $game_system.security）：%d 条记录%s"
                 % (len(self.g.security_rows()),
                    "，有 %d 条和背包对不上（点「同步计数校验」）" % len(bad)
                    if bad else "，全部对得上 ✓"))
+        if kw:
+            # ⚠ 这句得挂在 note 赋好之后：搜索前缀是「加在最前面」的。
+            note = "搜索「%s」：本页命中 %d 个格子；\n" % (kw, n_hit) + note
         if self.bag_bad:
             note += ("\n这一页背包体检：%d 项异常（点「背包体检」看详情、"
                      "「一键修复」处理）" % len(self.bag_bad))
@@ -4672,9 +5814,15 @@ class App(object):
             self.var_tpl_note.set("读不到 Data 表：%s" % human(str(e))[:80])
             return
         self.tpl_rows = rows
+        try:
+            grp = self.g.group_map(kind)
+        except Exception:
+            grp = {}
         for iid, nm, _desc in rows:
-            self.tv_tpl.insert("", "end", iid="t%d" % iid, values=(iid, nm))
-        self.var_tpl_note.set("共 %d 个%s" % (len(rows), "（已过滤）" if kw else ""))
+            self.tv_tpl.insert("", "end", iid="t%d" % iid,
+                               values=(iid, nm, grp.get(iid, "")))
+        self.var_tpl_note.set("共 %d 个%s" % (
+            len(rows), "（按关键字过滤）" if kw else "（已滤掉分段行和空占位）"))
 
     def _bag_kid(self):
         """“孵出/开出对象 id”输入框（空＝让工具按游戏规则随机）。"""
@@ -5264,13 +6412,14 @@ class NoteDialog(tk.Toplevel):
         vs.pack(side="right", fill="y")
         self.txt.pack(fill="both", expand=True, padx=(8, 0), pady=2)
         self.txt.insert("1.0", cur or "")
-        self.txt.focus_set()
         bar = ttk.Frame(self)
         bar.pack(fill="x", pady=8)
-        ttk.Button(bar, text="确定", command=self.ok).pack(side="left", padx=8)
-        ttk.Button(bar, text="取消", command=self.destroy).pack(side="left", padx=6)
+        fit_btn(bar, text="确定", command=self.ok).pack(side="left", padx=8)
+        fit_btn(bar, text="取消", command=self.destroy).pack(side="left", padx=6)
         self.bind("<Control-Return>", lambda e: self.ok())
-        self.bind("<Escape>", lambda e: self.destroy())
+        esc_close(self)
+        center_win(self, master)
+        self.txt.focus_set()        # 焦点给文本框（排在 esc_close 之后才优先）
 
     def ok(self):
         self.result = self.txt.get("1.0", "end").strip()
@@ -5290,13 +6439,14 @@ class EditDialog(tk.Toplevel):
         self.var = tk.StringVar(value="" if cur is None else str(cur))
         ent = ttk.Entry(self, textvariable=self.var, width=48)
         ent.grid(row=1, column=1, padx=8, pady=6)
-        ent.focus_set()
         bar = ttk.Frame(self)
         bar.grid(row=2, column=0, columnspan=2, pady=8)
-        ttk.Button(bar, text="确定", command=self.ok).pack(side="left", padx=6)
-        ttk.Button(bar, text="取消", command=self.destroy).pack(side="left", padx=6)
+        fit_btn(bar, text="确定", command=self.ok).pack(side="left", padx=6)
+        fit_btn(bar, text="取消", command=self.destroy).pack(side="left", padx=6)
         self.bind("<Return>", lambda e: self.ok())
-        self.bind("<Escape>", lambda e: self.destroy())
+        esc_close(self)
+        center_win(self, master)
+        ent.focus_set()             # 焦点给输入框（排在 esc_close 之后才优先）
 
     def ok(self):
         raw = self.var.get()
