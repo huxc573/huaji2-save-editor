@@ -183,17 +183,32 @@ class Doc(object):
 
     # ------------------------------------------------------------------ 改值
     def set_value(self, node, value):
-        old = patchwriter.value_of(node)
-        # ⚠ 整数跨过 Fixnum 边界（±2^32）会改变"对象编号个数"：
-        #   装得下写 'i'（不占编号），装不下写 'l' 大整数（占编号）。
-        #   就地补丁无法同步修正全档的 '@N' 索引，必须升级为整档重写
-        #   （0.5.2 祈福池改成 9999999999 就是因为这个把整档链接弄错位）。
-        if isinstance(old, int) and not isinstance(old, bool) \
-                and isinstance(value, int) and not isinstance(value, bool) \
-                and M.fits_fixnum(old) != M.fits_fixnum(value):
-            patchwriter.PatchEngine.set_scalar(self.engine, node, value)
-            self.mark_structural()
-            return
+        # ⚠ 整数在 'i'（Fixnum，**不占**对象编号）与 'l'（大整数，**占**编号）
+        #   之间切换，会改变整条流的"对象编号个数"——就地补丁改不了后面的
+        #   '@N'，必须升级为整档重写（`mark_structural`）。
+        #   （0.5.2 祈福池改成 9999999999 就是踩的这个。）
+        # ⚠⚠ 判据必须看**盘上实际是 'i' 还是 'l'**，不能拿 `fits_fixnum(旧值)` 比：
+        #   旧值只是节点里存的数，形态由**节点类型**决定（IntNode ⇒ 盘上是 'i'，
+        #   不占编号；BignumNode ⇒ 盘上是 'l'，占编号）。
+        #   2026-10-07 踩过：盘上是 `i`(17.18 亿) 的节点改写成 30 亿，两个值
+        #   `fits_fixnum` 都是 False ⇒ 旧判据以为"没跨界"，走了就地补丁 ——
+        #   结果写出 'l' 却按 'i' 的编号排，全档 '@N' 集体错位一格（召唤兽名字
+        #   被读成大整数）。注意 `save()` 的自洽守卫**拦不住**这种"自洽但整体
+        #   偏移一格"的错档，只有这里判准才行。
+        if isinstance(node, (M.IntNode, M.NilNode, M.BignumNode)):
+            # 盘上形态：BignumNode ⇒ 盘上是 'l'（占编号）；
+            #           IntNode/NilNode ⇒ 盘上是 'i'/T/F/0（不占编号）。
+            disk_numbered = isinstance(node, M.BignumNode)
+            # 写出形态：和 `serialize()` 的规则**逐条对齐** ——
+            #   BignumNode 永远写 'l'（哪怕值装得下 Fixnum，仍占编号）；
+            #   IntNode/NilNode 装不下才写 'l'。
+            out_numbered = isinstance(node, M.BignumNode) or (
+                isinstance(value, int) and not isinstance(value, bool)
+                and not M.fits_fixnum(value))
+            if disk_numbered != out_numbered:
+                patchwriter.PatchEngine.set_scalar(self.engine, node, value)
+                self.mark_structural()
+                return
         patchwriter.PatchEngine.set_scalar(self.engine, node, value)
         self.dirty = True
 

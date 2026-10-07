@@ -675,8 +675,68 @@ def main():
     # ---------------- `actor_exp_fill` = 界面「经验拉满」（2026-10-03 新增）
     # 只写 @exp、**不动等级** —— 回游戏自己点「升级」（一次一级）。
     print("\n-- actor_exp_fill：只写经验、等级不动 --")
-    check("ACTOR_EXP_FILL = 5000 万", game.ACTOR_EXP_FILL == 50000000,
+    # 2026-10-07 川：5000 万只够点到 79 级 ⇒ 50 亿 → **30 亿**。
+    # ⚠ 30 亿落地会写成**大整数 'l'**（本作 32 位 Ruby 1.8，Fixnum 只到 2**30-1）
+    #   —— 这是**正确**形态，游戏读 'l' 永远精确。上一轮误按 2**31-1 取 80%，
+    #   17.18 亿被塞进 4 字节 'i'，加载端 `INT2FIX` 挤成 -429,496,731（川截图）。
+    #   ⚠ 而且 17.18 亿本来就不够：89 级 → 155 级要 19.95 亿。
+    check("ACTOR_EXP_FILL = 30 亿", game.ACTOR_EXP_FILL == 3000000000,
           game.ACTOR_EXP_FILL)
+    check("ACTOR_EXP_FILL 够升满 89→155（需 19.95 亿）",
+          game.ACTOR_EXP_FILL > 1995193706, game.ACTOR_EXP_FILL)
+    check("Fixnum 边界 = 2**30-1；越界一律走大整数 'l'",
+          M.FIXNUM_MAX == 2 ** 30 - 1 and M.FIXNUM_MIN == -(2 ** 30)
+          and M.fits_fixnum(2 ** 30 - 1)
+          and not M.fits_fixnum(2 ** 30)
+          and not M.fits_fixnum(3000000000)
+          and M.encode_integer(2 ** 30 - 1)[:1] == b'i'
+          and M.encode_integer(2 ** 30)[:1] == b'l'
+          and M.encode_integer(3000000000)[:1] == b'l',
+          "MAX=%d" % M.FIXNUM_MAX)
+    check("BABY_EXP_FILL 与角色页同源", game.BABY_EXP_FILL == game.ACTOR_EXP_FILL,
+          game.BABY_EXP_FILL)
+
+    # ---- 回归：'i' → 'l' 跨界必须升级为**整档重写** ----------------------
+    # 踩过（2026-10-07）：盘上 @exp 是 4 字节 'i'，改成装不下 Fixnum 的值，
+    # 判据若拿 `fits_fixnum(旧值)` 去比就会误判"没跨界"、走就地补丁 ——
+    # 写出 'l' 却按 'i' 的编号排 ⇒ 全档 '@N' 集体错位一格（召唤兽名字被读成
+    # 大整数）。哨兵 =「首宠 @attr.@name 仍能解析成字符串」。
+    # ⚠ 序列化按**节点类型**定形态（BignumNode 永远写 'l'），所以只能拿盘上
+    #   本来就是 'i' 的节点造跨界，不能靠"先写个小值"把类型转回来。
+    _cross = os.path.join(WORK, "cross.rvdata2")
+    shutil.copyfile(real, _cross)
+    _sv = save.SaveDoc(_cross)
+    _g = game.GameEditor(_sv)
+    _hit = None
+    for _ai, _ac in _sv.actors():
+        _cands = [_g.exp_node(_ac)]
+        _cands += [_g._exp_node(bb) for _bi, bb in _g.babies(_ac)]
+        for _nd in _cands:
+            if _nd is not None and _sv.doc.raw[_nd.start:_nd.end][:1] == b'i':
+                _hit = _nd
+                break
+        if _hit is not None:
+            break
+    if _hit is None:
+        print("  [--] 全档没有 'i' 的经验节点，跳过 i→l 跨界用例")
+    else:
+        _sv.doc.set_value(_hit, 3000000000)          # i → l
+        check("'i'→'l' 跨界 → structural（整档重写，不是就地补丁）",
+              _sv.doc.structural is True, "structural=%s" % _sv.doc.structural)
+        _sv.save()
+        _sv2 = save.SaveDoc(_cross)                  # ⚠ 存完必须重取节点
+        _g2 = game.GameEditor(_sv2)
+        _a2 = _sv2.actors()[0][1]
+        _n2 = _g2.exp_node(_a2)
+        check("@exp 落盘为大整数 'l'",
+              _sv2.doc.raw[_n2.start:_n2.end][:1] == b'l',
+              _sv2.doc.raw[_n2.start:_n2.end][:1])
+        _bl = list(_g2.babies(_a2))
+        if _bl:
+            _nm = save._deref(save.ivar(_g2.baby_attr(_bl[0][1]), "@name"))
+            check("全档 '@N' 没错位（首宠 @attr.@name 仍是字符串）",
+                  isinstance(_nm, M.StrNode), type(_nm).__name__)
+
     g3.set_actor_level_full(a5, 25)
     lv_before = g3.actor_level(a5)
     wf = g3.actor_exp_fill(a5)

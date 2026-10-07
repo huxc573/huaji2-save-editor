@@ -584,13 +584,37 @@ import re as _re
 #: 字段，这些分隔行就是作者给技能分的段。
 _SEC_RE = _re.compile(r"^=+(.+?)=+$")
 
+#: 破折号标题行（`---五庄观---`、`---特殊技能---`）—— 作者也用它分区。
+_SECT_RE = _re.compile(r"^-{2,}(.+?)-{2,}$")
+
+
+def _is_sect_title(name):
+    """`---五庄观---` 这种破折号标题是不是**门派**。
+
+    作者写的多半是简称（`---化生---`＝化生寺、`---女儿---`＝女儿村、
+    `---地府---`＝阴曹地府），所以拿 `sect.SECTS` 的名字做前后缀匹配 ——
+    判「认不认识」一律走 `SECTS`，别在这儿新开一张名单。
+    """
+    for _nm, _ids in sect.SECTS.values():
+        if _nm == name or _nm.startswith(name) or _nm.endswith(name):
+            return True
+    return False
+
 
 def skill_sections(meta):
     """`{技能 id: 所属分段名}` —— 按 `meta`（`{id: (名字, 说明)}`）的 id 顺序
     扫一遍，遇到 `===xxx===` 这种分段行就把后面的技能都算进这一段。
 
-    ⚠ 分段行**自己也算这一段**（它就在段首）。门派技能不在这里管 —— 它们
-      显示时会优先用门派名（见 `SkillManager.own_text`）。
+    ⚠ 分段行**自己也算这一段**（它就在段首）。
+    ⚠ 门派标题（`---五庄观---`）**结束**当前分段、也不新开分段 —— 门派技能的
+      归属交给 `sect.sect_of_skill`（`---化生---` 那种简称对不上 sect 表的全名
+      「化生寺」，两边都算只会打架）。
+      **2026-10-06 修的 bug**：原来只认 `=x=`，`==特技==`（id 166）的 `cur`
+      一路吃到下一个 `=x=`（id 312「辅助技能」），把中间 13 个门派的技能
+      （id 180~311）全吞进「特技」—— 技能管理器「归属」列于是把**门派技能
+      显示成了「特技」**。
+    ⚠ 其余破折号标题（`---特殊技能---`）**算分段**：它不在 `sect.SECTS` 里，
+      是作者给「惊心一剑…独钓寒江」那 47 个召唤兽特殊技能分的区。
     """
     cur = None
     out = {}
@@ -599,6 +623,11 @@ def skill_sections(meta):
         m = _SEC_RE.match(nm)
         if m:
             cur = m.group(1).strip() or None
+        else:
+            m2 = _SECT_RE.match(nm)
+            if m2:
+                t2 = m2.group(1).strip()
+                cur = None if _is_sect_title(t2) else (t2 or None)
         if cur:
             out[sid] = cur
     return out
@@ -845,9 +874,12 @@ class SkillManager(object):
             nm, desc = self.meta[sid]
             if not nm:
                 continue
-            # 分段行（`===锻造技能===`）是作者给表分的段，不是能学的技能 —— 列出来
-            # 会被「全选 → 学会选中」写进存档。它只在算归属时有用（`skill_sections`）。
-            if _SEC_RE.match(nm.strip()):
+            # 分隔行（`===锻造技能===` / `---五庄观---`）是作者给表分的段，不是能学的
+            # 技能 —— 列出来会被「全选 → 学会选中」写进存档。它们只在算归属时有用
+            # （`skill_sections`）。⚠ 破折号那批原来漏了：`---五庄观---` 会当成一条
+            # 「技能」列出来（归属还写着「特技」），2026-10-06 一并补上。
+            # 判据统一走 `datatables.section_of()`（两种形式都认），别在这儿另写正则。
+            if datatables.section_of(nm):
                 continue
             got = sid in have
             if st == ST_HAVE and not got:
@@ -2206,11 +2238,14 @@ class App(object):
         # 回游戏在地图界面自己点「升级」（一次一级）—— 和「一键满级」只差这一点。
         btn_fill = fit_btn(bar, "经验拉满",
                               lambda: self.actor_preset("expfill"))
+        # ⚠ 单位是**亿**不是万：30 亿写成"%d 万"是 300000 万，没人看得懂
+        #   （2026-10-07 改成亿级时一起改的；`%.2f` 两位小数够看）。
         self._bind_tip(btn_fill,
-                       "获得经验写到 %d 万，等级不动。\n"
+                       "获得经验写到 %.2f 亿，等级不动。\n"
                        "回游戏在地图界面点「升级」按钮，\n"
-                       "点几次升几级（一次一级），节奏自己控。"
-                       % (game.ACTOR_EXP_FILL // 10000))
+                       "点几次升几级（一次一级），节奏自己控。\n"
+                       "（89 级升满 155 一共要 19.95 亿）"
+                       % (game.ACTOR_EXP_FILL / 1e8))
         btn_fill.pack(side="left", padx=6)
         fit_btn(bar, "回满 HP/MP",
                    lambda: self.actor_preset("heal")).pack(side="left",
@@ -2648,14 +2683,14 @@ class App(object):
         #   （一次把全体召唤兽的气血/魔法/愤怒回满 + 忠诚拉满）。
         tips = {
             "expfull": ("一键满级：等级给到 %d 级 + 经验对齐该级门槛。\n"
-                        "⚠ 召唤兽靠经验最多升到「主人等级+5」，\n"
+                        "⚠ 召唤兽靠经验最多升到「主人等级+10」，\n"
                         "所以这里直接把等级写满，不再单独给等级输入框。"
                         % game.MAX_LEVEL_BABY),
-            "expfill": ("获得经验写到 %d 万，等级不动。\n"
+            "expfill": ("获得经验写到 %.2f 亿，等级不动。\n"
                         "⚠ 和人物不同：召唤兽自己有升级循环，\n"
                         "打完下一场战斗结算时它会自己连升\n"
-                        "（顶到「主人等级+5」）。"
-                        % (game.BABY_EXP_FILL // 10000)),
+                        "（顶到「主人等级+10」）。"
+                        % (game.BABY_EXP_FILL / 1e8)),
             "state_all": ("一次把「所有角色」身上的「所有召唤兽」：\n"
                           "气血/魔法/愤怒 回满 + 忠诚拉到 %d。\n"
                           "忠诚只决定能不能参战（<%d 不能上），\n"
