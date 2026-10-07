@@ -1680,7 +1680,7 @@ class PayloadManager(object):
             self.var_int.set("" if cur.get(fd["key"]) is None
                              else str(cur[fd["key"]]))
             self.cands = []
-            self.set_desc("「%s」的「%s」直接填个数就行。\n\n"
+            self.set_desc("「%s」的「%s」直接填个数就行。\n"
                           "范围：%d ~ %d" % (self.fam, fd["label"], lo, hi))
             return
         self.box_int.pack_forget()
@@ -1810,7 +1810,6 @@ class PayloadManager(object):
                 lines.append("　".join(tail))
         d = self._data_desc("Actors", i)
         if d:
-            lines.append("")
             lines.append(d)
         return "\n".join(lines)
 
@@ -1835,7 +1834,7 @@ class PayloadManager(object):
         head = "%s = %s" % (fd["label"], nm)
         if fd["kind"] == "actor":
             body = self._actor_detail(val)
-            return "%s\n\n%s\n\n点「应用选中的内容」写进选中的格子。" % (
+            return "%s\n%s\n点「应用选中的内容」写进选中的格子。" % (
                 head, body or ("召唤兽 id %s" % val))
         if fd["kind"] == "skill":
             desc = ""
@@ -1843,9 +1842,12 @@ class PayloadManager(object):
                 if i == val:
                     desc = d or ""
                     break
-            return "%s\n\n技能 #%s　%s\n\n%s" % (head, val, self._own_of(val),
-                                                desc or "（没有说明）")
-        return "%s\n\n点「应用选中的内容」写进选中的格子。" % head
+            own = (self._own_of(val) or "").strip()
+            tag = "技能 #%s" % val
+            if own:
+                tag += "（%s）" % own
+            return "%s\n%s\n%s" % (head, tag, desc or "（没有说明）")
+        return "%s\n点「应用选中的内容」写进选中的格子。" % head
 
     def _int_changed(self):
         fd = self.pick_field()
@@ -1881,7 +1883,7 @@ class PayloadManager(object):
         full = text or ""
         line = self._item_line()
         if line:
-            full = (line + "\n\n" + full) if full else line
+            full = (line + "\n" + full) if full else line
         if full:
             t2.insert("1.0", full)
         t2.configure(state="disabled")
