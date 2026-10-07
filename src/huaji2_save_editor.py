@@ -1415,8 +1415,8 @@ class PayloadManager(object):
         self.box_list = ttk.Frame(left)
         self.tv = ttk.Treeview(self.box_list, columns=("id", "name", "note"),
                                show="headings", height=18, selectmode="browse")
-        for c, t2, w in (("id", "id", 62), ("name", "名称", 190),
-                         ("note", "备注", 150)):
+        for c, t2, w in (("id", "id", 54), ("name", "名称", 150),
+                         ("note", "说明", 320)):
             self.tv.heading(c, text=t2)
             # ⚠ 只让「名称」列 stretch（多余宽度全摊给它会在右边留一段空白）
             self.tv.column(c, width=w, stretch=(c == "name"),
@@ -1721,7 +1721,7 @@ class PayloadManager(object):
                     continue
                 if kw and kw not in str(i) and kw not in nm.lower():
                     continue
-                rows.append((i, nm, self._baby_note(i)))
+                rows.append((i, nm, self._actor_short(i)))
         elif fd["kind"] == "skill":
             want = set(pool) if pool else None
             for i, nm, desc in self._skill_rows():
@@ -1729,7 +1729,7 @@ class PayloadManager(object):
                     continue
                 if kw and kw not in str(i) and kw not in nm.lower():
                     continue
-                rows.append((i, nm, self._own_of(i)))
+                rows.append((i, nm, self._short(desc) or self._own_of(i)))
         self.cands = rows
         self.tv.delete(*self.tv.get_children())
         for n, (val, nm, note) in enumerate(rows):
@@ -1756,6 +1756,64 @@ class PayloadManager(object):
         except Exception:
             return ""
 
+    @staticmethod
+    def _short(text, n=56):
+        """详情 → 一行摘要（列表「说明」列用）：换行/连续空白压成单个空格。"""
+        s = " ".join((text or "").split())
+        return s if len(s) <= n else s[:n] + "…"
+
+    def _data_desc(self, kind, iid):
+        """Data 表某个 id 的完整说明（读不到返回空串）。"""
+        try:
+            pair = self.app.g._desc_map(kind).get(int(iid))
+        except Exception:
+            return ""
+        return (pair[1] if pair and len(pair) > 1 else "") or ""
+
+    def _actor_short(self, i):
+        """召唤兽候选的摘要：档位 + Actors 表里的说明（有就带上）。"""
+        note = self._baby_note(i)
+        d = self._data_desc("Actors", i)
+        if d:
+            note = (note + " " if note else "") + self._short(d, 40)
+        return note
+
+    def _actor_detail(self, i):
+        """召唤兽候选的详情：档位 / 携带等级 / 六项资质 / 成长 + Actors 表说明。"""
+        lines = []
+        try:
+            bd = self.app.babies_ed()
+            cfg = bd.config(i) if bd else None
+        except Exception:
+            cfg = None
+        if cfg:
+            head = []
+            if cfg.get("type"):
+                head.append("档位 %s" % cfg["type"])
+            if cfg.get("allow_lv") not in (None, ""):
+                head.append("携带等级 %s" % cfg["allow_lv"])
+            if head:
+                lines.append("　".join(head))
+            apt = []
+            for k, lb in (("atk", "攻"), ("def", "防"), ("hp", "体"),
+                          ("mp", "法"), ("agi", "速"), ("eva", "躲")):
+                if cfg.get(k) not in (None, ""):
+                    apt.append("%s%s" % (lb, cfg[k]))
+            if apt:
+                lines.append("资质：" + "　".join(apt))
+            tail = []
+            if cfg.get("grow") not in (None, ""):
+                tail.append("成长 %s" % cfg["grow"])
+            if cfg.get("life") not in (None, ""):
+                tail.append("寿命 %s" % cfg["life"])
+            if tail:
+                lines.append("　".join(tail))
+        d = self._data_desc("Actors", i)
+        if d:
+            lines.append("")
+            lines.append(d)
+        return "\n".join(lines)
+
     def kw_clear(self):
         self.var_kw.set("")
         self.fill_cands()
@@ -1773,25 +1831,20 @@ class PayloadManager(object):
         self.set_desc(self._cand_desc(fd, val, nm))
 
     def _cand_desc(self, fd, val, nm):
+        """选中候选的详情：技能读技能管理器的说明，召唤兽读档位/资质/描述。"""
         head = "%s = %s" % (fd["label"], nm)
         if fd["kind"] == "actor":
-            body = "召唤兽 id %s" % val
-            try:
-                bd = self.app.babies_ed()
-                cfg = bd.config(val) if bd else None
-                if cfg:
-                    body += "\n类型：%s" % cfg.get("type", "?")
-            except Exception:
-                pass
-            return "%s\n\n%s\n\n点「应用选中的内容」写进选中的格子。" % (head, body)
+            body = self._actor_detail(val)
+            return "%s\n\n%s\n\n点「应用选中的内容」写进选中的格子。" % (
+                head, body or ("召唤兽 id %s" % val))
         if fd["kind"] == "skill":
             desc = ""
             for i, _n, d in self._skill_rows():
                 if i == val:
                     desc = d or ""
                     break
-            return "%s\n\n技能 #%s %s\n\n%s" % (head, val, self._own_of(val),
-                                               desc or "（没有说明）")
+            return "%s\n\n技能 #%s　%s\n\n%s" % (head, val, self._own_of(val),
+                                                desc or "（没有说明）")
         return "%s\n\n点「应用选中的内容」写进选中的格子。" % head
 
     def _int_changed(self):
@@ -1808,14 +1861,31 @@ class PayloadManager(object):
             pass
 
     # ------------------------------------------------------------ 说明 / 提示
+    def _item_line(self):
+        """当前家族第一格那件东西自己的详情（「物品就读物品的详情」）。"""
+        grp = self._fam()
+        if not grp or not grp.get("items"):
+            return ""
+        _slot, nm, iid, _cur = grp["items"][0]
+        out = ["【本物品】%s（id=%s）" % (nm, iid)]
+        d = self._data_desc(self.app._bag_kind(), iid)
+        if d:
+            # ⚠ 说明框没有滚动条，这里只取前三行（完整说明看背包页的悬停浮窗）。
+            out.append("\n".join(d.splitlines()[:3]))
+        return "\n".join(out)
+
     def set_desc(self, text):
         t2 = self.desc
         t2.configure(state="normal")
         t2.delete("1.0", "end")
-        if text:
-            t2.insert("1.0", text)
+        full = text or ""
+        line = self._item_line()
+        if line:
+            full = (line + "\n\n" + full) if full else line
+        if full:
+            t2.insert("1.0", full)
         t2.configure(state="disabled")
-        self.desc_full = text or ""
+        self.desc_full = full
 
     def desc_tip(self, event):
         if not self.desc_full:
@@ -1839,9 +1909,10 @@ class PayloadManager(object):
         n = int(row[1:])
         if not (0 <= n < len(self.cands)):
             return
+        fd = self.pick_field()
         val, nm, note = self.cands[n]
-        self.app._tip_show("%s\n%s%s" % (nm, ("[%s] " % note) if note else "",
-                                         val),
+        body = self._cand_desc(fd, val, nm) if fd is not None else note
+        self.app._tip_show(body or ("%s（id=%s）" % (nm, val)),
                            self.tv.winfo_rootx() + event.x + 12,
                            self.tv.winfo_rooty() + event.y + 12, key=tipkey)
 
@@ -2708,12 +2779,16 @@ class App(object):
         self.tab_actor = f
         self.nb.add(f, text="角色 / 属性")
 
-        ttk.Label(f, text="角色列表（点一行在下面改）").pack(anchor="w")
+        ttk.Label(f, text="角色列表（点一行在下面改；Ctrl/Shift 多选 → "
+                          "预设 / 应用修改对全部选中角色生效）").pack(anchor="w")
         cols = ("no", "id", "name", "sect", "lv", "hp", "mp", "cls")
         # ⚠ height=5（不是 7）：左栏是竖向 pack，先来先分 —— 上面这块多占一行，
         #   下面就少一行。实测 1080x757 时左栏差 43px、把「门派技能」的清单底部
         #   切了（2026-09-20 川截图）。存档里就 5 个角色，5 行刚好不用滚。
-        self.tv_actor = ttk.Treeview(f, columns=cols, show="headings", height=5)
+        # ⚠ selectmode="extended"（2026-10-07 川：多选后点预设只改第一个）：
+        #   Ctrl 点选 / Shift 连选；预设那几个按钮 + 「应用修改」对全部选中生效。
+        self.tv_actor = ttk.Treeview(f, columns=cols, show="headings", height=5,
+                                     selectmode="extended")
         for c, w, t in (("no", 34, "序"),
                         ("id", 50, "ID"), ("name", 130, "名字"),
                         ("sect", 80, "门派"), ("lv", 50, "等级"),
@@ -3133,7 +3208,7 @@ class App(object):
                               "候选（蛋→该蛋的兽池、要诀→该档技能池），选一个\n"
                               "应用到所有选中的格子；不挑就按游戏规则重抽。\n"
                               "Ctrl 点选 / Shift 连选 = 一次改一批。")
-        fit_btn(pay, text="随机重抽选中的格子",
+        fit_btn(pay, text="随机重抽",
                 command=self.bag_reroll).pack(side="left", padx=6)
         ttk.Label(pay, text="孵出/开出对象 id（写入或随机重抽时用，留空＝随机）："
                   ).pack(side="left")
@@ -3173,7 +3248,8 @@ class App(object):
         b_del.pack(side="left", padx=4)
         self._bind_tip(b_del, "把列表里选中的召唤兽从这只角色身上删掉。\n"
                               "Ctrl 点选 / Shift 连选 → 一次删一批；\n"
-                              "其余按钮只作用于「第一个选中项」。\n"
+                              "预设 / 恢复模板名 / 重置潜力 / 改字段 也作用于\n"
+                              "全部选中项（改名、设为出战、克隆只认第一个）。\n"
                               "不可撤销：删了只能重新加一只。")
         fit_btn(top, text="恢复模板名",
                    command=self.baby_restore_name).pack(side="left")
@@ -3471,16 +3547,17 @@ class App(object):
         self.load_baby()
 
     def refresh_baby_list_keep(self, baby):
-        """刷列表，但“选中”还是原来那只（不然会跳回第一行）。"""
-        idx = [k for k, x in self.baby_rows if x is baby]
+        """刷列表，但“选中”还是原来那些（单只或一串都给；不然会跳回第一行）。"""
+        want = baby if isinstance(baby, (list, tuple, set)) else [baby]
+        idx = [k for k, x in self.baby_rows if any(x is w for w in want)]
         self.fill_baby_list()
-        if not idx:
+        keep = ["bb%d" % k for k in idx]
+        keep = [i for i in keep if self.tv_babies.exists(i)]
+        if not keep:
             return
-        iid = "bb%d" % idx[0]
         try:
-            if self.tv_babies.exists(iid):
-                self.tv_babies.selection_set(iid)
-                self.on_baby_select()
+            self.tv_babies.selection_set(keep)
+            self.on_baby_select()
         except Exception:
             pass
 
@@ -3493,6 +3570,24 @@ class App(object):
             if k == i:
                 return b
         return None
+
+    def _baby_sel(self):
+        """列表里选中的**全部**召唤兽 `[(下标, 节点)]`（按行序）。
+
+        ⚠ 2026-10-07 川：`tv_babies` 一直能多选，但预设 / 恢复模板名 / 改字段
+          都只认 `_baby()`（第一个选中项）—— 改成走这里整批处理。
+        """
+        out = []
+        for iid in self.tv_babies.selection():
+            try:
+                i = int(iid[2:])
+            except ValueError:
+                continue
+            for k, b in self.baby_rows:
+                if k == i:
+                    out.append((i, b))
+                    break
+        return out
 
     def load_baby(self):
         b = self._baby()
@@ -4083,14 +4178,23 @@ class App(object):
         self.set_status("已改名：%s" % name)
 
     def baby_restore_name(self):
-        b = self._baby()
-        if b is None:
+        """恢复模板本名 —— 对**选中的全部召唤兽**生效。"""
+        rows = self._baby_sel()
+        if not rows:
             return
-        tpl = self.babies_ed().restore_name(b)
+        names = []
+        for _i, b in rows:
+            try:
+                names.append(self.babies_ed().restore_name(b))
+            except Exception as e:
+                messagebox.showerror("改不了", zh_error(e), parent=self.root)
+                return
         self.mark_dirty()
-        self.load_baby()
-        self.refresh_baby_list_keep(b)
-        self.set_status("名字已恢复成模板本名：%s" % tpl)
+        self.refresh_baby_list_keep([b for _i, b in rows])
+        if len(names) == 1:
+            self.set_status("名字已恢复成模板本名：%s" % names[0])
+        else:
+            self.set_status("已把 %d 只召唤兽的名字恢复成模板本名" % len(names))
 
     def _sync_baby_val_widget(self, key=None):
         """「改字段」那行的值控件：五行 → 只读下拉，其它 → 数字输入框。
@@ -4119,29 +4223,40 @@ class App(object):
         self._sync_baby_val_widget(key)
 
     def apply_baby(self):
-        b = self._baby()
-        if b is None or self.g is None:
+        """「改字段」的应用：写进**选中的全部召唤兽**（多选 = 一次改一批）。"""
+        rows = self._baby_sel()
+        if not rows or self.g is None:
             return
         key = self.var_baby_key.get().strip()
         raw = self.var_baby_val.get().strip()
         if not key or raw == "":
             messagebox.showinfo("提示", "先在上面选一个字段并填值。", parent=self.root)
             return
-        try:
-            # 五行（five）= 字符串，原样传；别的字段是数字（int(raw, 0) 兼容 0x）
-            if game.GameEditor.baby_field_type(key) == "str":
-                val = raw
-            else:
+        # 五行（five）= 字符串，原样传；别的字段是数字（int(raw, 0) 兼容 0x）
+        if game.GameEditor.baby_field_type(key) == "str":
+            val = raw
+        else:
+            try:
                 val = float(raw) if "." in raw else int(raw, 0)
-            self.g.set_baby(b, key, val)
+            except ValueError:
+                messagebox.showinfo("提示", "这个字段要填数字。", parent=self.root)
+                return
+        try:
+            for _i, b in rows:
+                self.g.set_baby(b, key, val)
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
         self.mark_dirty()
-        self.load_baby()
+        self.refresh_baby_list_keep([b for _i, b in rows])
         label = dict((k, lb) for k, lb, _p, _t
                      in game.GameEditor.BABY_FIELDS).get(key, key)
-        self.set_status("召唤兽「%s」的 %s 已改" % (self.g.baby_name(b), label))
+        if len(rows) == 1:
+            self.set_status("召唤兽「%s」的 %s 已改"
+                            % (self.g.baby_name(rows[0][1]), label))
+        else:
+            self.set_status("已把 %d 只召唤兽的 %s 改成 %s"
+                            % (len(rows), label, raw))
 
     def baby_preset(self, what):
         if what == "state_all":
@@ -4150,18 +4265,21 @@ class App(object):
         if what == "loyalty_all":
             # 老按钮「全员忠诚满」已并入「全员状态拉满」；留这条只为兼容旧调用
             return self.baby_loyalty_all()
-        b = self._baby()
-        if b is None or self.g is None:
+        rows = self._baby_sel()
+        if not rows or self.g is None:
             return
+        did = []
         try:
-            did = self.g.baby_preset(b, what)
+            for _i, b in rows:
+                did.extend(self.g.baby_preset(b, what) or [])
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
         if did:
             self.mark_dirty()
-            self.load_baby()
-            self.set_status("召唤兽预设：%s" % "、".join(did))
+            self.refresh_baby_list_keep([b for _i, b in rows])
+            self.set_status("召唤兽预设：%s" % "、".join(did[:8])
+                            + ("…" if len(did) > 8 else ""))
 
     def baby_loyalty_all(self):
         """「全员忠诚满」：一次把**所有角色**的**所有召唤兽**忠诚拉满。
@@ -5425,11 +5543,15 @@ class App(object):
 
     # ================================================== 3 角色
     def fill_actors(self, keep_id=None):
-        """重建角色列表。keep_id 指定时保持选中那一行
-        （apply_actor 改了人再刷新，别把选中跳回第一个 —— 会让人以为改错了）。"""
+        """重建角色列表。keep_id 指定时保持选中的那些行（单个 id 或列表都给）
+        （apply_actor 改了人再刷新，别把选中跳回第一个 —— 会让人以为改错了）。
+        ⚠ 列表 2026-10-07 起可多选，选中是**一组**，恢复时要整组恢复。
+        """
         sel = self.tv_actor.selection()
         if keep_id is None and sel:
-            keep_id = sel[0]
+            keep_id = list(sel)
+        elif isinstance(keep_id, str):
+            keep_id = [keep_id]
         self.tv_actor.delete(*self.tv_actor.get_children())
         self.actor_rows.clear()
         if not self.sv:
@@ -5444,15 +5566,21 @@ class App(object):
                 self.sv.actor_field(a, "@class_id")))
             self.actor_rows[iid] = a
         kids = self.tv_actor.get_children()
-        if keep_id in self.actor_rows:
-            self.tv_actor.selection_set(keep_id)
-            self.tv_actor.see(keep_id)
+        keep = [i for i in (keep_id or []) if i in self.actor_rows]
+        if keep:
+            self.tv_actor.selection_set(keep)       # 多选要整组恢复
+            self.tv_actor.see(keep[0])
         elif kids:
             self.tv_actor.selection_set(kids[0])
 
     def current_actor(self):
         sel = self.tv_actor.selection()
         return self.actor_rows.get(sel[0]) if sel else None
+
+    def selected_actors(self):
+        """列表里选中的**全部**角色（按行序）。多选 = 一次改一批。"""
+        return [self.actor_rows[i] for i in self.tv_actor.selection()
+                if i in self.actor_rows]
 
     def load_actor(self):
         a = self.current_actor()
@@ -5586,38 +5714,46 @@ class App(object):
                        key="actor")
 
     def apply_actor(self):
-        a = self.current_actor()
-        if a is None:
+        """「应用修改」：写进**选中的全部角色**（多选 = 一次改一批）。"""
+        actors = self.selected_actors()
+        if not actors:
             messagebox.showinfo("提示", "先在上面选一个角色。", parent=self.root)
             return
         try:
-            # ⚠ 2026-09-20：**「级别」输入框已去掉**，这里不再处理等级
-            # （等级只有「一键满级」会连带写，见 actor_preset / game.actor_exp_full）。
-            for k, var in self.actor_vars.items():
-                if k.startswith("#"):
-                    continue      # 只读项（「升级经验」是查表算的）
-                raw = var.get().strip()
-                if raw == "":
-                    continue
-                if k == "@exp":
-                    self.g.set_exp(a, parse_num(raw))
-                else:
-                    self.sv.set_actor_field(a, k, raw)
-            for k, var in self.attr_vars.items():
-                raw = var.get().strip()
-                if raw == "":
-                    continue
-                # @活力 等浮点字段原样回写也不能炸（parse_num 吃 '200.0'，
-                # set_attr 按节点原类型写回）
-                self.sv.set_attr(a, k, parse_num(raw))
+            for a in actors:
+                self._apply_actor_one(a)
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
         self.doc.dirty = True
         self.mark_dirty()
-        self.fill_actors()
+        self.fill_actors(list(self.tv_actor.selection()))
         self.load_actor()
-        self.set_status("角色已改（记得点「保存修改」）")
+        self.set_status("已改 %d 个角色（记得点「保存修改」）" % len(actors)
+                        if len(actors) > 1
+                        else "角色已改（记得点「保存修改」）")
+
+    def _apply_actor_one(self, a):
+        """写单个角色：基础字段 + 中文属性（`apply_actor` 的内部动作）。"""
+        # ⚠ 2026-09-20：**「级别」输入框已去掉**，这里不再处理等级
+        # （等级只有「一键满级」会连带写，见 actor_preset / game.actor_exp_full）。
+        for k, var in self.actor_vars.items():
+            if k.startswith("#"):
+                continue          # 只读项（「升级经验」是查表算的）
+            raw = var.get().strip()
+            if raw == "":
+                continue
+            if k == "@exp":
+                self.g.set_exp(a, parse_num(raw))
+            else:
+                self.sv.set_actor_field(a, k, raw)
+        for k, var in self.attr_vars.items():
+            raw = var.get().strip()
+            if raw == "":
+                continue
+            # @活力 等浮点字段原样回写也不能炸（parse_num 吃 '200.0'，
+            # set_attr 按节点原类型写回）
+            self.sv.set_attr(a, k, parse_num(raw))
 
     def actor_reset_limit_exp(self):
         """把所有角色的累计获得经验清零 —— 解「体验版经验已达上限」。
@@ -5647,47 +5783,64 @@ class App(object):
                         % len(done))
 
     def actor_preset(self, what):
-        a = self.current_actor()
-        if a is None or not self.sv:
+        """预设按钮：对列表里**选中的全部角色**生效（多选 = 一次改一批）。
+
+        ⚠ 2026-10-07 川：以前只认 `current_actor()`（第一个选中项），多选之后
+          点「经验拉满」只有第一个角色变 —— 改成整批。
+        """
+        actors = self.selected_actors()
+        if not actors or not self.sv:
             return
-        note = ""
+        notes = []
         try:
-            if what == "expfull":
-                # 「一键满级」：等级顶到满级 + 获得经验对齐满级门槛（一步到位，
-                # 理由见 game.actor_exp_full：人物不会因经验多而自动升级）
-                lv, wrote = self.g.actor_exp_full(a)
-                note = "等级→%d、获得经验→%s" % (lv, wrote)
-            elif what == "expfill":
-                # 「经验拉满」：只写经验、**等级不动** —— 回游戏自己点升级
-                wrote = self.g.actor_exp_fill(a)
-                note = ("获得经验→%s（等级没动，回游戏自己点「升级」）"
-                        % wrote)
-            elif what == "heal":
-                for k, v in (("@hp", 9999), ("@mp", 9999), ("@tp", 100)):
-                    if self.sv.actor_field(a, k) is not None:
-                        self.sv.set_actor_field(a, k, v)
-                note = "回满 HP/MP/愤怒"
-            elif what == "attr":
-                for k, v in self.sv.attr_items(a):
-                    if isinstance(v, int):
-                        self.sv.set_attr(a, k, v + 10)
-                note = "属性全 +10"
-            elif what == "reset_attr":
-                # 洗点（= 游戏里拜师那一下）：五维/潜能回到等级自然成长值
-                r = self.g.actor_reset_attr(a)
-                if r is None:
-                    note = "这个角色没有 @attr，没动"
-                else:
-                    note = "五维→%d、潜能→%d" % r
+            for a in actors:
+                one = self._actor_preset_one(a, what)
+                if one:
+                    notes.append("%s：%s" % (self.sv.actor_name(a) or "?", one))
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
         self.doc.dirty = True
         self.mark_dirty()
-        self.fill_actors()
+        self.fill_actors(list(self.tv_actor.selection()))
         self.load_actor()
-        if note:
-            self.set_status("角色预设：%s（记得点「保存修改」）" % note)
+        if not notes:
+            return
+        if len(notes) == 1:
+            self.set_status("角色预设：%s（记得点「保存修改」）" % notes[0])
+        else:
+            head = "、".join(notes[:3]) + ("…" if len(notes) > 3 else "")
+            self.set_status("角色预设：%d 个角色已改（%s）（记得点「保存修改」）"
+                            % (len(notes), head))
+
+    def _actor_preset_one(self, a, what):
+        """对单个角色做一次预设，返回一句说明（空串 = 没动）。"""
+        if what == "expfull":
+            # 「一键满级」：等级顶到满级 + 获得经验对齐满级门槛（一步到位，
+            # 理由见 game.actor_exp_full：人物不会因经验多而自动升级）
+            lv, wrote = self.g.actor_exp_full(a)
+            return "等级→%d、获得经验→%s" % (lv, wrote)
+        if what == "expfill":
+            # 「经验拉满」：只写经验、**等级不动** —— 回游戏自己点升级
+            wrote = self.g.actor_exp_fill(a)
+            return "获得经验→%s（等级没动，回游戏自己点「升级」）" % wrote
+        if what == "heal":
+            for k, v in (("@hp", 9999), ("@mp", 9999), ("@tp", 100)):
+                if self.sv.actor_field(a, k) is not None:
+                    self.sv.set_actor_field(a, k, v)
+            return "回满 HP/MP/愤怒"
+        if what == "attr":
+            for k, v in self.sv.attr_items(a):
+                if isinstance(v, int):
+                    self.sv.set_attr(a, k, v + 10)
+            return "属性全 +10"
+        if what == "reset_attr":
+            # 洗点（= 游戏里拜师那一下）：五维/潜能回到等级自然成长值
+            r = self.g.actor_reset_attr(a)
+            if r is None:
+                return "这个角色没有 @attr，没动"
+            return "五维→%d、潜能→%d" % r
+        return ""
 
     # ---------------------------------------------- 3.5 角色技能（@skills）
     # 2026-09-20：角色技能可视化编辑。和召唤兽页共用 _build_skill_editor 那一套控件，
@@ -6434,6 +6587,9 @@ class App(object):
         if not hasattr(self, "tv_tpl"):
             return
         self._tip_hide()
+        # ⚠ Treeview 重建后必须按 key 恢复选中（通则）—— 否则「放进第一个空格子」
+        #   一刷就把右边刚选中的模板掉选（2026-10-07 川报的）。
+        keep = list(self.tv_tpl.selection())
         self.tv_tpl.delete(*self.tv_tpl.get_children())
         if not self.sv or self.g is None:
             return
@@ -6452,6 +6608,12 @@ class App(object):
         for iid, nm, _desc in rows:
             self.tv_tpl.insert("", "end", iid="t%d" % iid,
                                values=(iid, nm, grp.get(iid, "")))
+        still = [i for i in keep if self.tv_tpl.exists(i)]
+        if still:
+            try:
+                self.tv_tpl.selection_set(still)
+            except Exception:
+                pass
         self.var_tpl_note.set("共 %d 个%s" % (
             len(rows), "（按关键字过滤）" if kw else "（已滤掉分段行和空占位）"))
 
@@ -6565,6 +6727,9 @@ class App(object):
             n = int(self.var_bag_cnt.get() or "1", 0)
         except ValueError:
             n = 1
+        # ⚠ 2026-10-07 川：「放进第一个空格子」之后选中会跳到新写的格子，
+        #   原来选中的那几格丢了 → 先记下来，非「写入选中的格子」时原位恢复。
+        prev = self._bag_slots(quiet=True)
         if into_selected:
             slots = self._bag_slots()
             if not slots:
@@ -6596,7 +6761,9 @@ class App(object):
             return
         self.mark_dirty()
         self.fill_party()
-        self.pack_select(done)
+        # 「放进第一个空格子」不跳选中：留在原来那几格上（右边模板列表的选中
+        # 由 fill_templates 自己按 iid 恢复）。
+        self.pack_select(done if into_selected else prev)
         msg = ("槽 %s 已换成 id=%d ×%d" % ("、".join(str(s) for s in done),
                                            iid, n)
                if len(done) > 1 else "槽 %d 已换成 id=%d ×%d" % (done[0], iid, n))
