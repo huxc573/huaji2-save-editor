@@ -881,15 +881,18 @@ class GameEditor(object):
                 return True
         return False
 
-    def _fix_payload(self, node, kind, item_id, kid=None, force=False):
+    def _fix_payload(self, node, kind, item_id, kid=None, force=False,
+                     over=None):
         """给物品补上 `@attr`（游戏运行时才生成的那部分）。
 
         优先级：现成的内容（不动）→ 存档里同款的内容（整份抄）→ 按游戏
         脚本里的规则现生成（见 `itemattr`）。
-        force=True 时不看“同款”，直接按规则重抽一份（“重抽内容”按钮用）。
+        force=True 时不看“同款”，直接按规则重抽一份（「重抽管理」窗口用）。
+        `over`＝用户在界面上挑好的字段值（`{"id": 45}`…），与 `kid` 合起来
+        交给 `itemattr.build`，后者只覆盖它认得的键。
         """
         cur_t, cur_d = self.item_payload(node)
-        if cur_t and kid is None and not force:
+        if cur_t and kid is None and not force and not over:
             if self.payload_key_ok(node):
                 return node            # 存档里本来就有内容，而且键类型对
             # 内容在，但键是符号（老版本工具的写法）→ 重写成字符串键，内容一个不动
@@ -902,25 +905,23 @@ class GameEditor(object):
                 node.ivars.append(("@attr", attr))
             return node
         need, nm = self.item_needs_payload(kind, item_id)
-        if not need and kid is None:
+        if not need and kid is None and not over:
             return node
-        sib = None if force else self.payload_template(kind, item_id)
+        sib = None if (force or over) else self.payload_template(kind, item_id)
         if sib is not None and kid is None:
             if not set_ivar(node, "@attr", sib):
                 node.ivars.append(("@attr", sib))
             return node
-        spec = itemattr.build(nm, item_id)
+        # `kid`（孵化/开出的对象 id）就是 `over["id"]` —— 合成一份交给
+        # itemattr.build，由各生成器自己消费它认得的键（蛋会用 id/mutation、
+        # 要诀用 id、指南书用 type/id/lv…），比在这儿事后改 dict 稳。
+        ov = dict(over or {})
+        if kid is not None:
+            ov.setdefault("id", int(kid))
+        spec = itemattr.build(nm, item_id, over=ov or None)
         if spec is None:
             return node
         typ, payload = spec
-        if kid is not None:
-            # 指定"孵出哪只/开出什么"：蛋类那层在 payload["data"] 里，
-            # 没有 data 层（礼盒之类）就直接看 payload 自己。
-            inner = payload.get("data")
-            if not isinstance(inner, dict):
-                inner = payload
-            if "id" in inner:
-                inner["id"] = int(kid)
         attr = M.HashNode([], default=None)
         # ⚠ 这里的**外层键必须是字符串 "data"**：游戏写的就是 `@attr["data"]`，
         # 读的时候是 `item.data[:data][:id]`。早期工具写成了符号键 :data，
@@ -937,10 +938,13 @@ class GameEditor(object):
         """字符串键（不加 I/E 包装，和游戏写的一样）。"""
         return M.StrNode(text.encode("utf-8"))
 
-    def set_payload(self, kind, slot, kid=None, force=True):
+    def set_payload(self, kind, slot, kid=None, force=True, over=None):
         """给某一格的东西重新生成/指定“运行时内容”（孵化蛋、要诀之类的）。
 
         kid：孵化类物品要孵出哪只（不给就按游戏范围随机抽一个）。
+        over：用户挑好的字段值（`{"id": 45, "mutation": True}`…），
+              给了就不看「存档里的同款」、直接按它 + 游戏规则生成
+              （「重抽管理」窗口用；`kid` 等价于 `over["id"]`）。
         """
         it = self._item_node(kind, slot)
         if it is None:
@@ -949,9 +953,33 @@ class GameEditor(object):
         need, nm = self.item_needs_payload(kind, iid)
         if not need:
             raise ValueError("%s 不需要运行时内容" % (nm or ("id=%d" % iid)))
-        self._fix_payload(it, kind, iid, kid=kid, force=force)
+        self._fix_payload(it, kind, iid, kid=kid, force=force, over=over)
         self.doc.mark_structural()
         return self.item_payload(it)
+
+    def payload_fields(self, node):
+        """读一件物品 `@attr` 里**当前**各字段的值：`{键: 值}`（读不出返回 {}）。
+
+        给「重抽管理」窗口做初值用：打开窗口时把每格现有的内容填进控件，
+        用户不改就原样写回。
+        """
+        _t, d = self.item_payload(node)
+        if d is None:
+            return {}
+        out = {}
+        if not isinstance(d, M.HashNode):
+            return out
+        for k, v in d.pairs:
+            kk = M.value_of(_deref(k))
+            if isinstance(kk, bytes):
+                kk = kk.decode("utf-8", "replace")
+            if not isinstance(kk, str):
+                continue
+            vv = _deref(v)
+            if isinstance(vv, (M.HashNode, M.ArrayNode)):
+                continue                     # 复合值（元宵 value / 上限表）不给界面挑
+            out[kk] = M.value_of(vv)
+        return out
 
     #: 运行时内容的 `:type` → 内部家族键（用来渲染“内容”列）。
     #: **游戏写的是中文符号，工具现在也写中文**（`itemattr` 直接给游戏符号）；

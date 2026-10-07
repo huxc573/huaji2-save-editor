@@ -25,9 +25,13 @@
 （`script00_00000020.rb` 第 15448~16048 行），蛋池另见 `Item#draw_item`
 的 `case item.id`（第 78092~78100 行）与摊位生成（第 40017~40036 行）。
 
-生成器签名：`fn(item_id, rnd) -> (type符号, item.data 里除 :type 之外的整份内容)`。
+生成器签名：`fn(item_id, rnd, over=None) -> (type符号, item.data 里除 :type 之外的整份内容)`。
 返回值第二项的**形状由游戏决定**：多数是 `{"data": {...}}`，
 少数如 `礼盒` 是 `{"list": [...]}`（没有 `data` 那一层）。
+
+`over` 是"用户指定值"（2026-10-07 加，给「重抽管理」窗口用）：给了就**优先用它**
+——不传就是老行为（按游戏规则随机）。`payload_spec()` 报出这件东西**哪些字段
+可以在界面上挑**（蛋→召唤兽池、要诀→技能池、元宵→资质…），界面照它渲染控件。
 """
 import random
 
@@ -52,6 +56,42 @@ def _rng(rnd, *ranges):
     pools = [list(range(a, b + 1)) for a, b in ranges]
     pool = pools[rnd.randrange(len(pools))]
     return rnd.choice(pool)
+
+
+def _pool_of(ranges):
+    """把 `_rng` 用的区间列表摊成**有序去重**的 id 列表（界面候选/校验用）。"""
+    out = set()
+    for a, b in ranges:
+        out.update(range(a, b + 1))
+    return sorted(out)
+
+
+# ==========================================================================
+# 「重抽管理」窗口能挑的取值 —— 全部来自脚本，不是估的
+# ==========================================================================
+#: 元宵的 7 档资质（下标就是 `data[:type]`）；名字与 `game.payload_summary` 同一口径
+YUANXIAO_NAMES = ("攻击资质", "防御资质", "体力资质", "法力资质",
+                  "速度资质", "躲闪资质", "成长")
+#: 人参果的 5 档属性（下标就是 `data[:type]`）
+GINSENG_NAMES = ("体质", "魔力", "力量", "耐力", "敏捷")
+#: 鬼谷子的 10 个阵法（脚本 `def 鬼谷子` 里那份 list）
+FORMATION_NAMES = ("天覆阵", "地载阵", "风扬阵", "云垂阵", "龙飞阵",
+                   "虎翼阵", "鸟翔阵", "蛇蟠阵", "鹰啸阵", "雷绝阵")
+#: 上古锻造图策的 3 个部位（`eid`；名字照 `game.payload_summary`）
+ATLAS_PARTS = ((1, "护腕"), (2, "项圈"), (3, "铠甲"))
+#: 魔兽要诀四档的抽取区间（**唯一来源**：随机生成与界面候选都读它）
+BOOK_RANGES = {
+    "魔兽要诀": ((20, 54), (113, 116), (121, 121)),
+    "高级魔兽要诀": ((70, 99), (55, 59), (117, 120), (122, 124),
+                     (101, 108), (132, 133), (137, 138)),
+    "超级魔兽要诀": ((800, 834),),
+    "特殊魔兽要诀": ((109, 112), (125, 131), (134, 136), (15, 15)),
+}
+#: 制造指南书 / 百炼精铁 / 天眼珠 / 图策的档位（脚本里 `rand` 的取值集合）
+GUIDE_LVS = (50, 60, 70, 80)
+IRON_LVS = tuple(range(50, 161, 10))
+BEAD_LVS = tuple(range(5, 176, 10))
+ATLAS_LVS = tuple(range(5, 86, 10))
 
 
 # ==========================================================================
@@ -145,100 +185,133 @@ def egg_pool(item_id):
     return []
 
 
-def _baby_egg(item_id, rnd):
+def _baby_egg(item_id, rnd, over=None):
     """初级/中级/高级孵化蛋（110/111/112）——脚本 `def 孵化蛋`（i = 0..2）。
 
     脚本还会写 `mutation: rand < 0.08 && i < 3`（i 就是 0..2，后半恒真）。
     """
+    over = over or {}
     i = item_id - 110
-    pool = _tier_pool(i)
-    kid = rnd.choice(pool) if pool else _rng(rnd, *EGG_TIERS_LEGACY[i])
-    return ("孵化蛋", {"data": {"id": kid,
-                                "mutation": rnd.random() < 0.08}})
+    kid = over.get("id")
+    if kid is None:
+        pool = _tier_pool(i)
+        kid = rnd.choice(pool) if pool else _rng(rnd, *EGG_TIERS_LEGACY[i])
+    mut = over.get("mutation")
+    if mut is None:
+        mut = rnd.random() < 0.08
+    return ("孵化蛋", {"data": {"id": int(kid), "mutation": bool(mut)}})
 
 
-def _god_egg(item_id, rnd):
+def _god_egg(item_id, rnd, over=None):
     """神兽孵化蛋(113) / 普通神兽蛋(221) / 生肖神兽蛋(222) / 珍藏(223) / 传说(244)。
 
     `113` 是 `孵化蛋(i=3)` 走的那支（会写 `mutation: false`），
     其余由 `神兽蛋` 或礼包直接给，不带 `mutation` 键。
     """
-    pool = egg_pool(item_id)
-    if not pool:                      # 连真值都没有才瞎抽一只神兽号段
-        kid = _rng(rnd, GOD_ID_RANGE)
-    else:
-        kid = rnd.choice(pool)
-    payload = {"id": kid}
+    over = over or {}
+    kid = over.get("id")
+    if kid is None:
+        pool = egg_pool(item_id)
+        kid = rnd.choice(pool) if pool else _rng(rnd, GOD_ID_RANGE)
+    payload = {"id": int(kid)}
     if item_id == 113:
-        payload["mutation"] = False
+        mut = over.get("mutation")
+        payload["mutation"] = False if mut is None else bool(mut)
     return ("孵化蛋", {"data": payload})
 
 
 # ---------------------------------------------------------------- 阵法 / 进阶
-def _formation(_item_id, rnd):
-    keys = [Sym("天覆阵"), Sym("地载阵"), Sym("风扬阵"), Sym("云垂阵"),
-            Sym("龙飞阵"), Sym("虎翼阵"), Sym("鸟翔阵"), Sym("蛇蟠阵"),
-            Sym("鹰啸阵"), Sym("雷绝阵")]
-    return ("鬼谷子", {"data": {"key": rnd.choice(keys)}})
+def _formation(_item_id, rnd, over=None):
+    over = over or {}
+    key = over.get("key")
+    if key is None:
+        key = rnd.choice(FORMATION_NAMES)
+    return ("鬼谷子", {"data": {"key": Sym(str(key))}})
 
 
-def _promote_stone(_item_id, _rnd):
-    return ("进阶石", {"data": {"id": 0, "count": 0}})
+def _promote_stone(_item_id, _rnd, over=None):
+    over = over or {}
+    iid = over.get("id")
+    cnt = over.get("count")
+    return ("进阶石", {"data": {"id": 0 if iid is None else int(iid),
+                                "count": 0 if cnt is None else int(cnt)}})
 
 
 # ---------------------------------------------------------------- 装备类产出
-def _guide_book(_item_id, rnd):
+def _guide_book(_item_id, rnd, over=None):
     """制造指南书：`r = rand(2)`；武器 (`:w`) 1..18 / lv 50~80，防具 (`:a`) 1..7 / lv 50~80。"""
-    if rnd.randrange(2) == 0:
-        return ("制造指南书", {"data": {"type": Sym("w"),
-                                       "id": rnd.randint(1, 18),
-                                       "lv": rnd.choice([50, 60, 70, 80])}})
-    return ("制造指南书", {"data": {"type": Sym("a"),
-                                   "id": rnd.randint(1, 7),
-                                   "lv": rnd.choice([50, 60, 70, 80])}})
+    over = over or {}
+    t = over.get("type")
+    if t not in ("w", "a"):
+        t = "w" if rnd.randrange(2) == 0 else "a"
+    hi = 18 if t == "w" else 7
+    iid = over.get("id")
+    iid = rnd.randint(1, hi) if iid is None else max(1, min(int(iid), hi))
+    lv = over.get("lv")
+    lv = rnd.choice(GUIDE_LVS) if lv is None else int(lv)
+    return ("制造指南书", {"data": {"type": Sym(t), "id": iid, "lv": lv}})
 
 
-def _iron(_item_id, rnd):
-    return ("百炼精铁", {"data": {"lv": rnd.randint(5, 16) * 10}})
+def _iron(_item_id, rnd, over=None):
+    over = over or {}
+    lv = over.get("lv")
+    return ("百炼精铁", {"data": {"lv": rnd.randint(5, 16) * 10
+                                  if lv is None else int(lv)}})
 
 
-def _atlas(_item_id, rnd):
+def _atlas(_item_id, rnd, over=None):
+    over = over or {}
+    eid = over.get("eid")
+    eid = rnd.randint(1, 3) if eid is None else max(1, min(int(eid), 3))
+    lv = over.get("lv")
+    lv = rnd.randrange(9) * 10 + 5 if lv is None else int(lv)
     return ("上古锻造图策", {"data": {"type": Sym("a"), "id": 8,
-                                     "eid": rnd.randint(1, 3),
-                                     "lv": rnd.randrange(9) * 10 + 5}})
+                                     "eid": eid, "lv": lv}})
 
 
-def _god_eye_bead(_item_id, rnd):
-    return ("天眼珠", {"data": {"lv": rnd.randint(0, 17) * 10 + 5}})
+def _god_eye_bead(_item_id, rnd, over=None):
+    over = over or {}
+    lv = over.get("lv")
+    return ("天眼珠", {"data": {"lv": rnd.randint(0, 17) * 10 + 5
+                                if lv is None else int(lv)}})
 
 
 # ---------------------------------------------------------------- 技能书
-def _skill_book(_item_id, rnd):
+def _skill_book(_item_id, rnd, over=None):
     """魔兽要诀：`rand(20..54, 113..116, 121..121)`。"""
-    return ("魔兽要诀", {"data": {"id": _rng(rnd, (20, 54), (113, 116), (121, 121))}})
+    over = over or {}
+    kid = over.get("id")
+    return ("魔兽要诀", {"data": {"id": _rng(rnd, *BOOK_RANGES["魔兽要诀"])
+                                  if kid is None else int(kid)}})
 
 
-def _skill_book_hi(_item_id, rnd):
+def _skill_book_hi(_item_id, rnd, over=None):
     """高级魔兽要诀：`rand(70..99, 55..59, 117..120, 122..124, 101..108, 132..133, 137..138)`。"""
-    return ("高级魔兽要诀", {"data": {"id": _rng(rnd, (70, 99), (55, 59), (117, 120),
-                                                  (122, 124), (101, 108),
-                                                  (132, 133), (137, 138))}})
+    over = over or {}
+    kid = over.get("id")
+    return ("高级魔兽要诀", {"data": {"id": _rng(rnd, *BOOK_RANGES["高级魔兽要诀"])
+                                      if kid is None else int(kid)}})
 
 
-def _skill_book_super(_item_id, rnd):
+def _skill_book_super(_item_id, rnd, over=None):
     """超级魔兽要诀：`rand(800..834)`。"""
-    return ("超级魔兽要诀", {"data": {"id": rnd.randint(800, 834)}})
+    over = over or {}
+    kid = over.get("id")
+    return ("超级魔兽要诀", {"data": {"id": rnd.randint(800, 834)
+                                      if kid is None else int(kid)}})
 
 
-def _skill_book_special(_item_id, rnd):
+def _skill_book_special(_item_id, rnd, over=None):
     """特级魔兽要诀 —— 备注里 `icon = "特殊魔兽要诀"`，走特殊那支：
     `rand(109..112, 125..131, 134..136, 15)`。"""
-    return ("特殊魔兽要诀", {"data": {"id": _rng(rnd, (109, 112), (125, 131),
-                                                  (134, 136), (15, 15))}})
+    over = over or {}
+    kid = over.get("id")
+    return ("特殊魔兽要诀", {"data": {"id": _rng(rnd, *BOOK_RANGES["特殊魔兽要诀"])
+                                      if kid is None else int(kid)}})
 
 
 # ---------------------------------------------------------------- 变身棒
-def _real_stick(item_id, rnd):
+def _real_stick(item_id, rnd, over=None):
     """真知棒(91) / 超级真知棒(92)。
 
     超级那支：`id1 = rand(135..175)`、`id2 = rand(55..59, 70..99)`。
@@ -247,33 +320,48 @@ def _real_stick(item_id, rnd):
     `rand(20..54)`；`id1` 也从 `[21~134, 310~354, 400~433] - [416]` 直接抽
     （脚本里那 1% 的"稀有"分支靠 `$baby_types[:稀有]`，那是运行期外部数据）。
     """
+    over = over or {}
+    id1 = over.get("id")
+    id2 = over.get("sid")
     if item_id == 92:
-        id1 = rnd.randint(135, 175)
-        id2 = _rng(rnd, (55, 59), (70, 99))
+        if id1 is None:
+            id1 = rnd.randint(135, 175)
+        if id2 is None:
+            id2 = _rng(rnd, (55, 59), (70, 99))
     else:
-        id1 = _rng(rnd, (21, 134), (310, 354), (400, 433))
-        while id1 == 416:                      # 脚本把 416 剔掉了
+        if id1 is None:
             id1 = _rng(rnd, (21, 134), (310, 354), (400, 433))
-        id2 = rnd.randint(20, 54)
+            while id1 == 416:                      # 脚本把 416 剔掉了
+                id1 = _rng(rnd, (21, 134), (310, 354), (400, 433))
+        if id2 is None:
+            id2 = rnd.randint(20, 54)
     return ("超级真知棒" if item_id == 92 else "真知棒",
-            {"data": {"id": id1, "sid": id2, "time": 0}})
+            {"data": {"id": int(id1), "sid": int(id2), "time": 0}})
 
 
 # ---------------------------------------------------------------- 杂项
-def _ginseng(_item_id, rnd):
-    return ("人参果", {"data": {"type": rnd.randrange(5),
-                                "point": rnd.randint(1, 5), "max": 5}})
+def _ginseng(_item_id, rnd, over=None):
+    over = over or {}
+    ty = over.get("type")
+    ty = rnd.randrange(5) if ty is None else max(0, min(int(ty), 4))
+    pt = over.get("point")
+    pt = rnd.randint(1, 5) if pt is None else max(1, min(int(pt), 5))
+    return ("人参果", {"data": {"type": ty, "point": pt, "max": 5}})
 
 
-def _stone(_item_id, _rnd):
+def _stone(_item_id, _rnd, over=None):
     """宝石（光芒石/黑宝石…）：脚本 `def 石头` 写死 `{lv: 1}`。"""
-    return ("宝石", {"data": {"lv": 1}})
+    over = over or {}
+    lv = over.get("lv")
+    return ("宝石", {"data": {"lv": 1 if lv is None else max(1, int(lv))}})
 
 
-def _yuanxiao(_item_id, rnd):
+def _yuanxiao(_item_id, rnd, over=None):
     """元宵：只让**一项**资质涨，其余为 0；上限表照脚本写死。"""
+    over = over or {}
     ranges = ((4, 8), (4, 8), (20, 40), (10, 20), (4, 8), (4, 8))
-    k = rnd.randrange(7)
+    k = over.get("type")
+    k = rnd.randrange(7) if k is None else max(0, min(int(k), 6))
     value = {"atk": 0, "def": 0, "hp": 0, "mp": 0, "agi": 0, "eva": 0,
              "grow": 0.0}
     keys = ("atk", "def", "hp", "mp", "agi", "eva", "grow")
@@ -286,17 +374,22 @@ def _yuanxiao(_item_id, rnd):
                               "max": [8, 8, 40, 20, 8, 8, 0.02]}})
 
 
-def _yuanxiao_dan(_item_id, rnd):
+def _yuanxiao_dan(_item_id, rnd, over=None):
     """激进元宵丹（135）：`def 激进元宵丹(item, max=10)` → `{max: 10}`。"""
-    return ("激进元宵丹", {"data": {"max": 10}})
+    over = over or {}
+    mx = over.get("max")
+    return ("激进元宵丹", {"data": {"max": 10 if mx is None else int(mx)}})
 
 
-def _navigation_flag(item_id, rnd):
+def _navigation_flag(item_id, rnd, over=None):
     """导航旗：`count ||= (item.id == 275 ? 40 : 140)`（**没有 id 键**）。"""
-    return ("导航旗", {"data": {"count": 40 if item_id == 275 else 140}})
+    over = over or {}
+    cnt = over.get("count")
+    return ("导航旗", {"data": {"count": (40 if item_id == 275 else 140)
+                                if cnt is None else max(1, int(cnt))}})
 
 
-def _gift_box(_item_id, _rnd):
+def _gift_box(_item_id, _rnd, over=None):
     """五彩导航旗盒（235）—— `def 礼盒(item, list=[])`，内容是 `{list: [...]}`。
 
     内含建邺/长安/朱紫/傲来/长寿五面导航旗（见物品说明）。
@@ -347,17 +440,122 @@ def builder_for(name):
     return None
 
 
-def build(name, item_id, rnd=None):
+def build(name, item_id, rnd=None, over=None):
     """生成 `(type符号, 内容字典)`；不认识这件东西就返回 None。
 
     `type符号` 就是游戏写的中文符号，可以**直接写进 `@attr["data"][:type]`**。
+    `over` = 用户指定的字段值（`{"id": 45, "mutation": True}` 这种），
+    给了就优先用它，其余字段照游戏规则随机/固定。
     """
     fn = builder_for(name)
     if fn is None:
         return None
-    return fn(int(item_id), rnd or random.Random())
+    return fn(int(item_id), rnd or random.Random(), over)
 
 
 def needs_payload(name):
     """这件东西是不是"运行时才有内容"的那类。"""
     return builder_for(name) is not None
+
+
+# ==========================================================================
+# 「重抽管理」窗口用：这件东西的内容里，哪些字段可以挑
+# ==========================================================================
+def payload_spec(name, item_id):
+    """`(type符号, [字段, ...])`；不是"运行时内容"类物品返回 `(None, [])`。
+
+    字段是 dict：
+
+        {"key": 内容里的键, "label": 界面上的名字,
+         "kind": "actor" | "skill" | "choice" | "int",
+         "pool": [可选 id]（actor/skill 用；None＝全部）,
+         "choices": [(值, 显示名)]（choice 用）,
+         "rng": (下限, 上限)（int 用）}
+
+    ⚠ 这里报出来的**必须是脚本真值**：挑不动的（`进阶石` 的固定 0、`礼盒` 的
+      固定五面旗）就不给字段，界面显示「只能按游戏规则重抽」。
+    """
+    fn = builder_for(name)
+    if fn is None:
+        return None, []
+    if fn in (_baby_egg, _god_egg):
+        pool = egg_pool(item_id)
+        fields = [{"key": "id", "label": "孵出召唤兽", "kind": "actor",
+                   "pool": pool or None}]
+        if item_id in (110, 111, 112, 113):     # 只有这几支会写 mutation
+            fields.append({"key": "mutation", "label": "变异", "kind": "choice",
+                           "choices": [(True, "是"), (False, "否")]})
+        return "孵化蛋", fields
+    if fn in (_skill_book, _skill_book_hi, _skill_book_super,
+              _skill_book_special):
+        book = _book_kind(name)
+        return book, [{"key": "id", "label": "开出的技能", "kind": "skill",
+                       "pool": _pool_of(BOOK_RANGES[book])}]
+    if fn is _real_stick:
+        return ("超级真知棒" if int(item_id) == 92 else "真知棒"), [
+            {"key": "id", "label": "变身目标", "kind": "actor", "pool": None},
+            {"key": "sid", "label": "附带技能", "kind": "skill", "pool": None}]
+    if fn is _formation:
+        return "鬼谷子", [{"key": "key", "label": "阵法", "kind": "choice",
+                           "choices": [(n, n) for n in FORMATION_NAMES]}]
+    if fn is _promote_stone:
+        return "进阶石", [{"key": "id", "label": "已进阶对象", "kind": "actor",
+                           "pool": None},
+                          {"key": "count", "label": "进度", "kind": "int",
+                           "rng": (0, 50)}]
+    if fn is _guide_book:
+        return "制造指南书", [
+            {"key": "type", "label": "类别", "kind": "choice",
+             "choices": [("w", "武器"), ("a", "防具")]},
+            {"key": "id", "label": "图样编号", "kind": "int", "rng": (1, 18)},
+            {"key": "lv", "label": "等级", "kind": "choice",
+             "choices": [(v, str(v)) for v in GUIDE_LVS]}]
+    if fn is _iron:
+        return "百炼精铁", [{"key": "lv", "label": "等级", "kind": "choice",
+                             "choices": [(v, str(v)) for v in IRON_LVS]}]
+    if fn is _atlas:
+        return "上古锻造图策", [
+            {"key": "eid", "label": "部位", "kind": "choice",
+             "choices": [(v, n) for v, n in ATLAS_PARTS]},
+            {"key": "lv", "label": "等级", "kind": "choice",
+             "choices": [(v, str(v)) for v in ATLAS_LVS]}]
+    if fn is _god_eye_bead:
+        return "天眼珠", [{"key": "lv", "label": "等级", "kind": "choice",
+                           "choices": [(v, str(v)) for v in BEAD_LVS]}]
+    if fn is _ginseng:
+        return "人参果", [
+            {"key": "type", "label": "属性", "kind": "choice",
+             "choices": [(i, n) for i, n in enumerate(GINSENG_NAMES)]},
+            {"key": "point", "label": "点数", "kind": "int", "rng": (1, 5)}]
+    if fn is _stone:
+        return "宝石", [{"key": "lv", "label": "等级", "kind": "int",
+                         "rng": (1, 15)}]
+    if fn is _yuanxiao:
+        return "元宵", [{"key": "type", "label": "涨哪项资质", "kind": "choice",
+                         "choices": [(i, n) for i, n in
+                                     enumerate(YUANXIAO_NAMES)]}]
+    if fn is _yuanxiao_dan:
+        return "激进元宵丹", [{"key": "max", "label": "可食用上限",
+                               "kind": "int", "rng": (0, 100)}]
+    if fn is _navigation_flag:
+        return "导航旗", [{"key": "count", "label": "可用次数", "kind": "int",
+                           "rng": (1, 600)}]
+    if fn is _gift_box:
+        return "礼盒", []
+    return None, []
+
+
+def _book_kind(name):
+    """要诀的四档 —— 返回值同时是 `BOOK_RANGES` 的键**和**游戏写的 type 符号。
+
+    ⚠ 物品名是 `特级魔兽要诀`，游戏写的 type 符号却是 `特殊魔兽要诀`
+      （脚本 `_skill_book_special` 那一支），两者别混。
+    """
+    name = name or ""
+    if "高级魔兽要诀" in name:
+        return "高级魔兽要诀"
+    if "超级魔兽要诀" in name:
+        return "超级魔兽要诀"
+    if "特级魔兽要诀" in name:
+        return "特殊魔兽要诀"
+    return "魔兽要诀"

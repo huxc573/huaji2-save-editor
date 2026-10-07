@@ -62,6 +62,7 @@ import marshal_ruby as M  # noqa: E402
 import doctree   # noqa: E402
 import nodetext   # noqa: E402
 import fieldnames   # noqa: E402
+import itemattr   # noqa: E402
 import save    # noqa: E402
 from tables import sect   # noqa: E402
 
@@ -1337,6 +1338,587 @@ class SkillManager(object):
             pass
 
 
+class PayloadManager(object):
+    """重抽管理 —— 给背包里选中的格子重新指定「运行时内容」的独立窗口。
+
+    为什么单开窗口（2026-10-07 川定）：原来只有一个「重抽内容」按钮 + 一个
+    裸 id 输入框，要选内容得自己去 `Data\\Actors` 里查 id；而这类内容有十几个
+    家族（蛋→召唤兽池、要诀→技能池、元宵→涨哪项资质、指南书→类别/等级…），
+    每个家族能挑的字段都不一样。这里仿 `SkillManager`：**按选中的物品自动
+    适配**，列出能挑的候选，选一个应用到**所有选中的格子**。
+
+    ⚠ 和 `SkillManager` 一样：目标每次现取（`doc.save()` 会重解析整档，
+      旧节点全失效），所以只记**槽号**、不缓存节点。
+    """
+
+    def __init__(self, app, first=False):
+        self.app = app
+        tk, ttk = app.tk, app.ttk
+        self.groups = {}         # 家族 typ -> {slots, fields, pools, items}
+        self.order = []          # 家族出现顺序
+        self.fam = None
+        self.picked = {}         # {家族: {字段键: 值}}
+        self.cands = []          # 当前候选 [(值, 名称, 备注)]
+        self.desc_full = ""
+        self._babies = None
+        self._skmeta = None
+
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("重抽管理")
+        win.transient(app.root)
+        win.geometry("820x600")
+        f = ttk.Frame(win, padding=8)
+        f.pack(fill="both", expand=True)
+
+        # ---- 目标行（选中了哪些格子、各自现在是什么内容）
+        self.var_target = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.var_target, justify="left",
+                  wraplength=780).pack(anchor="w")
+
+        # ---- 筛选行：家族 / 字段 / 搜索
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(6, 0))
+        ttk.Label(bar, text="家族").pack(side="left")
+        self.var_fam = tk.StringVar()
+        self.cb_fam = ttk.Combobox(bar, textvariable=self.var_fam,
+                                   state="readonly", width=24)
+        self.cb_fam.pack(side="left", padx=4)
+        self.cb_fam.bind("<<ComboboxSelected>>", lambda e: self.pick_family())
+        ttk.Label(bar, text="字段").pack(side="left", padx=(8, 0))
+        self.var_field = tk.StringVar()
+        self.cb_field = ttk.Combobox(bar, textvariable=self.var_field,
+                                     state="readonly", width=14)
+        self.cb_field.pack(side="left", padx=4)
+        self.cb_field.bind("<<ComboboxSelected>>", lambda e: self.show_field())
+        ttk.Label(bar, text="搜索").pack(side="left", padx=(8, 0))
+        self.var_kw = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=self.var_kw, width=14)
+        ent.pack(side="left", padx=4)
+        ent.bind("<KeyRelease>", lambda e: self.fill_cands())
+        fit_btn(bar, text="清空", command=self.kw_clear).pack(side="left")
+        self.var_info = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.var_info,
+                  foreground="#8a8a8a").pack(side="right", padx=6)
+
+        # ---- 列表 + 说明
+        # ⚠ 说明框先 pack：空间不够时挨刀的是列表（它自带滚动条，可缩）。
+        body = ttk.Panedwindow(f, orient="horizontal")
+        body.pack(fill="both", expand=True, pady=(6, 0))
+        self.desc = tk.Text(body, height=18, width=26, wrap="word",
+                            font=("Microsoft YaHei UI", 9), relief="flat",
+                            highlightthickness=1, highlightbackground="#ddd",
+                            state="disabled")
+        self.desc.pack(side="right", fill="y", padx=(6, 0))
+
+        left = ttk.Frame(body)
+        self.box_list = ttk.Frame(left)
+        self.tv = ttk.Treeview(self.box_list, columns=("id", "name", "note"),
+                               show="headings", height=18, selectmode="browse")
+        for c, t2, w in (("id", "id", 62), ("name", "名称", 190),
+                         ("note", "备注", 150)):
+            self.tv.heading(c, text=t2)
+            # ⚠ 只让「名称」列 stretch（多余宽度全摊给它会在右边留一段空白）
+            self.tv.column(c, width=w, stretch=(c == "name"),
+                           anchor="w" if c != "id" else "center")
+        vs = ttk.Scrollbar(self.box_list, orient="vertical",
+                           command=self.tv.yview)
+        self.tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        self.tv.pack(side="left", fill="both", expand=True)
+        self.box_int = ttk.Frame(left)
+        ttk.Label(self.box_int, text="值：").pack(side="left")
+        self.var_int = tk.StringVar(value="")
+        self.ent_int = ttk.Entry(self.box_int, textvariable=self.var_int,
+                                 width=12)
+        self.ent_int.pack(side="left", padx=6)
+        self.var_int_note = tk.StringVar(value="")
+        ttk.Label(self.box_int, textvariable=self.var_int_note,
+                  foreground="#8a8a8a").pack(side="left")
+        self.var_int.trace_add("write", lambda *a: self._int_changed())
+        body.add(left, weight=3)
+
+        # ---- 操作行
+        ops = ttk.Frame(f)
+        ops.pack(fill="x", pady=(6, 0))
+        self.b_apply = fit_btn(ops, text="应用选中的内容", command=self.apply)
+        self.b_apply.pack(side="left")
+        self.app._bind_tip(self.b_apply,
+                           "把左边选中（或整数字段填好）的内容写到\n"
+                           "**当前家族**里所有选中的格子（覆盖原来的内容）。\n"
+                           "没挑的字段按游戏规则随机。")
+        self.b_rand = fit_btn(ops, text="随机重抽这些格子", command=self.random_all)
+        self.b_rand.pack(side="left", padx=4)
+        self.app._bind_tip(self.b_rand,
+                           "对**全部选中的格子**按游戏规则重抽一份内容\n"
+                           "（不看你挑了什么）。")
+        fit_btn(ops, text="刷新", command=self.refill).pack(side="left", padx=(8, 0))
+        fit_btn(ops, text="关闭", command=self.close).pack(side="right")
+
+        self.tv.bind("<<TreeviewSelect>>", lambda e: self.on_cand())
+        self.tv.bind("<Motion>", self.row_tip)
+        self.tv.bind("<Leave>", lambda e: app._tip_hide())
+        self.desc.bind("<Motion>", self.desc_tip)
+        self.desc.bind("<Leave>", lambda e: app._tip_hide())
+
+        self.refill()
+        center_win(win, app.root)
+        esc_close(win)
+        if first:
+            ent.focus_set()             # ⚠ 得写在 esc_close 之后才优先
+        win.protocol("WM_DELETE_WINDOW", self.close)
+
+    # ------------------------------------------------------------ 名字/候选表
+    def _baby_rows(self):
+        """全部召唤兽 `[(id, 名字)]`（玩家角色/坐骑/空占位都排掉）。"""
+        if self._babies is None:
+            out = []
+            try:
+                nm = datatables.name_map("Actors")
+                bd = self.app.babies_ed()
+                for i in sorted(nm):
+                    if bd is not None and not bd.is_baby_entry(i):
+                        continue
+                    out.append((i, nm[i]))
+            except Exception:
+                out = []
+            self._babies = out
+        return self._babies
+
+    def _skill_rows(self):
+        """全部技能 `[(id, 名字, 描述)]`（分段标题行排掉）。"""
+        if self._skmeta is None:
+            out = []
+            try:
+                for i, (nm, desc) in self.app._skills_meta().items():
+                    if not nm or datatables.section_of(nm):
+                        continue
+                    out.append((i, nm, desc))
+            except Exception:
+                out = []
+            self._skmeta = out
+        return self._skmeta
+
+    def _own_of(self, sid):
+        """技能的「归属」列文字（分段名 > 门派名）—— 同技能管理器口径。"""
+        if getattr(self, "_sec_map", None) is None:
+            try:
+                self._sec_map = skill_sections(self.app._skills_meta())
+            except Exception:
+                self._sec_map = {}
+        sec = self._sec_map.get(sid)
+        if sec:
+            return sec
+        s = sect.sect_of_skill(sid)
+        return sect.sect_name(s) if s else ""
+
+    # ------------------------------------------------------------ 目标 / 家族
+    def refill(self):
+        """按当前选中的格子重建「家族」分组（存档一保存旧节点就失效）。"""
+        self.groups = {}
+        self.order = []
+        g = self.app.g
+        kind = self.app._bag_kind()
+        slots = self.app._bag_slots(quiet=True)
+        if g is None or not slots:
+            self.var_target.set(
+                "先在背包页选中格子（Ctrl 点选 / Shift 连选），再点「重抽管理」。")
+            self._render_none()
+            return
+        skipped = []
+        for slot in slots:
+            it = g._item_node(kind, slot)
+            if it is None:
+                skipped.append(slot)
+                continue
+            info = g.slot_info(kind, slot)
+            iid = info[0] if info else -1
+            nm = g.item_display_name(it, "?")
+            typ, fields = itemattr.payload_spec(nm, iid)
+            if typ is None:
+                skipped.append(slot)          # 包子/装备这类没有运行时内容
+                continue
+            grp = self.groups.get(typ)
+            if grp is None:
+                grp = {"slots": [], "fields": fields, "pools": {}, "items": []}
+                self.groups[typ] = grp
+                self.order.append(typ)
+            grp["slots"].append(slot)
+            grp["items"].append((slot, nm, iid, g.payload_summary(it)))
+            for fld in fields:
+                if fld.get("pool"):
+                    grp["pools"].setdefault(fld["key"], set()).update(
+                        fld["pool"])
+        # 目标行
+        lines = []
+        if self.order:
+            seg = []
+            for typ in self.order:
+                grp = self.groups[typ]
+                names = []
+                for _s, nm, _i, _c in grp["items"]:
+                    if nm not in names:
+                        names.append(nm)
+                seg.append("%s ×%d（%s）" % (typ, len(grp["slots"]),
+                                             "、".join(names[:4])))
+            lines.append("已选 %d 格：%s" % (len(slots), "；".join(seg)))
+            cur = []
+            for _s, nm, _i, c in [x for typ in self.order
+                                  for x in self.groups[typ]["items"]][:5]:
+                cur.append("%s→%s" % (nm, c or "（空）"))
+            lines.append("当前：" + "；".join(cur))
+        if skipped:
+            lines.append("（另有 %d 格没有「运行时内容」或为空，已跳过）"
+                         % len(skipped))
+        self.var_target.set("\n".join(lines))
+        if not self.order:
+            self._render_none()
+            return
+        self.cb_fam.configure(values=tuple(
+            "%s ×%d" % (t, len(self.groups[t]["slots"])) for t in self.order))
+        if self.fam not in self.groups:
+            self.fam = self.order[0]
+            self.picked.pop(self.fam, None)
+        self.var_fam.set("%s ×%d" % (self.fam, len(self.groups[self.fam]["slots"])))
+        self._sync_fields()
+
+    def _render_none(self):
+        self.cb_fam.configure(values=())
+        self.var_fam.set("")
+        self.cb_field.configure(values=())
+        self.var_field.set("")
+        self.var_info.set("")
+        self.box_int.pack_forget()
+        self.box_list.pack(fill="both", expand=True)
+        self.tv.delete(*self.tv.get_children())
+        self.cands = []
+        self.set_desc("")
+        self.b_apply.state(["disabled"])
+        self.b_rand.state(["disabled"])
+
+    def _fam(self):
+        return self.groups.get(self.fam)
+
+    def _sync_fields(self):
+        """家族定下来后，把「字段」下拉填成这个家族能挑的字段。"""
+        grp = self._fam()
+        fields = grp["fields"] if grp else []
+        self.cb_field.configure(state="readonly",
+                                values=tuple(fd["label"] for fd in fields))
+        if not fields:
+            self.var_field.set("")
+            self.box_int.pack_forget()
+            self.box_list.pack(fill="both", expand=True)
+            self.tv.delete(*self.tv.get_children())
+            self.cands = []
+            self.var_info.set("")
+            self.b_apply.state(["!disabled"])
+            self.b_rand.state(["!disabled"])
+            self.set_desc("「%s」的内容是游戏写死的，挑不了具体值 ——\n"
+                          "直接点「应用选中的内容」（或「随机重抽」）按游戏规则\n"
+                          "生成一份即可。\n\n字段：%s"
+                          % (self.fam, "、".join(sorted(
+                              self._fields_of_first())) or "（无）"))
+            return
+        self.b_apply.state(["!disabled"])
+        self.b_rand.state(["!disabled"])
+        self.var_field.set(fields[0]["label"])
+        self.show_field()
+
+    def _fields_of_first(self):
+        """当前家族第一格**现在**的内容字段名（只给说明文字用）。"""
+        grp = self._fam()
+        if not grp:
+            return []
+        slot = grp["slots"][0]
+        it = self.app.g._item_node(self.app._bag_kind(), slot)
+        if it is None:
+            return []
+        try:
+            return list(self.app.g.payload_fields(it).keys())
+        except Exception:
+            return []
+
+    def pick_family(self):
+        """用户换了家族下拉（取下拉里显示的名字反查）。"""
+        txt = self.var_fam.get()
+        for typ in self.order:
+            if txt.startswith(typ + " "):
+                self.fam = typ
+                break
+        self.picked.pop(self.fam, None)
+        self._sync_fields()
+
+    def pick_field(self):
+        """当前字段（字段下拉的显示名 → 字段 dict）。"""
+        grp = self._fam()
+        if not grp:
+            return None
+        lbl = self.var_field.get()
+        for fd in grp["fields"]:
+            if fd["label"] == lbl:
+                return fd
+        return grp["fields"][0] if grp["fields"] else None
+
+    # ------------------------------------------------------------ 候选列表
+    def show_field(self):
+        """按当前字段的类型渲染左栏：列表（actor/skill/choice）或整数框。"""
+        grp = self._fam()
+        fd = self.pick_field()
+        if grp is None or fd is None:
+            return
+        cur = (self.picked.setdefault(self.fam, {}) or {})
+        if fd["key"] not in cur:
+            got = self._current_value(fd["key"])
+            if got is not None:
+                cur[fd["key"]] = got
+        if fd["kind"] == "int":
+            self.box_list.pack_forget()
+            self.box_int.pack(fill="x")
+            lo, hi = fd["rng"]
+            self.var_int_note.set("取值范围 %d ~ %d（游戏里用不到更大的）" % (lo, hi))
+            self.var_int.set("" if cur.get(fd["key"]) is None
+                             else str(cur[fd["key"]]))
+            self.cands = []
+            self.set_desc("「%s」的「%s」直接填个数就行。\n\n"
+                          "范围：%d ~ %d" % (self.fam, fd["label"], lo, hi))
+            return
+        self.box_int.pack_forget()
+        self.box_list.pack(fill="both", expand=True)
+        self.fill_cands()
+
+    def _current_value(self, key):
+        """选中格子现在这一项的字段值（取第一个格子的）。"""
+        grp = self._fam()
+        if not grp:
+            return None
+        it = self.app.g._item_node(self.app._bag_kind(), grp["slots"][0])
+        if it is None:
+            return None
+        try:
+            return self.app.g.payload_fields(it).get(key)
+        except Exception:
+            return None
+
+    def fill_cands(self):
+        fd = self.pick_field()
+        if fd is None or fd["kind"] == "int":
+            return
+        kw = (self.var_kw.get() or "").strip().lower()
+        grp = self._fam()
+        pool = grp["pools"].get(fd["key"]) if grp else None
+        rows = []
+        if fd["kind"] == "choice":
+            for val, label in fd["choices"]:
+                nm = str(label)
+                if kw and kw not in nm.lower() and kw not in str(val).lower():
+                    continue
+                rows.append((val, nm, ""))
+        elif fd["kind"] == "actor":
+            want = set(pool) if pool else None
+            for i, nm in self._baby_rows():
+                if want is not None and i not in want:
+                    continue
+                if kw and kw not in str(i) and kw not in nm.lower():
+                    continue
+                rows.append((i, nm, self._baby_note(i)))
+        elif fd["kind"] == "skill":
+            want = set(pool) if pool else None
+            for i, nm, desc in self._skill_rows():
+                if want is not None and i not in want:
+                    continue
+                if kw and kw not in str(i) and kw not in nm.lower():
+                    continue
+                rows.append((i, nm, self._own_of(i)))
+        self.cands = rows
+        self.tv.delete(*self.tv.get_children())
+        for n, (val, nm, note) in enumerate(rows):
+            self.tv.insert("", "end", iid="c%d" % n, values=(val, nm, note))
+        picked = (self.picked.get(self.fam) or {}).get(fd["key"])
+        hit = None
+        for n, (val, _nm, _note) in enumerate(rows):
+            if val == picked:
+                hit = "c%d" % n
+                break
+        if hit is None and rows:
+            hit = "c0"
+        if hit is not None:
+            self.tv.selection_set(hit)
+            self.tv.see(hit)
+        self.var_info.set("候选 %d 项%s" % (
+            len(rows), "（限本物品的池子）" if pool else ""))
+        self.on_cand()
+
+    def _baby_note(self, i):
+        try:
+            bd = self.app.babies_ed()
+            return bd.type_of(i) or "" if bd else ""
+        except Exception:
+            return ""
+
+    def kw_clear(self):
+        self.var_kw.set("")
+        self.fill_cands()
+
+    def on_cand(self):
+        fd = self.pick_field()
+        sel = self.tv.selection()
+        if fd is None or not sel:
+            return
+        n = int(sel[0][1:])
+        if not (0 <= n < len(self.cands)):
+            return
+        val, nm, _note = self.cands[n]
+        self.picked.setdefault(self.fam, {})[fd["key"]] = val
+        self.set_desc(self._cand_desc(fd, val, nm))
+
+    def _cand_desc(self, fd, val, nm):
+        head = "%s = %s" % (fd["label"], nm)
+        if fd["kind"] == "actor":
+            body = "召唤兽 id %s" % val
+            try:
+                bd = self.app.babies_ed()
+                cfg = bd.config(val) if bd else None
+                if cfg:
+                    body += "\n类型：%s" % cfg.get("type", "?")
+            except Exception:
+                pass
+            return "%s\n\n%s\n\n点「应用选中的内容」写进选中的格子。" % (head, body)
+        if fd["kind"] == "skill":
+            desc = ""
+            for i, _n, d in self._skill_rows():
+                if i == val:
+                    desc = d or ""
+                    break
+            return "%s\n\n技能 #%s %s\n\n%s" % (head, val, self._own_of(val),
+                                               desc or "（没有说明）")
+        return "%s\n\n点「应用选中的内容」写进选中的格子。" % head
+
+    def _int_changed(self):
+        fd = self.pick_field()
+        if fd is None or fd["kind"] != "int":
+            return
+        txt = (self.var_int.get() or "").strip()
+        if txt == "":
+            self.picked.setdefault(self.fam, {}).pop(fd["key"], None)
+            return
+        try:
+            self.picked.setdefault(self.fam, {})[fd["key"]] = int(txt, 0)
+        except ValueError:
+            pass
+
+    # ------------------------------------------------------------ 说明 / 提示
+    def set_desc(self, text):
+        t2 = self.desc
+        t2.configure(state="normal")
+        t2.delete("1.0", "end")
+        if text:
+            t2.insert("1.0", text)
+        t2.configure(state="disabled")
+        self.desc_full = text or ""
+
+    def desc_tip(self, event):
+        if not self.desc_full:
+            self.app._tip_hide()
+            return
+        if getattr(self.app, "_tip_key", None) == "paym:desc":
+            return
+        self.app._tip_show(self.desc_full,
+                           self.desc.winfo_rootx() + event.x + 12,
+                           self.desc.winfo_rooty() + event.y + 12,
+                           key="paym:desc")
+
+    def row_tip(self, event):
+        row = self.tv.identify_row(event.y)
+        if not row:
+            self.app._tip_hide()
+            return
+        tipkey = "paym:%s" % row
+        if getattr(self.app, "_tip_key", None) == tipkey:
+            return
+        n = int(row[1:])
+        if not (0 <= n < len(self.cands)):
+            return
+        val, nm, note = self.cands[n]
+        self.app._tip_show("%s\n%s%s" % (nm, ("[%s] " % note) if note else "",
+                                         val),
+                           self.tv.winfo_rootx() + event.x + 12,
+                           self.tv.winfo_rooty() + event.y + 12, key=tipkey)
+
+    # ------------------------------------------------------------ 写档
+    def apply(self):
+        """把当前挑好的内容写进**当前家族**里所有选中的格子。"""
+        grp = self._fam()
+        if grp is None or self.app.g is None:
+            return
+        over = dict(self.picked.get(self.fam) or {})
+        kind = self.app._bag_kind()
+        done, bad = [], []
+        for slot in grp["slots"]:
+            try:
+                self.app.g.set_payload(kind, slot, over=over or None,
+                                       force=True)
+                done.append(slot)
+            except Exception as e:
+                bad.append((slot, zh_error(e)))
+        if not done:
+            messagebox.showerror("重抽失败",
+                                 "没改成功：\n  " + "\n  ".join(
+                                     "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                                 parent=self.win)
+            return
+        self.app.mark_dirty()
+        msg = "已重抽 %d 格（%s）" % (len(done), self.fam)
+        if bad:
+            msg += "；%d 格失败" % len(bad)
+        self.after_change(msg)
+
+    def random_all(self):
+        """对全部选中的格子按游戏规则随机重抽（不看挑了什么）。"""
+        slots = self.app._bag_slots(quiet=True)
+        if not slots or self.app.g is None:
+            return
+        kind = self.app._bag_kind()
+        done, bad = [], []
+        for slot in slots:
+            try:
+                self.app.g.set_payload(kind, slot, force=True)
+                done.append(slot)
+            except Exception as e:
+                bad.append((slot, zh_error(e)))
+        if not done:
+            messagebox.showerror(
+                "重抽失败",
+                "这些格子没有可重抽的内容：\n  " + "\n  ".join(
+                    "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                parent=self.win)
+            return
+        self.app.mark_dirty()
+        msg = "已按游戏规则重抽 %d 格" % len(done)
+        if bad:
+            msg += "（%d 格跳过）" % len(bad)
+        self.after_change(msg)
+
+    def after_change(self, msg):
+        """改完存档统一收尾：状态栏 + 刷背包 + 保住选中 + 重填自己。"""
+        self.app.set_status(msg + "（记得点「保存修改」）")
+        keep = list(self.app._bag_slots(quiet=True))
+        self.app.fill_party()
+        self.app.pack_select(keep)
+        self._babies = None
+        self.refill()
+
+    def close(self):
+        try:
+            self.app._payload_win = None
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+
 # ---- 按钮统一贴字 ---------------------------------------------------------
 # vista 主题给 ttk.Button 硬设 ~87px 最小宽（文字宽完全不参与计算），
 # 短文字按钮全被顶到下限、看着"宽度固定"。widget 级 padding 用负值抵掉
@@ -2436,7 +3018,9 @@ class App(object):
                             command=self.fill_party).pack(side="left", padx=2)
         fit_btn(bar, text="刷新", command=self.fill_party).pack(side="right")
 
-        ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；左键选格子，右边模板里双击物品＝写进去"
+        ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；左键选格子"
+                          "（Ctrl 点选 / Shift 连选＝一次改一批），"
+                          "右边模板里双击物品＝写进去"
                   ).pack(anchor="w", pady=(6, 2))
 
         body = ttk.Panedwindow(f, orient="horizontal")
@@ -2459,7 +3043,10 @@ class App(object):
                              "鼠标停在物品上可看完整说明）"
                   ).pack(anchor="w")
         cols = ("slot", "idx", "id", "name", "count", "content")
-        self.tv_pack = ttk.Treeview(left, columns=cols, show="headings", height=14)
+        # ⚠ selectmode 显式写出来：默认就是 extended，但背包各按钮都靠它多选
+        #   （2026-10-07 修了「多选只改第一个」的 bug，别哪天被改成 browse）。
+        self.tv_pack = ttk.Treeview(left, columns=cols, show="headings",
+                                    height=14, selectmode="extended")
         for c, w, t in (("slot", 55, "槽号"), ("idx", 45, "格"),
                         ("id", 60, "物品ID"), ("name", 190, "名称"),
                         ("count", 50, "数量"), ("content", 210, "内容")):
@@ -2537,12 +3124,21 @@ class App(object):
         pay = ttk.Frame(f)
         pay.pack(fill="x")
         self.var_bag_kid = tk.StringVar()
-        ttk.Label(pay, text="孵出/开出对象 id（孵化蛋类用，留空＝随机）："
+        b_pay = fit_btn(pay, text="重抽管理",
+                        command=self.open_payload_manager)
+        b_pay.pack(side="left")
+        self._bind_tip(b_pay, "给选中的格子换「运行时内容」（孵化蛋孵出哪只、\n"
+                              "要诀开出什么技能、元宵涨哪项资质…）。\n"
+                              "开独立窗口：按选中物品**自动适配**，列出能挑的\n"
+                              "候选（蛋→该蛋的兽池、要诀→该档技能池），选一个\n"
+                              "应用到所有选中的格子；不挑就按游戏规则重抽。\n"
+                              "Ctrl 点选 / Shift 连选 = 一次改一批。")
+        fit_btn(pay, text="随机重抽选中的格子",
+                command=self.bag_reroll).pack(side="left", padx=6)
+        ttk.Label(pay, text="孵出/开出对象 id（写入或随机重抽时用，留空＝随机）："
                   ).pack(side="left")
         ttk.Entry(pay, textvariable=self.var_bag_kid, width=8).pack(side="left")
-        fit_btn(pay, text="给选中的格子重抽内容",
-                   command=self.bag_reroll).pack(side="left", padx=6)
-        ttk.Label(pay, text="　（召唤兽 id 看 Data\\Actors；留空就是按游戏范围随机）",
+        ttk.Label(pay, text="　（召唤兽 id 看 Data\\Actors）",
                   foreground="#777").pack(side="left")
         self.var_bag_pay = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.var_bag_pay, foreground="#a33",
@@ -5888,13 +6484,47 @@ class App(object):
                 self.var_bag_pay.set("")
         return need
 
+    def _bag_slots(self, quiet=False):
+        """选中的格子号（多选按槽号升序）；一个都没选返回 []。
+
+        ⚠ 2026-10-07 川报「多选之后点功能还是只改第一个」：`tv_pack` 一直是
+          `extended`（能多选），但各按钮都只取 `selection()[0]`。改成统一从
+          这里取**全部**选中格 —— 每格的操作逻辑跟单格时完全一样。
+        """
+        out = set()
+        for iid in self.tv_pack.selection():
+            try:
+                out.add(int(iid[1:]))
+            except (ValueError, IndexError):
+                pass
+        if not out and not quiet:
+            messagebox.showinfo("提示",
+                                "先在左边点一个格子（Ctrl 点选 / Shift 连选）。",
+                                parent=self.root)
+        return sorted(out)
+
     def _bag_slot(self, quiet=False):
-        sel = self.tv_pack.selection()
-        if not sel:
-            if not quiet:
-                messagebox.showinfo("提示", "先在左边点一个格子。", parent=self.root)
-            return None
-        return int(sel[0][1:])
+        """单格（取第一个选中项）—— 只给「预览 / 双击」这类单格操作用。"""
+        slots = self._bag_slots(quiet=quiet)
+        return slots[0] if slots else None
+
+    def pack_select(self, slots):
+        """把背包列表里的这些槽号重新选中（`fill_party()` 之后恢复选中用）。
+
+        ⚠ Treeview 重建后必须按 key 恢复选中，否则选中会跳回第一行（通则）。
+        """
+        if not hasattr(self, "tv_pack"):
+            return
+        keep = []
+        for s in slots:
+            iid = "s%d" % s
+            if self.tv_pack.exists(iid):
+                keep.append(iid)
+        if keep:
+            try:
+                self.tv_pack.selection_set(keep)
+            except Exception:
+                pass
 
     def bag_pick(self):
         """选中格子 → 把 id / 数量填到输入框（仿画迹1 的 load_pack_edit）。"""
@@ -5936,8 +6566,8 @@ class App(object):
         except ValueError:
             n = 1
         if into_selected:
-            slot = self._bag_slot()
-            if slot is None:
+            slots = self._bag_slots()
+            if not slots:
                 return
         else:
             page = self.var_bag_page.get()
@@ -5949,36 +6579,81 @@ class App(object):
                 messagebox.showinfo("提示", "这一页没空格了，先清一个。",
                                     parent=self.root)
                 return
-            slot = free[0]
-        try:
-            self.g.set_item(kind, slot, iid, n, kid=self._bag_kid())
-        except Exception as e:
-            messagebox.showerror("写入失败", human(str(e)), parent=self.root)
+            slots = [free[0]]
+        kid = self._bag_kid()
+        done, bad = [], []
+        for slot in slots:
+            try:
+                self.g.set_item(kind, slot, iid, n, kid=kid)
+                done.append(slot)
+            except Exception as e:
+                bad.append((slot, human(str(e))))
+        if not done:
+            messagebox.showerror("写入失败",
+                                 "没写进去：\n  " + "\n  ".join(
+                                     "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                                 parent=self.root)
             return
         self.mark_dirty()
         self.fill_party()
-        self.tv_pack.selection_set("s%d" % slot)
-        self.set_status("槽 %d 已换成 id=%d ×%d（计数校验已同步；保存时会整档重写）"
-                        % (slot, iid, n))
+        self.pack_select(done)
+        msg = ("槽 %s 已换成 id=%d ×%d" % ("、".join(str(s) for s in done),
+                                           iid, n)
+               if len(done) > 1 else "槽 %d 已换成 id=%d ×%d" % (done[0], iid, n))
+        if bad:
+            msg += "（%d 格失败）" % len(bad)
+        self.set_status(msg + "（计数校验已同步；保存时会整档重写）")
 
     def bag_reroll(self):
-        """给选中的格子重抽/指定“运行时内容”（孵化蛋孵出哪只、要诀开出什么技能）。"""
-        slot = self._bag_slot()
-        if slot is None:
+        """给**选中的全部格子**按游戏规则重抽“运行时内容”（蛋孵哪只、要诀开什么技能）。
+
+        ⚠ 「孵出/开出对象 id」输入框填了就按它来（老行为），留空＝按游戏范围随机。
+          2026-10-07 之前只作用第一个选中格 —— 川报过一次，现在改成多格。
+        """
+        slots = self._bag_slots()
+        if not slots:
             return
         kind = self._bag_kind()
         kid = self._bag_kid()
-        try:
-            t, d = self.g.set_payload(kind, slot, kid=kid, force=True)
-        except Exception as e:
-            messagebox.showerror("重抽内容", zh_error(e), parent=self.root)
+        done, bad = [], []
+        for slot in slots:
+            try:
+                self.g.set_payload(kind, slot, kid=kid, force=True)
+                done.append(slot)
+            except Exception as e:
+                bad.append((slot, zh_error(e)))
+        if not done:
+            messagebox.showerror(
+                "重抽内容",
+                "这些格子没有可重抽的内容：\n  " + "\n  ".join(
+                    "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                parent=self.root)
             return
         self.mark_dirty()
         self.fill_party()
-        self.tv_pack.selection_set("s%d" % slot)
-        it = self.g._item_node(kind, slot)
-        self.set_status("槽 %d 的内容已重新生成：%s"
-                        % (slot, self.g.payload_summary(it)))
+        self.pack_select(done)
+        it = self.g._item_node(kind, done[-1])
+        msg = ("槽 %s 的内容已重新生成" % "、".join(str(s) for s in done)
+               if len(done) > 1 else "槽 %d 的内容已重新生成" % done[0])
+        if bad:
+            msg += "（%d 格跳过）" % len(bad)
+        self.set_status("%s：%s" % (msg, self.g.payload_summary(it)))
+
+    def open_payload_manager(self):
+        """开「重抽管理」窗口（已经开着就抬到前面 + 重读选中）。"""
+        if self.g is None:
+            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+            return None
+        w = getattr(self, "_payload_win", None)
+        if w is not None and getattr(w, "win", None) is not None \
+                and w.win.winfo_exists():
+            w.win.lift()
+            w.win.focus_set()
+            w.refill()
+            return w
+        w = PayloadManager(self, first=True)
+        self._payload_win = w
+        return w
 
     def bag_all(self, count=99):
         """把本页已有格子的数量批量设成 count。"""
@@ -6201,38 +6876,69 @@ class App(object):
             self.bag_add()
 
     def bag_set_count(self):
-        slot = self._bag_sel()
-        if slot is None:
+        """把选中的**每一格**数量都改成输入框里的数（多选=一次改一批）。"""
+        slots = self._bag_slots()
+        if not slots:
             return
         try:
             n = int(self.var_bag_cnt.get() or "0", 0)
         except ValueError:
             messagebox.showinfo("提示", "数量要填整数。", parent=self.root)
             return
-        try:
-            got = self.g.set_count(self._bag_kind(), slot, n)
-        except Exception as e:
-            messagebox.showerror("改数量失败", human(str(e)), parent=self.root)
+        kind = self._bag_kind()
+        done, bad = [], []
+        for slot in slots:
+            try:
+                done.append((slot, self.g.set_count(kind, slot, n)))
+            except Exception as e:
+                bad.append((slot, human(str(e))))
+        if not done:
+            messagebox.showerror(
+                "改数量失败",
+                "没改成功：\n  " + "\n  ".join(
+                    "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                parent=self.root)
             return
         self.mark_dirty()
         self.fill_party()
-        self.set_status("槽 %d 数量 = %d（物品计数校验已同步）" % (slot, got))
+        self.pack_select([s for s, _ in done])
+        msg = ("槽 %s 数量 = %d" % ("、".join(str(s) for s, _ in done), n)
+               if len(done) > 1 else "槽 %d 数量 = %d" % (done[0][0], done[0][1]))
+        if bad:
+            msg += "（%d 格是空的/结构不对，跳过）" % len(bad)
+        self.set_status(msg + "（物品计数校验已同步）")
 
     def bag_clear(self):
-        slot = self._bag_sel()
-        if slot is None:
+        """清空选中的**每一格**（多选=一次清一批）。"""
+        slots = self._bag_slots()
+        if not slots:
             return
-        try:
-            if self.g.clear_slot(self._bag_kind(), slot):
-                self.mark_dirty()
-                self.fill_party()
-                self.set_status("已清空槽 %d（计数校验已同步）" % slot)
-        except Exception as e:
-            messagebox.showerror("清空失败", human(str(e)), parent=self.root)
+        kind = self._bag_kind()
+        done, bad = [], []
+        for slot in slots:
+            try:
+                if self.g.clear_slot(kind, slot):
+                    done.append(slot)
+            except Exception as e:
+                bad.append((slot, human(str(e))))
+        if done:
+            self.mark_dirty()
+            self.fill_party()
+            self.pack_select(done)
+        if bad:
+            messagebox.showerror("清空失败",
+                                 "有 %d 格没清掉：\n  " % len(bad) + "\n  ".join(
+                                     "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                                 parent=self.root)
+            return
+        self.set_status("已清空 %d 格（%s）（计数校验已同步）"
+                        % (len(done), "、".join(str(s) for s in done))
+                        if done else "选中的格子本来就是空的")
 
     def bag_add(self):
-        slot = self._bag_sel()
-        if slot is None:
+        """按 id 往选中的**每一格**写一份（多选=一次铺一批；已有东西的格子不覆盖）。"""
+        slots = self._bag_slots()
+        if not slots:
             return
         kind = self._bag_kind()
         try:
@@ -6257,15 +6963,30 @@ class App(object):
                         "还是往里写吗？" % (db_key, iid), parent=self.root):
             return
         self._warn_payload(kind, iid)
-        try:
-            self.g.add_item(kind, slot, iid, n, kid=self._bag_kid())
-        except Exception as e:
-            messagebox.showerror("添加失败", human(str(e)), parent=self.root)
+        kid = self._bag_kid()
+        done, bad = [], []
+        for slot in slots:
+            try:
+                self.g.add_item(kind, slot, iid, n, kid=kid)
+                done.append(slot)
+            except Exception as e:
+                bad.append((slot, human(str(e))))
+        if not done:
+            messagebox.showerror(
+                "添加失败",
+                "没写进去：\n  " + "\n  ".join(
+                    "槽 %s：%s" % (s, w) for s, w in bad[:8]),
+                parent=self.root)
             return
         self.mark_dirty()
         self.fill_party()
-        self.set_status("已往槽 %d 放入 %s ×%d（结构性改动：保存时会整档重写）"
-                        % (slot, name, n))
+        self.pack_select(done)
+        msg = ("已往槽 %s 各放入 %s ×%d" % ("、".join(str(s) for s in done),
+                                            name, n)
+               if len(done) > 1 else "已往槽 %d 放入 %s ×%d" % (done[0], name, n))
+        if bad:
+            msg += "（%d 格已有东西，没覆盖）" % len(bad)
+        self.set_status(msg + "（结构性改动：保存时会整档重写）")
 
     # ================================================== 5 开关 / 变量
     def fill_switches(self):
