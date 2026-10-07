@@ -1358,7 +1358,7 @@ class PayloadManager(object):
         self.order = []          # 家族出现顺序
         self.fam = None
         self.picked = {}         # {家族: {字段键: 值}}
-        self.cands = []          # 当前候选 [(值, 名称, 备注)]
+        self.cands = []          # 当前候选 [(值, 名称, 分类, 说明)]
         self.desc_full = ""
         self._babies = None
         self._skmeta = None
@@ -1413,13 +1413,15 @@ class PayloadManager(object):
 
         left = ttk.Frame(body)
         self.box_list = ttk.Frame(left)
-        self.tv = ttk.Treeview(self.box_list, columns=("id", "name", "note"),
+        self.tv = ttk.Treeview(self.box_list,
+                               columns=("id", "name", "cls", "note"),
                                show="headings", height=18, selectmode="browse")
-        for c, t2, w in (("id", "id", 54), ("name", "名称", 150),
-                         ("note", "说明", 320)):
+        # ⚠ 2026-10-07 川：编号、分类各占一列 —— 原来挤在悬停浮窗里太碍眼。
+        for c, t2, w in (("id", "编号", 54), ("name", "名称", 148),
+                         ("cls", "分类", 100), ("note", "说明", 248)):
             self.tv.heading(c, text=t2)
-            # ⚠ 只让「名称」列 stretch（多余宽度全摊给它会在右边留一段空白）
-            self.tv.column(c, width=w, stretch=(c == "name"),
+            # ⚠ 只让「说明」列 stretch（多余宽度摊给名字会在右边留一段空白）
+            self.tv.column(c, width=w, stretch=(c == "note"),
                            anchor="w" if c != "id" else "center")
         vs = ttk.Scrollbar(self.box_list, orient="vertical",
                            command=self.tv.yview)
@@ -1713,7 +1715,7 @@ class PayloadManager(object):
                 nm = str(label)
                 if kw and kw not in nm.lower() and kw not in str(val).lower():
                     continue
-                rows.append((val, nm, ""))
+                rows.append((val, nm, "", ""))
         elif fd["kind"] == "actor":
             want = set(pool) if pool else None
             for i, nm in self._baby_rows():
@@ -1721,7 +1723,9 @@ class PayloadManager(object):
                     continue
                 if kw and kw not in str(i) and kw not in nm.lower():
                     continue
-                rows.append((i, nm, self._actor_short(i)))
+                # 分类＝档位；说明＝Actors 表里的描述
+                rows.append((i, nm, self._baby_note(i),
+                             self._short(self._data_desc("Actors", i), 40)))
         elif fd["kind"] == "skill":
             want = set(pool) if pool else None
             for i, nm, desc in self._skill_rows():
@@ -1729,14 +1733,16 @@ class PayloadManager(object):
                     continue
                 if kw and kw not in str(i) and kw not in nm.lower():
                     continue
-                rows.append((i, nm, self._short(desc) or self._own_of(i)))
+                # 分类＝归属（分段名 > 门派）；说明＝技能描述摘要
+                rows.append((i, nm, self._own_of(i), self._short(desc)))
         self.cands = rows
         self.tv.delete(*self.tv.get_children())
-        for n, (val, nm, note) in enumerate(rows):
-            self.tv.insert("", "end", iid="c%d" % n, values=(val, nm, note))
+        for n, (val, nm, cls, note) in enumerate(rows):
+            self.tv.insert("", "end", iid="c%d" % n,
+                           values=(val, nm, cls, note))
         picked = (self.picked.get(self.fam) or {}).get(fd["key"])
         hit = None
-        for n, (val, _nm, _note) in enumerate(rows):
+        for n, (val, _nm, _cls, _note) in enumerate(rows):
             if val == picked:
                 hit = "c%d" % n
                 break
@@ -1769,14 +1775,6 @@ class PayloadManager(object):
         except Exception:
             return ""
         return (pair[1] if pair and len(pair) > 1 else "") or ""
-
-    def _actor_short(self, i):
-        """召唤兽候选的摘要：档位 + Actors 表里的说明（有就带上）。"""
-        note = self._baby_note(i)
-        d = self._data_desc("Actors", i)
-        if d:
-            note = (note + " " if note else "") + self._short(d, 40)
-        return note
 
     def _actor_detail(self, i):
         """召唤兽候选的详情：档位 / 携带等级 / 六项资质 / 成长 + Actors 表说明。"""
@@ -1825,29 +1823,30 @@ class PayloadManager(object):
         n = int(sel[0][1:])
         if not (0 <= n < len(self.cands)):
             return
-        val, nm, _note = self.cands[n]
+        val, nm, _cls, _note = self.cands[n]
         self.picked.setdefault(self.fam, {})[fd["key"]] = val
         self.set_desc(self._cand_desc(fd, val, nm))
 
-    def _cand_desc(self, fd, val, nm):
-        """选中候选的详情：技能读技能管理器的说明，召唤兽读档位/资质/描述。"""
-        head = "%s = %s" % (fd["label"], nm)
+    def _cand_desc(self, fd, val, nm, head=True):
+        """选中候选的详情：技能读技能管理器的说明，召唤兽读档位/资质/描述。
+
+        head=True 时开头带一行「字段 = 名字」（说明框用）；悬停浮窗传
+        False —— 鼠标就停在那行候选上，再报一遍名字是多余的（2026-10-07
+        川）。编号 / 分类已在列表的两列里，这里一律不重复。
+        """
+        first = ("%s = %s" % (fd["label"], nm)) if head else ""
         if fd["kind"] == "actor":
-            body = self._actor_detail(val)
-            return "%s\n%s\n点「应用选中的内容」写进选中的格子。" % (
-                head, body or ("召唤兽 id %s" % val))
-        if fd["kind"] == "skill":
-            desc = ""
+            body = self._actor_detail(val) or ("召唤兽 id %s" % val)
+        elif fd["kind"] == "skill":
+            body = ""
             for i, _n, d in self._skill_rows():
                 if i == val:
-                    desc = d or ""
+                    body = d or ""
                     break
-            own = (self._own_of(val) or "").strip()
-            tag = "技能 #%s" % val
-            if own:
-                tag += "（%s）" % own
-            return "%s\n%s\n%s" % (head, tag, desc or "（没有说明）")
-        return "%s\n点「应用选中的内容」写进选中的格子。" % head
+            body = body or "（没有说明）"
+        else:
+            body = "点「应用选中的内容」写进选中的格子。"
+        return "\n".join(x for x in (first, body) if x)
 
     def _int_changed(self):
         fd = self.pick_field()
@@ -1912,9 +1911,13 @@ class PayloadManager(object):
         if not (0 <= n < len(self.cands)):
             return
         fd = self.pick_field()
-        val, nm, note = self.cands[n]
-        body = self._cand_desc(fd, val, nm) if fd is not None else note
-        self.app._tip_show(body or ("%s（id=%s）" % (nm, val)),
+        val, nm, _cls, note = self.cands[n]
+        body = (self._cand_desc(fd, val, nm, head=False)
+                if fd is not None else note)
+        if not body:
+            self.app._tip_hide()
+            return
+        self.app._tip_show(body,
                            self.tv.winfo_rootx() + event.x + 12,
                            self.tv.winfo_rooty() + event.y + 12, key=tipkey)
 
