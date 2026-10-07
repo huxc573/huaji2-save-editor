@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""纯 Python 的 AES-128-ECB（游戏里 `AES_ECB` 模块的等价实现）。
+"""AES-128-ECB（游戏里 `AES_ECB` 模块的等价实现，零第三方依赖也能跑）。
 
 为什么要它：游戏的 `Change` 类（`$game_system.security`）把"累计获得数量"
 **逐位数字 AES-ECB 加密**后存进存档：
@@ -25,9 +25,21 @@
 
 ⚠ 这是**算法实现**，不是"抄游戏素材"：AES 是公开标准，密钥来自游戏脚本里
 明写的常量（本工具只用来读写自己的存档）。
-"""
-import os
 
+--- 实现：三条路，结果逐字节一致 -------------------------------------------
+
+存档那一层（`save_v201`）一次要解 **4 万多块**（70 KB 密文），纯 Python 走
+朴素 S 盒实现时 1 毫秒/块 ⇒ 整档 4.6 秒，载入慢得离谱（2026-10-07 川报
+「载入存档太慢」）。所以这里按快慢排三条路，`set_key` 时选一次：
+
+1. **C 扩展**（pycryptodome `Crypto` / `cryptography`）—— 有就用，整段进整段出，
+   微秒级；
+2. **T 表纯 Python**（本文件）—— 每轮 4 次查表代替 16 次 `_mul`，比朴素快 ~20 倍；
+3. 朴素实现已删除（`_mul` 仍保留，用来在 import 时算乘表）。
+
+⚠ 项目**绝不允许**把「没有第三方库」变成「功能缺失」—— 第 1 条只是加速，
+   拿掉也能正常读写（见 `docs/开发指南.md`）。所以别把 T 表那条路删了。
+"""
 KEY = b"admin_alskmcndfj"
 
 
@@ -82,8 +94,73 @@ def _mul(a, b):
     return r & 0xFF
 
 
+# --------------------------------------------------------------------------
+# 乘法表 + T 表（import 时算一次，约 2 ms）
+#
+# T 表把"SubBytes + ShiftRows + MixColumns"整轮压成 4 次查表：
+#   TE0[x] = pack(2·S[x], 1·S[x], 1·S[x], 3·S[x])   # 输入字节在**第 0 行**时
+#   其余三张按 8 位循环右移（矩阵是循环矩阵，移位同时对齐字节位置与系数列）
+# 解密侧同理用逆 S 盒 + 逆 MixColumns 系数（0e/09/0d/0b）。
+# --------------------------------------------------------------------------
+def _mk_mul(c):
+    return [_mul(i, c) for i in range(256)]
+
+
+MUL2, MUL3 = _mk_mul(2), _mk_mul(3)
+MUL9, MUL11, MUL13, MUL14 = _mk_mul(9), _mk_mul(11), _mk_mul(13), _mk_mul(14)
+
+
+def _rotr32(v, n):
+    return ((v >> n) | (v << (32 - n))) & 0xFFFFFFFF
+
+
+def _pack4(b0, b1, b2, b3):
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+TE0 = [_pack4(MUL2[s], s, s, MUL3[s]) for s in SBOX]
+TE1 = [_rotr32(v, 8) for v in TE0]
+TE2 = [_rotr32(v, 16) for v in TE0]
+TE3 = [_rotr32(v, 24) for v in TE0]
+
+TD0 = [_pack4(MUL14[s], MUL9[s], MUL13[s], MUL11[s]) for s in INV_SBOX]
+TD1 = [_rotr32(v, 8) for v in TD0]
+TD2 = [_rotr32(v, 16) for v in TD0]
+TD3 = [_rotr32(v, 24) for v in TD0]
+
+
+def _inv_mix_word(x):
+    """对一个 32 位轮密钥字做 InvMixColumns（等价逆密码要用，见 FIPS-197 §5.3.5）。"""
+    a0, a1, a2, a3 = (x >> 24) & 0xFF, (x >> 16) & 0xFF, (x >> 8) & 0xFF, x & 0xFF
+    return _pack4(MUL14[a0] ^ MUL11[a1] ^ MUL13[a2] ^ MUL9[a3],
+                  MUL9[a0] ^ MUL14[a1] ^ MUL11[a2] ^ MUL13[a3],
+                  MUL13[a0] ^ MUL9[a1] ^ MUL14[a2] ^ MUL11[a3],
+                  MUL11[a0] ^ MUL13[a1] ^ MUL9[a2] ^ MUL14[a3])
+
+
+def _c_backend(key):
+    """能用的 C 扩展就返回 `(整段加密, 整段解密)`，否则 None。
+
+    ⚠ 只在这里做一次探测：两条 import 都可能因为「装了但后端坏掉」而抛
+      **非 ImportError**（比如缺 libgcc / DLL 加载失败），所以一律 `except Exception`。
+    """
+    try:
+        from Crypto.Cipher import AES as _pc
+        ctx = _pc.new(bytes(key), _pc.MODE_ECB)
+        return ctx.encrypt, ctx.decrypt
+    except Exception:
+        pass
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher as _Cipher, algorithms as _alg, modes as _modes)
+        ctx = _Cipher(_alg.AES(bytes(key)), _modes.ECB())
+        return ctx.encryptor().update, ctx.decryptor().update
+    except Exception:
+        return None
+
+
 class AES(object):
-    """AES-128 单块加解密（state 按列优先，和标准一致）。"""
+    """AES-128/192/256 单块加解密（state 按列优先，和标准一致）。"""
 
     def __init__(self, key=None):
         self.set_key(key or KEY)
@@ -111,96 +188,113 @@ class AES(object):
                 t = [SBOX[b] for b in t]
             w.append([w[i - self.nk][j] ^ t[j] for j in range(4)])
         self.w = w
+        self._rk = [_pack4(*x) for x in w]              # 轮密钥（每 4 个字一轮）
+        self._drk = self._dec_keys()
+        self._c = _c_backend(key)
 
-    def _round_keys(self, rnd):
-        out = []
-        for c in range(4):
-            out.append(self.w[rnd * 4 + c])
-        return out
-
-    # ---- 基本变换
-    @staticmethod
-    def _add_round_key(state, rk):
-        for c in range(4):
-            for r in range(4):
-                state[r][c] ^= rk[c][r]
-
-    @staticmethod
-    def _sub_bytes(state, table=SBOX):
-        for r in range(4):
-            for c in range(4):
-                state[r][c] = table[state[r][c]]
-
-    @staticmethod
-    def _shift_rows(state):
-        for r in range(1, 4):
-            state[r] = state[r][r:] + state[r][:r]
-
-    @staticmethod
-    def _inv_shift_rows(state):
-        for r in range(1, 4):
-            state[r] = state[r][-r:] + state[r][:-r]
-
-    @staticmethod
-    def _mix_columns(state):
-        for c in range(4):
-            a = [state[r][c] for r in range(4)]
-            state[0][c] = _mul(a[0], 2) ^ _mul(a[1], 3) ^ a[2] ^ a[3]
-            state[1][c] = a[0] ^ _mul(a[1], 2) ^ _mul(a[2], 3) ^ a[3]
-            state[2][c] = a[0] ^ a[1] ^ _mul(a[2], 2) ^ _mul(a[3], 3)
-            state[3][c] = _mul(a[0], 3) ^ a[1] ^ a[2] ^ _mul(a[3], 2)
-
-    @staticmethod
-    def _inv_mix_columns(state):
-        for c in range(4):
-            a = [state[r][c] for r in range(4)]
-            state[0][c] = (_mul(a[0], 14) ^ _mul(a[1], 11)
-                           ^ _mul(a[2], 13) ^ _mul(a[3], 9))
-            state[1][c] = (_mul(a[0], 9) ^ _mul(a[1], 14)
-                           ^ _mul(a[2], 11) ^ _mul(a[3], 13))
-            state[2][c] = (_mul(a[0], 13) ^ _mul(a[1], 9)
-                           ^ _mul(a[2], 14) ^ _mul(a[3], 11))
-            state[3][c] = (_mul(a[0], 11) ^ _mul(a[1], 13)
-                           ^ _mul(a[2], 9) ^ _mul(a[3], 14))
+    def _dec_keys(self):
+        """等价逆密码的解密轮密钥：轮序倒过来，中间各轮先过一遍 InvMixColumns。"""
+        nr, rk = self.nr, self._rk
+        out = rk[4 * nr:4 * nr + 4]
+        for r in range(1, nr):
+            out += [_inv_mix_word(x) for x in rk[4 * (nr - r):4 * (nr - r) + 4]]
+        return out + rk[:4]
 
     # ---- 单块
     def encrypt_block(self, block):
-        state = [[block[4 * c + r] for c in range(4)] for r in range(4)]
-        self._add_round_key(state, self._round_keys(0))
-        for rnd in range(1, self.nr):
-            self._sub_bytes(state)
-            self._shift_rows(state)
-            self._mix_columns(state)
-            self._add_round_key(state, self._round_keys(rnd))
-        self._sub_bytes(state)
-        self._shift_rows(state)
-        self._add_round_key(state, self._round_keys(self.nr))
-        return bytes(state[r][c] for c in range(4) for r in range(4))
+        if self._c:
+            return self._c[0](bytes(block))
+        return self._enc_block(block)
 
     def decrypt_block(self, block):
-        state = [[block[4 * c + r] for c in range(4)] for r in range(4)]
-        self._add_round_key(state, self._round_keys(self.nr))
-        for rnd in range(self.nr - 1, 0, -1):
-            self._inv_shift_rows(state)
-            self._sub_bytes(state, INV_SBOX)
-            self._add_round_key(state, self._round_keys(rnd))
-            self._inv_mix_columns(state)
-        self._inv_shift_rows(state)
-        self._sub_bytes(state, INV_SBOX)
-        self._add_round_key(state, self._round_keys(0))
-        return bytes(state[r][c] for c in range(4) for r in range(4))
+        if self._c:
+            return self._c[1](bytes(block))
+        return self._dec_block(block)
+
+    # ---- 整段（存档用；C 扩展一次进一次出，纯 Python 才逐块）
+    def ecb_encrypt(self, data):
+        if self._c:
+            return self._c[0](data)
+        e = self._enc_block
+        return b"".join(e(data[i:i + 16]) for i in range(0, len(data), 16))
+
+    def ecb_decrypt(self, data):
+        if self._c:
+            return self._c[1](data)
+        d = self._dec_block
+        return b"".join(d(data[i:i + 16]) for i in range(0, len(data), 16))
+
+    # ---- T 表实现
+    def _enc_block(self, block):
+        rk = self._rk
+        s0 = int.from_bytes(block[0:4], "big") ^ rk[0]
+        s1 = int.from_bytes(block[4:8], "big") ^ rk[1]
+        s2 = int.from_bytes(block[8:12], "big") ^ rk[2]
+        s3 = int.from_bytes(block[12:16], "big") ^ rk[3]
+        for r in range(1, self.nr):
+            o = 4 * r
+            t0 = (TE0[s0 >> 24] ^ TE1[(s1 >> 16) & 0xFF]
+                  ^ TE2[(s2 >> 8) & 0xFF] ^ TE3[s3 & 0xFF] ^ rk[o])
+            t1 = (TE0[s1 >> 24] ^ TE1[(s2 >> 16) & 0xFF]
+                  ^ TE2[(s3 >> 8) & 0xFF] ^ TE3[s0 & 0xFF] ^ rk[o + 1])
+            t2 = (TE0[s2 >> 24] ^ TE1[(s3 >> 16) & 0xFF]
+                  ^ TE2[(s0 >> 8) & 0xFF] ^ TE3[s1 & 0xFF] ^ rk[o + 2])
+            t3 = (TE0[s3 >> 24] ^ TE1[(s0 >> 16) & 0xFF]
+                  ^ TE2[(s1 >> 8) & 0xFF] ^ TE3[s2 & 0xFF] ^ rk[o + 3])
+            s0, s1, s2, s3 = t0, t1, t2, t3
+        o = 4 * self.nr
+        u0 = (_pack4(SBOX[s0 >> 24], SBOX[(s1 >> 16) & 0xFF],
+                     SBOX[(s2 >> 8) & 0xFF], SBOX[s3 & 0xFF])) ^ rk[o]
+        u1 = (_pack4(SBOX[s1 >> 24], SBOX[(s2 >> 16) & 0xFF],
+                     SBOX[(s3 >> 8) & 0xFF], SBOX[s0 & 0xFF])) ^ rk[o + 1]
+        u2 = (_pack4(SBOX[s2 >> 24], SBOX[(s3 >> 16) & 0xFF],
+                     SBOX[(s0 >> 8) & 0xFF], SBOX[s1 & 0xFF])) ^ rk[o + 2]
+        u3 = (_pack4(SBOX[s3 >> 24], SBOX[(s0 >> 16) & 0xFF],
+                     SBOX[(s1 >> 8) & 0xFF], SBOX[s2 & 0xFF])) ^ rk[o + 3]
+        return (u0.to_bytes(4, "big") + u1.to_bytes(4, "big")
+                + u2.to_bytes(4, "big") + u3.to_bytes(4, "big"))
+
+    def _dec_block(self, block):
+        drk = self._drk
+        s0 = int.from_bytes(block[0:4], "big") ^ drk[0]
+        s1 = int.from_bytes(block[4:8], "big") ^ drk[1]
+        s2 = int.from_bytes(block[8:12], "big") ^ drk[2]
+        s3 = int.from_bytes(block[12:16], "big") ^ drk[3]
+        for r in range(1, self.nr):
+            o = 4 * r
+            # InvShiftRows 把第 r 行往右移 r 列 ⇒ 输出第 0 列的行 r 取自输入列 (4-r)%4
+            t0 = (TD0[s0 >> 24] ^ TD1[(s3 >> 16) & 0xFF]
+                  ^ TD2[(s2 >> 8) & 0xFF] ^ TD3[s1 & 0xFF] ^ drk[o])
+            t1 = (TD0[s1 >> 24] ^ TD1[(s0 >> 16) & 0xFF]
+                  ^ TD2[(s3 >> 8) & 0xFF] ^ TD3[s2 & 0xFF] ^ drk[o + 1])
+            t2 = (TD0[s2 >> 24] ^ TD1[(s1 >> 16) & 0xFF]
+                  ^ TD2[(s0 >> 8) & 0xFF] ^ TD3[s3 & 0xFF] ^ drk[o + 2])
+            t3 = (TD0[s3 >> 24] ^ TD1[(s2 >> 16) & 0xFF]
+                  ^ TD2[(s1 >> 8) & 0xFF] ^ TD3[s0 & 0xFF] ^ drk[o + 3])
+            s0, s1, s2, s3 = t0, t1, t2, t3
+        o = 4 * self.nr
+        u0 = (_pack4(INV_SBOX[s0 >> 24], INV_SBOX[(s3 >> 16) & 0xFF],
+                     INV_SBOX[(s2 >> 8) & 0xFF], INV_SBOX[s1 & 0xFF])) ^ drk[o]
+        u1 = (_pack4(INV_SBOX[s1 >> 24], INV_SBOX[(s0 >> 16) & 0xFF],
+                     INV_SBOX[(s3 >> 8) & 0xFF], INV_SBOX[s2 & 0xFF])) ^ drk[o + 1]
+        u2 = (_pack4(INV_SBOX[s2 >> 24], INV_SBOX[(s1 >> 16) & 0xFF],
+                     INV_SBOX[(s0 >> 8) & 0xFF], INV_SBOX[s3 & 0xFF])) ^ drk[o + 2]
+        u3 = (_pack4(INV_SBOX[s3 >> 24], INV_SBOX[(s2 >> 16) & 0xFF],
+                     INV_SBOX[(s1 >> 8) & 0xFF], INV_SBOX[s0 & 0xFF])) ^ drk[o + 3]
+        return (u0.to_bytes(4, "big") + u1.to_bytes(4, "big")
+                + u2.to_bytes(4, "big") + u3.to_bytes(4, "big"))
 
 
-_DEFAULT = [None]
+_INSTANCES = {}
 
 
 def aes(key=None):
-    """拿一个 AES 实例（默认用游戏的密钥）。"""
-    if key is None:
-        if _DEFAULT[0] is None:
-            _DEFAULT[0] = AES(KEY)
-        return _DEFAULT[0]
-    return AES(key)
+    """拿一个 AES 实例（默认用游戏的密钥）。按密钥缓存，重复调用不重算轮密钥。"""
+    k = KEY if key is None else bytes(key)
+    a = _INSTANCES.get(k)
+    if a is None:
+        a = _INSTANCES[k] = AES(k)
+    return a
 
 
 # --------------------------------------------------------------------------
@@ -270,12 +364,45 @@ def decrypt_token(hexstr, key=None):
 if __name__ == "__main__":
     import sys
     sys.stdout.reconfigure(errors="replace")
-    # 自测：把自己加密回来
+    n = [0, 0]                              # [OK, NG]
+
+    def ck(ok, msg):
+        n[0 if ok else 1] += 1
+        print("  %s %s" % ("[OK]" if ok else "[NG]", msg))
+
+    # 1) 标准已知答案（FIPS-197 附录 B）—— 不依赖自己的实现互证
+    ck(AES(bytes(range(16))).encrypt_block(
+        bytes.fromhex("00112233445566778899aabbccddeeff")).hex()
+       == "69c4e0d86a7b0430d8cdb78070b4c55a", "FIPS-197 AES-128 加密向量")
+    ck(AES(bytes(range(16))).decrypt_block(
+        bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a")).hex()
+       == "00112233445566778899aabbccddeeff", "FIPS-197 AES-128 解密向量")
+    # 密钥长度 24/32 也要活着（虽然游戏只用 128）
+    for klen in (24, 32):
+        a = AES(bytes(range(klen)))
+        ck(a.decrypt_block(a.encrypt_block(b"0123456789abcdef"))
+           == b"0123456789abcdef", "AES-%d 往返" % (klen * 8))
+    # 2) 随机往返（T 表 / C 扩展两条路都过一遍）
+    import os as _os
+    blocks = [bytes(_os.urandom(16)) for _ in range(500)]
+    for name, inst in (("T 表", AES(b"0123456789abcdef")),):
+        inst._c = None                      # 强制走纯 Python
+        ct = b"".join(inst.encrypt_block(b) for b in blocks)
+        ck(all(inst.decrypt_block(c) == b for b, c in
+               zip(blocks, [ct[i:i + 16] for i in range(0, len(ct), 16)])),
+           "%s 500 块往返" % name)
+    inst = aes()
+    if inst._c is not None:
+        ck(all(inst.decrypt_block(inst.encrypt_block(b)) == b for b in blocks),
+           "C 扩展 500 块往返")
+        print("  [--] C 扩展可用")
+    else:
+        print("  [--] 没有 C 扩展，走 T 表")
+    # 3) 和游戏 AES_ECB 一致（自加密回来）
     for d in "0123456789":
         h = encrypt_digit(d)
-        back = decrypt_digit(h)
-        print("  %s -> %s -> %s %s" % (d, h, back, "[OK]" if back == d else "[NG]"))
-    # 钉子：**游戏自己写的账**（AutoSave\_save.rvdata2 的 gold 账，值 13790）。
+        ck(decrypt_digit(h) == d, "数字 %s 往返" % d)
+    # 4) 钉子：**游戏自己写的账**（AutoSave\_save.rvdata2 的 gold 账，值 13790）。
     # 密钥一旦被改错（历史上就是照脚本里作者 QQ 号猜的 `admin_1941344749`），
     # 这几位立刻解不出来 —— 用来防「密钥回退」。取样来源：script00:1843 的 key。
     for h, want in (("4dea3f29581a67232acee5e599d13810", "1"),
@@ -283,6 +410,6 @@ if __name__ == "__main__":
                     ("7520b37734999c73b6003684e49d8557", "7"),
                     ("22a3126a7d9fdb5daec2b75da28698c3", "9"),
                     ("e7e794b9942d4a9e8191727faa25d465", "0")):
-        back = decrypt_digit(h)
-        print("  真档样本 %s… -> %s %s"
-              % (h[:8], back, "[OK]" if back == want else "[NG]"))
+        ck(decrypt_digit(h) == want, "真档样本 %s… → %s" % (h[:8], want))
+    print("== 汇总 [OK]=%d [NG]=%d ==" % (n[0], n[1]))
+    sys.exit(1 if n[1] else 0)

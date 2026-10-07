@@ -135,6 +135,12 @@ class SaveDoc(object):
             self.doc = doctree.Doc(self.path)
         self.header = self.doc.objects[0]["node"]
         self.contents = self.doc.objects[-1]["node"]
+        # `iter_locks()` 的备忘录：载入时它会被跑**两趟**（`fill_info` 打
+        # 「Lock 校验和」一行、`anti_cheat_report` 再扫一遍），而一趟要
+        # ~0.09 秒（整档十几万节点）。Lock 的**节点集合**在一次载入里不会
+        # 变（改值只动节点内容、不换节点；新增对象也不会凭空多出 Lock），
+        # 扫一次就够。见 `iter_locks` / `forget_locks`。
+        self._locks_memo = None          # (structural, [(lock, v, m), ...])
 
     # ------------------------------------------------------------ 分区
     def sections(self):
@@ -182,40 +188,66 @@ class SaveDoc(object):
         return int(value) * LOCK_MUL + LOCK_ADD + int(seed) // LOCK_DIV
 
     def iter_locks(self):
-        """遍历整档里所有 Lock 对象（返回 [(lockNode, valueNode, masterNode)]）。"""
-        found = []
+        """遍历整档里所有 Lock 对象（返回 [(lockNode, valueNode, masterNode)]）。
 
-        def walk(node, seen):
-            node = _deref(node)
-            if node is None or id(node) in seen:
-                return
-            seen = seen | {id(node)}
+        ⚠ 整档十几万节点，这里**必须用显式栈 + 共享 visited**：
+          旧写法每层都 `seen | {id(node)}` 复制一个新 frozenset（实测 13 万次
+          集合复制），一趟体检就是 0.19 秒，载入时白等；而且同一节点被多处
+          引用时会被**重复收集**。子节点倒序压栈，遍历顺序与递归版一致，
+          结果只会更准（重复项没了）。
+
+        再叠加**备忘录**（2026-10-07）：一次载入里 `check_locks()` 会被
+          `fill_info` 和 `anti_cheat_report` 各调一次，同一次载入里 Lock 的
+          节点集合不变 ⇒ 第二趟直接返回，省掉 ~0.09 秒。
+        ⚠ 备忘录的钥匙是「顶层对象集合的身份 + structural」—— `Doc.save()`
+          末尾会把 `self.objects` 换成**重新解析**出来的新节点，钥匙一变就
+          自动作废，不会拿旧节点去比（旧节点已经不在树里了）。
+        ⚠ 钥匙变量叫 `mkey`：下面遍历里 `key` 已经是 `id(node)` 了，
+          同名会被覆盖成 int（2026-10-07 踩过，备忘录末尾直接 TypeError）。
+        """
+        mkey = self.doc.objects[0]["node"]
+        mst = getattr(self.doc, "structural", False)
+        memo = self._locks_memo
+        if memo is not None and memo[0] is mkey and memo[1] == mst:
+            return memo[2]
+        found = []
+        seen = set()
+        stack = [_deref(v) for _, v in self.sections()]
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            key = id(node)
+            if key in seen:
+                continue
+            seen.add(key)
+            kids = None
             if isinstance(node, M.ObjNode):
                 if node.cls.split("::")[-1] == LOCK_CLASS:
                     v = ivar(node, "@value")
                     m = ivar(node, "@master")
                     if v is not None and m is not None:
                         found.append((node, _deref(v), _deref(m)))
-                for _, child in node.ivars:
-                    walk(child, seen)
+                kids = [c for _, c in node.ivars]
             elif isinstance(node, M.StructNode):
-                for _, child in node.ivars:
-                    walk(child, seen)
+                kids = [c for _, c in node.ivars]
             elif isinstance(node, M.ArrayNode):
-                for child in node.items:
-                    walk(child, seen)
+                kids = list(node.items)
             elif isinstance(node, M.HashNode):
+                kids = []
                 for k, v in node.pairs:
-                    walk(k, seen)
-                    walk(v, seen)
+                    kids.append(k)
+                    kids.append(v)
             elif isinstance(node, M.IVarNode):
-                walk(node.inner, seen)
-                for _, child in node.ivars:
-                    walk(child, seen)
-
-        for _, v in self.sections():
-            walk(v, frozenset())
+                kids = [node.inner] + [c for _, c in node.ivars]
+            if kids:
+                stack.extend(_deref(c) for c in reversed(kids))
+        self._locks_memo = (mkey, mst, found)
         return found
+
+    def forget_locks(self):
+        """丢掉 Lock 备忘录（改动大到可能影响 Lock 集合时调，防串味）。"""
+        self._locks_memo = None
 
     def repair_locks(self, verbose=False):
         """把所有 Lock 的 @master 按当前 @value 重算。返回修了几个。"""

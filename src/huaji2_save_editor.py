@@ -1362,6 +1362,10 @@ class PayloadManager(object):
         self.desc_full = ""
         self._babies = None
         self._skmeta = None
+        #: 用户**自己填过**的数值字段 `{(家族, 字段键)}` —— 换资质时不覆盖它
+        self._num_edited = set()
+        #: 正在程序化回填「值」输入框（挡掉 trace 回调，别把它当用户输入）
+        self._loading_int = False
 
         win = tk.Toplevel(app.root)
         self.win = win
@@ -1581,6 +1585,7 @@ class PayloadManager(object):
         if self.fam not in self.groups:
             self.fam = self.order[0]
             self.picked.pop(self.fam, None)
+            self._forget_edits(self.fam)
         self.var_fam.set("%s ×%d" % (self.fam, len(self.groups[self.fam]["slots"])))
         self._sync_fields()
 
@@ -1624,8 +1629,36 @@ class PayloadManager(object):
             return
         self.b_apply.state(["!disabled"])
         self.b_rand.state(["!disabled"])
+        self._seed_fields(fields)
         self.var_field.set(fields[0]["label"])
         self.show_field()
+
+    def _seed_fields(self, fields):
+        """给这个家族的所有字段填初值。
+
+        两条口径：
+
+        1. **读得出当前值的按原样回填**（老行为 —— `payload_fields` 的「用户不
+           改就原样写回」）；
+        2. **读不出的数值字段填区间上限**（2026-10-07 川：「抽选有范围的，默认抽
+           最大范围」，元宵的成长就是 0.02）。清空输入框＝这一项按游戏规则随机。
+
+        ⚠ 必须**先**过一遍所有字段、再给数值字段兜底：元宵的「数值」区间是跟着
+          「涨哪项资质」走的（`rng_by_type`），得等 `type` 先落进 `picked`。
+        """
+        cur = self.picked.setdefault(self.fam, {})
+        for fd in fields:
+            if fd["key"] in cur:
+                continue
+            got = self._current_value(fd["key"])
+            if got is not None:
+                cur[fd["key"]] = got
+        for fd in fields:
+            if fd["kind"] not in ("int", "num") or cur.get(fd["key"]) is not None:
+                continue
+            rng = self._rng_of(fd)
+            if rng:
+                cur[fd["key"]] = rng[1]
 
     def _fields_of_first(self):
         """当前家族第一格**现在**的内容字段名（只给说明文字用）。"""
@@ -1649,7 +1682,12 @@ class PayloadManager(object):
                 self.fam = typ
                 break
         self.picked.pop(self.fam, None)
+        self._forget_edits(self.fam)
         self._sync_fields()
+
+    def _forget_edits(self, fam):
+        """换了家族/格子 → 忘掉「用户自己填过」的标记，让默认值（上限）重新生效。"""
+        self._num_edited = set(k for k in self._num_edited if k[0] != fam)
 
     def pick_field(self):
         """当前字段（字段下拉的显示名 → 字段 dict）。"""
@@ -1664,7 +1702,7 @@ class PayloadManager(object):
 
     # ------------------------------------------------------------ 候选列表
     def show_field(self):
-        """按当前字段的类型渲染左栏：列表（actor/skill/choice）或整数框。"""
+        """按当前字段的类型渲染左栏：列表（actor/skill/choice）或数值框。"""
         grp = self._fam()
         fd = self.pick_field()
         if grp is None or fd is None:
@@ -1674,20 +1712,80 @@ class PayloadManager(object):
             got = self._current_value(fd["key"])
             if got is not None:
                 cur[fd["key"]] = got
-        if fd["kind"] == "int":
-            self.box_list.pack_forget()
-            self.box_int.pack(fill="x")
-            lo, hi = fd["rng"]
-            self.var_int_note.set("取值范围 %d ~ %d（游戏里用不到更大的）" % (lo, hi))
-            self.var_int.set("" if cur.get(fd["key"]) is None
-                             else str(cur[fd["key"]]))
-            self.cands = []
-            self.set_desc("「%s」的「%s」直接填个数就行。\n"
-                          "范围：%d ~ %d" % (self.fam, fd["label"], lo, hi))
+        if fd["kind"] in ("int", "num"):
+            self._show_num(fd, cur)
             return
         self.box_int.pack_forget()
         self.box_list.pack(fill="both", expand=True)
         self.fill_cands()
+
+    def _show_num(self, fd, cur):
+        """数值字段：一个输入框 + 取值范围提示。
+
+        `num` 是浮点档（元宵的成长 0.01~0.02），`int` 是整数档。
+        """
+        is_num = fd["kind"] == "num"
+        self.box_list.pack_forget()
+        self.box_int.pack(fill="x")
+        self.cands = []
+        rng = self._rng_of(fd)
+        fmt = (lambda v: "%g" % float(v)) if is_num else (lambda v: str(int(v)))
+        if not rng:
+            self.var_int_note.set("")
+            desc = "「%s」的「%s」直接填个数就行。" % (self.fam, fd["label"])
+        else:
+            if cur.get(fd["key"]) is None:
+                cur[fd["key"]] = rng[1]              # 默认抽上限
+            self.var_int_note.set("范围 %s ~ %s（默认上限；清空＝随机）"
+                                  % (fmt(rng[0]), fmt(rng[1])))
+            desc = ("「%s」的「%s」直接填个数就行。\n"
+                    "取值范围：%s ~ %s —— 默认填**上限**。\n"
+                    "（清空输入框＝这一项交回游戏规则随机）"
+                    % (self.fam, fd["label"], fmt(rng[0]), fmt(rng[1])))
+        self._loading_int = True                  # 回填不算“用户改过”
+        try:
+            v = cur.get(fd["key"])
+            self.var_int.set("" if v is None else fmt(v))
+        finally:
+            self._loading_int = False
+        self.set_desc(desc)
+
+    def _rng_of(self, fd):
+        """字段的取值范围；带 `rng_by_type` 的按**当前挑的那个字段**现算。
+
+        元宵的「数值」就是这么走的：涨攻击资质是 4~8，涨成长是 0.01~0.02。
+        取不到依赖值时退回第一个区间（宁可给个能用的默认，不弹错）。
+        """
+        table = fd.get("rng_by_type")
+        if table:
+            dep = fd.get("depends_on")
+            k = (self.picked.get(self.fam) or {}).get(dep)
+            if k is None and dep:
+                k = self._current_value(dep)
+            try:
+                return table[int(k)]
+            except (TypeError, ValueError, IndexError):
+                return table[0]
+        return fd.get("rng")
+
+    def _refresh_dep_defaults(self, changed):
+        """某个字段换了取值 → 依赖它的数值字段按新范围重算默认值。
+
+        元宵：把「涨哪项资质」从成长改成攻击 → 「数值」的默认从 0.02 变 8。
+        ⚠ 用户自己填过的（`_num_edited`）不覆盖。
+        """
+        grp = self._fam()
+        if not grp:
+            return
+        cur = self.picked.setdefault(self.fam, {})
+        for fd in grp["fields"]:
+            if fd.get("depends_on") != changed:
+                continue
+            if fd["key"] in cur and (self.fam, fd["key"]) in self._num_edited:
+                continue
+            rng = self._rng_of(fd)
+            if rng:
+                cur[fd["key"]] = rng[1]
 
     def _current_value(self, key):
         """选中格子现在这一项的字段值（取第一个格子的）。"""
@@ -1825,6 +1923,7 @@ class PayloadManager(object):
             return
         val, nm, _cls, _note = self.cands[n]
         self.picked.setdefault(self.fam, {})[fd["key"]] = val
+        self._refresh_dep_defaults(fd["key"])
         self.set_desc(self._cand_desc(fd, val, nm))
 
     def _cand_desc(self, fd, val, nm, head=True):
@@ -1850,16 +1949,22 @@ class PayloadManager(object):
 
     def _int_changed(self):
         fd = self.pick_field()
-        if fd is None or fd["kind"] != "int":
+        if fd is None or fd["kind"] not in ("int", "num"):
+            return
+        if self._loading_int:        # 我自己回填的默认值，不算用户改
             return
         txt = (self.var_int.get() or "").strip()
         if txt == "":
+            # 清空＝不看这一项 → 交回游戏规则随机
             self.picked.setdefault(self.fam, {}).pop(fd["key"], None)
+            self._num_edited.discard((self.fam, fd["key"]))
             return
         try:
-            self.picked.setdefault(self.fam, {})[fd["key"]] = int(txt, 0)
+            val = float(txt) if fd["kind"] == "num" else int(txt, 0)
         except ValueError:
-            pass
+            return
+        self.picked.setdefault(self.fam, {})[fd["key"]] = val
+        self._num_edited.add((self.fam, fd["key"]))
 
     # ------------------------------------------------------------ 说明 / 提示
     def _item_line(self):
@@ -2126,9 +2231,26 @@ class App(object):
             # load 了别的文件，200ms 后这个回调会醒来把 doc 换回 auto，
             # 之后所有改动都落在 auto 那本档上 —— 玩家真档就这么被写坏过
             # （2026-09-14 踩到）。cancel_auto_load() 给它留个后门。
-            self._auto_load_job = root.after(200, lambda: self.load(auto))
+            self._auto_load_job = root.after(
+                200, lambda: self._auto_load_when_ready(auto))
         else:
             self.set_status("请点「选择存档…」打开 <游戏根>\\save.rvdata2")
+
+    def _auto_load_when_ready(self, path, waited=0):
+        """等数据表预载完再自动载入（预载线程见 `datatables.start_preload`）。
+
+        ⚠ 不等的话，载入会撞上后台线程正在解析的表：`datatables.load` 会等到
+          那张表解析完才返回（同一张表解析两遍更亏）。实测这 0.66 秒就是
+          「第一次载入特别慢」的主因。
+          最多等 3 秒 —— 表读不出来时（游戏没装）预载会立刻标记"跑过了"，
+          正常不会等到上限。
+        """
+        if not datatables.preload_done() and waited < 3000:
+            self._auto_load_job = self.root.after(
+                60, lambda: self._auto_load_when_ready(path, waited + 60))
+            return
+        self._auto_load_job = None
+        self.load(path)
 
     def cancel_auto_load(self):
         """取消 __init__ 里排队的延迟自动载入（自动化/测试脚本必须先调）。"""
@@ -2804,7 +2926,7 @@ class App(object):
         self.tv_actor.configure(yscrollcommand=vs_actor.set)
         vs_actor.pack(side="right", fill="y")
         self.tv_actor.pack(fill="x")
-        self.tv_actor.bind("<<TreeviewSelect>>", lambda e: self.load_actor())
+        self.tv_actor.bind("<<TreeviewSelect>>", lambda e: self.on_actor_select())
 
         # ---- 左右布局（PanedWindow，中间可拖）：左「基础字段」/ 右「属性概览」
         # 参考「概览 / 快捷修改」页的写法，两边等大 weight=1。
@@ -4001,7 +4123,10 @@ class App(object):
             kw = var_kw.get().strip()
             rows = []
             for c in all_c:
-                if var_god.get() and c["type"] not in bd.GOD_TYPES:
+                # ⚠ 这里必须走**模块**（`babies.GOD_TYPES`）：本函数的 `bd` 是
+                #   `Babies` 实例，`bd.GOD_TYPES` 会 AttributeError —— 而且因为
+                #   `and` short-circuit，只有勾上「神兽」才会炸（2026-10-07 川报）。
+                if var_god.get() and c["type"] not in babies.GOD_TYPES:
                     continue
                 if kw and kw not in c["name"] and kw != str(c["id"]) \
                         and kw not in c["pool"]:
@@ -4727,9 +4852,9 @@ class App(object):
     def _pump(self, msg):
         """载入途中刷一条进度 + 泵一轮消息。
 
-        ⚠ 载真档要几秒（解密+解析+刷全部页签），期间主线程若不取消息，
-          Windows 直接给窗口挂「未响应」，看起来像死了（2026-10-03 川实报）。
-          这里主动 update() 一轮：窗口能重绘、标题不挂未响应。
+        ⚠ 载真档要**约 0.8 秒**（2026-10-07 提速后；此前纯 Python AES 一回要 6.5 秒），
+          期间主线程若不取消息，Windows 直接给窗口挂「未响应」，看起来像死了
+          （2026-10-03 川实报）。这里主动 update() 一轮：窗口能重绘、标题不挂未响应。
         ⚠ update() 会放行用户输入 ⇒ 用 _loading 挡住 load 重入（见 load）。
         """
         if msg:
@@ -4755,8 +4880,7 @@ class App(object):
         # 不撤的话，那个 after(200) 回调随后会把 doc 换回 _guess_save() 猜到的
         # 那本档 —— 自动化脚本先 load(副本) 再改，最终就写到了玩家真档上。
         self.cancel_auto_load()
-        self._pump("正在打开 %s …（解密+解析要几秒，不是卡死）"
-                   % os.path.basename(path))
+        self._pump("正在打开 %s …（解密+解析）" % os.path.basename(path))
         try:
             self.doc = doctree.Doc(path)
         except Exception as e:
@@ -4789,7 +4913,15 @@ class App(object):
         self.clear_dirty()
         # 每个面板单独兜底：一个面板炸了不能把「全部解析数据」也一起带下去
         self._pump("正在刷新各页签 …")
-        bad = self.refresh_panels()
+        # 体检表（Lock / 五类记账 / 逐物品计数 / 作弊标记，约 0.1 秒）概览页要画、
+        # 「载入后提醒」也要看 —— **算一次**给两边，别在载入里算两遍（2026-10-07）。
+        rows = None
+        if self.g:
+            try:
+                rows = self.g.anti_cheat_report()
+            except Exception:
+                rows = None
+        bad = self.refresh_panels(guard_rows=rows)
         if bad:
             self.set_status("已载入 %s，但「%s」刷新失败：%s"
                             % (os.path.basename(path), "、".join(bad),
@@ -4800,7 +4932,7 @@ class App(object):
                                len(self.doc.objects),
                                "" if self.sv else "；不是本作存档，只有数据树可用"))
         if not quiet:
-            self.warn_cheat_after_load()
+            self.warn_cheat_after_load(rows=rows)
 
     def save_save(self):
         if not self.doc or not self.doc.dirty:
@@ -5284,17 +5416,21 @@ class App(object):
                             "如果游戏里已经弹过「存档异常」，请把游戏「整个关掉再重开」；"
                             "读档后就不会再被惩罚了。" % n, parent=self.root)
 
-    def warn_cheat_after_load(self, quiet=False):
+    def warn_cheat_after_load(self, quiet=False, rows=None):
         """载入后如果存档带作弊标记 → 立刻提醒（惩罚 20 分钟后开始、25 分钟后强退）。
+
+        `rows`：`load()` 里刚算好的体检表（概览页画的就是它），传进来就不再重算
+        —— 一份档扫一遍 Lock / 记账 / 逐物品要 ~0.1 秒，载入路径上只该算一次。
 
         返回是否真的提醒过（测试用；也方便上层决定要不要再提示一次）。
         """
         if not self.g or quiet:
             return False
-        try:
-            rows = self.g.anti_cheat_report()
-        except Exception:
-            return False
+        if rows is None:
+            try:
+                rows = self.g.anti_cheat_report()
+            except Exception:
+                return False
         over = [r for r in rows if r[3]]
         flag = [r for r in over if ("作弊标记" in r[0] or "作弊记录" in r[0])]
         if not flag:
@@ -5560,6 +5696,7 @@ class App(object):
         self.tv_actor.delete(*self.tv_actor.get_children())
         self.actor_rows.clear()
         if not self.sv:
+            self._actor_sel_done = ()           # 列表空了：排队的事件别再来刷
             return
         for n, (aid, a) in enumerate(self.sv.actors(), 1):
             iid = "a%d" % aid
@@ -5577,6 +5714,25 @@ class App(object):
             self.tv_actor.see(keep[0])
         elif kids:
             self.tv_actor.selection_set(kids[0])
+        # 选中那一行**当场加载**，别指望 <<TreeviewSelect>>：那个事件是排队的，
+        # 等它跑起来时 Tk 还在一批控件 churn 的几何脏状态里 —— 同一个
+        # load_actor() 从 0.04s 涨到 0.5s+（2026-10-07 载入优化实测）。
+        # 记下"这个选中已经刷过"，排队的那次就会被 on_actor_select 直接跳过。
+        self._actor_sel_done = tuple(self.tv_actor.selection())
+        self.load_actor()
+
+    def on_actor_select(self):
+        """角色列表选中变化 → 刷右侧详情。
+
+        ⚠ 选中没变就**直接返回**：`fill_actors` 已经当场刷过一遍了，而它
+          `selection_set` 排队的那个 `<<TreeviewSelect>>` 随后还会来一次；
+          不挡的话同一个人要被刷两遍（第二遍还在几何脏状态里，更贵）。
+        """
+        sel = tuple(self.tv_actor.selection())
+        if sel == getattr(self, "_actor_sel_done", None):
+            return
+        self._actor_sel_done = sel
+        self.load_actor()
 
     def current_actor(self):
         sel = self.tv_actor.selection()
@@ -7406,6 +7562,17 @@ def main():
         return 2
     except Exception:
         return _fatal(traceback.format_exc())
+
+    # 数据表预载（详见 `datatables.start_preload`）：Skills/Classes/States/Items/
+    # Actors 这五张表第一次解密+解析要 0.5~0.66 秒，而「载入存档」时界面正等着用
+    # 它们 —— 占了载入时长的一大半（2026-10-07 实测：预载后载入 1.65 → 0.71 秒）。
+    # ⚠ 放在**界面建好之后**再起：建界面那 1 秒是纯 Python，跟预载抢 GIL 只会
+    #   让窗口晚出来；界面先出来，预载在后台跑，自动载入会等它就绪（见
+    #   `_auto_load_when_ready`），用户点开存档时通常已经好了。
+    try:
+        datatables.start_preload()
+    except Exception:
+        pass
 
     # 关窗口（点 × / Alt+F4）= 硬退出：原因同 `_hard_exit` —— 走 Tk 自己的收尾
     # 偶尔会卡住，任务管理器里留一个「画迹2内测版存档工具.exe」不放。

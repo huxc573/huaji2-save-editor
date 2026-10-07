@@ -72,6 +72,11 @@ def _pool_of(ranges):
 #: 元宵的 7 档资质（下标就是 `data[:type]`）；名字与 `game.payload_summary` 同一口径
 YUANXIAO_NAMES = ("攻击资质", "防御资质", "体力资质", "法力资质",
                   "速度资质", "躲闪资质", "成长")
+#: 元宵每档能涨多少（下标同 `YUANXIAO_NAMES`）—— **唯一来源**：
+#: `_yuanxiao` 的随机区间、`data[:max]` 上限表、界面「数值」的取值范围都读它。
+#: 成长那档是浮点，其余是整数（脚本里 `rand(0.01..0.02)` / `rand(4..8)`…）。
+YUANXIAO_RANGES = ((4, 8), (4, 8), (20, 40), (10, 20), (4, 8), (4, 8),
+                   (0.01, 0.02))
 #: 人参果的 5 档属性（下标就是 `data[:type]`）
 GINSENG_NAMES = ("体质", "魔力", "力量", "耐力", "敏捷")
 #: 鬼谷子的 10 个阵法（脚本 `def 鬼谷子` 里那份 list）
@@ -357,21 +362,30 @@ def _stone(_item_id, _rnd, over=None):
 
 
 def _yuanxiao(_item_id, rnd, over=None):
-    """元宵：只让**一项**资质涨，其余为 0；上限表照脚本写死。"""
+    """元宵：只让**一项**资质涨，其余为 0；上限表照脚本写死。
+
+    `over` 认两个键：`type`（涨哪项资质，下标同 `YUANXIAO_NAMES`）、
+    `value`（**这一项涨多少**）。不给 `value` 就按 `YUANXIAO_RANGES[type]`
+    随机；给了就夹到该档区间里（界面的「数值」默认填的就是区间上限，
+    2026-10-07 川：默认抽最大范围）。
+    """
     over = over or {}
-    ranges = ((4, 8), (4, 8), (20, 40), (10, 20), (4, 8), (4, 8))
     k = over.get("type")
     k = rnd.randrange(7) if k is None else max(0, min(int(k), 6))
+    lo, hi = YUANXIAO_RANGES[k]
+    v = over.get("value")
+    if v is None:
+        v = round(rnd.uniform(lo, hi), 4) if k == 6 else rnd.randint(lo, hi)
+    elif k == 6:
+        v = round(max(0.0, min(float(v), float(hi))), 4)
+    else:
+        v = max(0, min(int(v), int(hi)))
     value = {"atk": 0, "def": 0, "hp": 0, "mp": 0, "agi": 0, "eva": 0,
              "grow": 0.0}
     keys = ("atk", "def", "hp", "mp", "agi", "eva", "grow")
-    if k == 6:
-        value["grow"] = round(rnd.uniform(0.01, 0.02), 4)
-    else:
-        a, b = ranges[k]
-        value[keys[k]] = rnd.randint(a, b)
+    value[keys[k]] = v
     return ("元宵", {"data": {"type": k, "value": value,
-                              "max": [8, 8, 40, 20, 8, 8, 0.02]}})
+                              "max": [hi2 for _lo2, hi2 in YUANXIAO_RANGES]}})
 
 
 def _yuanxiao_dan(_item_id, rnd, over=None):
@@ -467,10 +481,13 @@ def payload_spec(name, item_id):
     字段是 dict：
 
         {"key": 内容里的键, "label": 界面上的名字,
-         "kind": "actor" | "skill" | "choice" | "int",
+         "kind": "actor" | "skill" | "choice" | "int" | "num",
          "pool": [可选 id]（actor/skill 用；None＝全部）,
          "choices": [(值, 显示名)]（choice 用）,
-         "rng": (下限, 上限)（int 用）}
+         "rng": (下限, 上限)（int/num 用；界面默认填**上限**，清空＝按规则随机）,
+         "depends_on": 另一个字段的 key（int/num 可选）,
+         "rng_by_type": [(下限, 上限), …]（配 `depends_on` 用：区间随那个字段
+                        的取值现算 —— 元宵的「数值」就是跟着「涨哪项资质」走的）}
 
     ⚠ 这里报出来的**必须是脚本真值**：挑不动的（`进阶石` 的固定 0、`礼盒` 的
       固定五面旗）就不给字段，界面显示「只能按游戏规则重抽」。
@@ -531,9 +548,14 @@ def payload_spec(name, item_id):
         return "宝石", [{"key": "lv", "label": "等级", "kind": "int",
                          "rng": (1, 15)}]
     if fn is _yuanxiao:
-        return "元宵", [{"key": "type", "label": "涨哪项资质", "kind": "choice",
-                         "choices": [(i, n) for i, n in
-                                     enumerate(YUANXIAO_NAMES)]}]
+        return "元宵", [
+            {"key": "type", "label": "涨哪项资质", "kind": "choice",
+             "choices": [(i, n) for i, n in enumerate(YUANXIAO_NAMES)]},
+            # 涨多少：区间**跟着资质走**（攻/防/速 4~8、体力 20~40、成长 0.01~0.02…），
+            # 所以带 `depends_on` + `rng_by_type` 让界面按当前挑的资质现算；
+            # 界面默认填区间上限（2026-10-07 川：默认抽最大范围）。
+            {"key": "value", "label": "数值", "kind": "num",
+             "depends_on": "type", "rng_by_type": YUANXIAO_RANGES}]
     if fn is _yuanxiao_dan:
         return "激进元宵丹", [{"key": "max", "label": "可食用上限",
                                "kind": "int", "rng": (0, 100)}]

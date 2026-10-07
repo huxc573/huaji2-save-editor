@@ -21,6 +21,7 @@
 
 写回时先做Marshal 重写 → 再加密，并且会备份 `*.bak.<时间戳>`。
 """
+import gc
 import os
 import shutil
 import sys
@@ -38,6 +39,23 @@ import patchwriter  # noqa: E402
 import paths  # noqa: E402
 import marshal_ruby as M  # noqa: E402
 import save_v201  # noqa: E402
+
+
+def parse_bytes(raw):
+    """关着 GC 解析明文 Marshal。
+
+    一份 27 万字节的档要建 **6 万多个节点对象**，CPython 的分代 GC 会在解析
+    途中反复做全表扫描 —— 实测 0.21s → 0.16s，而且波动明显变小
+    （2026-10-07 载入优化）。只在这段关掉，退出时按**原来的**开关恢复
+    （调用方要是自己关了 GC，别被我们打开）。
+    """
+    on = gc.isenabled()
+    gc.disable()
+    try:
+        return M.parse_stream(raw)
+    finally:
+        if on:
+            gc.enable()
 
 
 class Doc(object):
@@ -102,7 +120,7 @@ class Doc(object):
             except OSError:
                 pass
         self.engine = patchwriter.PatchEngine(self.raw)
-        self.objects = M.parse_stream(self.raw)
+        self.objects = parse_bytes(self.raw)
         self.dirty = False
         return self
 
@@ -140,7 +158,7 @@ class Doc(object):
         # ⚠ 只解析一次：一份 46 万字节的存档 parse_stream 要 ~0.5s，
         #   以前这里解析两遍、末尾再解析一遍 = 1.5s 白花，保存卡就卡在这儿。
         try:
-            objs = M.parse_stream(new)
+            objs = parse_bytes(new)
         except Exception as e:
             raise ValueError("保存前自检失败：重写的字节解析不出来（%s）"
                              "，已取消写入，原文件未动" % e)

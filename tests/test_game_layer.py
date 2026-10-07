@@ -376,6 +376,44 @@ def main():
         check("对空格子重抽会报错", "空" in str(e), "%s" % type(e).__name__)
     g.clear_slot("Items", probe3)
 
+    # ---------------- 2026-10-07：抽选带范围、默认最大范围（元宵）
+    #  川：重抽要能指定具体数值，范围照游戏脚本，默认填上限（成长 0.02）。
+    _t, _flds = itemattr.payload_spec("元宵", 104)
+    _vf = [f for f in _flds if f["key"] == "value"]
+    check("元宵能挑「涨哪项资质」+「数值」两项",
+          _t == "元宵" and len(_flds) == 2 and bool(_vf),
+          "%r" % (_flds,))
+    check("「数值」范围跟着资质走（成长那档 0.01~0.02）",
+          bool(_vf) and tuple(_vf[0].get("rng_by_type") or ())[-1] == (0.01, 0.02),
+          "%r" % (_vf[0].get("rng_by_type") if _vf else None,))
+    _d = itemattr.build("元宵", 104, over={"type": 6, "value": 0.02})[1]["data"]
+    check("指定 0.02 → 只有成长项是 0.02，其余全 0",
+          abs(_d["value"]["grow"] - 0.02) < 1e-9
+          and all(_d["value"][k] == 0
+                  for k in ("atk", "def", "hp", "mp", "agi", "eva")),
+          "%r" % (_d["value"],))
+    check("上限表由 YUANXIAO_RANGES 生成",
+          _d["max"] == [8, 8, 40, 20, 8, 8, 0.02], "%r" % (_d["max"],))
+    check("越界会被夹回（攻击资质 999 → 8）",
+          itemattr.build("元宵", 104,
+                         over={"type": 0, "value": 999})[1]["data"]["value"]["atk"]
+          == 8)
+    check("不给数值时仍按游戏区间随机",
+          itemattr.build("元宵", 104, over={"type": 6})[1]["data"]["value"]["grow"]
+          != 0.0)
+    probe5 = [s for s in g.empty_slots("Items")
+              if s not in (probe, probe2, probe3, ref_slot)][0]
+    try:
+        g.add_item("Items", probe5, 104, 1, clone_like=False)
+        g.set_payload("Items", probe5, over={"type": 6, "value": 0.02}, force=True)
+        _sum = g.payload_summary(_item_of(g, "Items", probe5))
+        check("走存档这条路也一样（摘要是「成长 0.02/0.02」）",
+              "成长 0.02/0.02" in _sum, _sum)
+    except Exception as e:
+        check("走存档这条路也一样（摘要是「成长 0.02/0.02」）", False,
+              "%s: %s" % (type(e).__name__, e))
+    g.clear_slot("Items", probe5)
+
     # ---------------- v0.4.4：@attr 的“外层键必须是字符串”，否则游戏读不到
     #  游戏脚本：$item_obj.data[:data][:id]；而 item.data 读的是 @attr["data"]
     #  （**字符串**键）—— 早期工具写成了符号键 :data，于是：

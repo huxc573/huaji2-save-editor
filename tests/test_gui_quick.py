@@ -793,6 +793,53 @@ def main():
               app.g.payload_summary(app.g._item_node("Items", egg_slot)))
         app.var_bag_kid.set("")
 
+        # ---- 2026-10-07 川：抽选带范围、默认最大范围（元宵的成长＝0.02）------
+        say("重抽管理：「数值」默认取上限…")
+        _yx = [s for s in app.g.empty_slots("Items")
+               if s != egg_slot][0]
+        app.g.add_item("Items", _yx, 104, 1, clone_like=False)
+        app.mark_dirty()
+        app.var_bag_page.set(_yx // 20)
+        app.fill_party()
+        root.update()
+        app.tv_pack.selection_set("s%d" % _yx)
+        _w = app.open_payload_manager()
+        root.update()
+        check("背包里选中的元宵 → 重抽管理认得出「元宵」家族",
+              _w is not None and "元宵" in _w.groups,
+              "%r" % (list(_w.groups) if _w is not None else None,))
+        if _w is not None and "元宵" in _w.groups:
+            _w.fam = "元宵"
+            _w._sync_fields()
+            check("「元宵」家族能挑两个字段（资质 + 数值）",
+                  len(_w.groups["元宵"]["fields"]) == 2,
+                  "%r" % (_w.groups["元宵"]["fields"],))
+            _w.var_field.set("涨哪项资质")
+            _w.show_field()
+            _go = [c for c in _w.tv.get_children()
+                   if str(_w.tv.item(c, "values")[1]) == "成长"]
+            if _go:
+                _w.tv.selection_set(_go[0])
+                root.update()
+                _w.on_cand()               # <<TreeviewSelect>> 是排队的，直接调保险
+            check("挑「成长」→「数值」默认＝该档上限 0.02",
+                  abs(float(_w.picked["元宵"].get("value") or 0) - 0.02) < 1e-9,
+                  "%r" % (_w.picked["元宵"],))
+            _w.var_field.set("数值")
+            _w.show_field()
+            check("数值框回填 0.02、提示写着 0.01 ~ 0.02",
+                  _w.var_int.get() == "0.02" and "0.01 ~ 0.02" in
+                  _w.var_int_note.get(),
+                  "%s / %s" % (_w.var_int.get(), _w.var_int_note.get()))
+            _w.apply()
+            root.update()
+            _sum2 = app.g.payload_summary(app.g._item_node("Items", _yx))
+            check("「应用选中的内容」写出来的就是成长 0.02/0.02",
+                  "成长 0.02/0.02" in _sum2, _sum2)
+            _w.close()
+            root.update()
+        app.g.clear_slot("Items", _yx)
+
 
         # ---------------- 召唤兽
         check("召唤兽页列出角色", len(app.cb_baby_actor["values"]) >= 1,
@@ -1274,6 +1321,26 @@ def main():
                 check("选回 1 项 → 按钮变回「加这只」",
                       str(_ab[0].cget("text")) == "加这只",
                       str(_ab[0].cget("text")))
+            # ⚠ 2026-10-07 川报「筛选神兽报错」：`bd` 是 Babies 实例，
+            #   `bd.GOD_TYPES` 是 AttributeError（常量在**模块**上），而且
+            #   `and` short-circuit 让它只在勾选时才炸。炸的那一刻 refill 已经
+            #   把行全删了 → 列表变空。所以这里同时钉「不空」+「只剩神兽档」。
+            _cbg = [w for w in _ws if w.winfo_class() == "TCheckbutton"
+                    and str(w.cget("text")) == "神兽"]
+            if _cbg and _tv:
+                _cbg[0].invoke()               # 勾上「神兽」
+                root.update()
+                _k2 = _tv[0].get_children()
+                _ty2 = set(str(_tv[0].item(c, "values")[2]) for c in _k2)
+                check("勾「神兽」后列表重筛（不空且只剩神兽/泡泡灵仙）",
+                      bool(_k2) and _ty2 and
+                      _ty2 <= {"神兽", "泡泡灵仙"},
+                      "%d 行，类型=%s" % (len(_k2), sorted(_ty2)))
+                _cbg[0].invoke()
+                root.update()
+                check("取消「神兽」后列表全回来",
+                      len(_tv[0].get_children()) > len(_k2),
+                      "%d → %d" % (len(_k2), len(_tv[0].get_children())))
         for w in opened:               # 关掉，别把 grab 留着
             try:
                 w.grab_release()

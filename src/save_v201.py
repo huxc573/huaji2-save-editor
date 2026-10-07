@@ -30,13 +30,7 @@ r"""**内测版 V2.201** 的存档加解密（AES-128-ECB + Zlib），纯 Python
 import os
 import zlib
 
-import aes as _game_aes      # 纯 Python AES（项目自带，无外部依赖）
-
-try:  # 有 cryptography 就用（C 扩展，快很多）；没有就退回纯 Python
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    _HAVE_CRYPTO = True
-except ImportError:
-    _HAVE_CRYPTO = False
+import aes as _game_aes      # 项目自带的 AES（C 扩展优先、T 表兜底，见 aes.py 头部）
 
 #: 存档口令（游戏脚本 Config::File::SAVE_FILE_PASSWORD，15 字符）
 SAVE_PASSWORD = "153ad4v3fbdgbgd"
@@ -87,22 +81,17 @@ def _aes_ecb(data, key, decrypt):
     """AES-128-ECB 分组加解密，**零填充、无 PKCS#7**。
 
     ⚠ 刻意不用 `aes.py` 里的 `encrypt()/decrypt()` 高层接口 —— 它们会加/去
-    PKCS#7 填充（游戏的 AES_ECB 语义）。存档这层是**零填充**，所以这里直接用
-    底层的 `encrypt_block` / `decrypt_block` 自己按 16 字节切。
+    PKCS#7 填充（游戏的 AES_ECB 语义）。存档这层是**零填充**，所以走 `aes.py`
+    的 `ecb_encrypt/ecb_decrypt`（整段进整段出，C 扩展优先）。
 
-    优先走 `cryptography`（C 扩展，快）；没装就退回项目自带的纯 Python 实现 ——
-    **必须能退回**，因为 GUI 跑在系统 Python 上，那边不一定有 cryptography，
-    而源码运行的用户不该被「少个第三方库」卡住。
+    ⚠ 走哪个后端由 `aes.py` 决定，这里不管：**必须能在没有任何第三方库时也跑**
+      （GUI 跑在系统 Python 上，那边不一定有）。2026-10-07 之前这里只试
+      `cryptography`，认不到就退回朴素纯 Python ⇒ 整档 4.6 秒。
     """
     if len(data) % 16:
         raise ValueError("AES-128 分组要求 16 的倍数，现在 %d" % len(data))
-    if _HAVE_CRYPTO:
-        c = Cipher(algorithms.AES(key), modes.ECB())
-        ctx = c.decryptor() if decrypt else c.encryptor()
-        return ctx.update(data) + ctx.finalize()
-    a = _game_aes.AES(key)
-    step = a.decrypt_block if decrypt else a.encrypt_block
-    return b"".join(step(data[i:i + 16]) for i in range(0, len(data), 16))
+    a = _game_aes.aes(key)
+    return a.ecb_decrypt(data) if decrypt else a.ecb_encrypt(data)
 
 
 def decode(raw, password=None):
