@@ -3153,21 +3153,30 @@ class App(object):
             self.attr_vars[k] = var
         for c in (1, 3, 5, 7):
             g2.columnconfigure(c, weight=1)
-        # 「人物修炼…」（2026-10-08 川）：A 组 4 项 = 攻击/法术/防御/法防。
+        # 「修炼管理…」+「全员拉满」（2026-10-08 川）：A/B 两组都收在这一处。
         # ⚠ 塞进属性格子的**空位**（10 个字段 = 3 行 × 4 列，第 3 行右边 4 格空着）：
         #   左栏是竖向 pack，新起一行就多一分被裁的风险（参考「一键学习」被裁那次）。
         # ⚠ 修炼和属性是两码事：`@attr` 是加点五维，修炼在 `@sect_data[:修炼]`，
         #   而且游戏**只在战斗时读修炼等级**，不改任何属性字段。
-        btn_xl = fit_btn(g2, text="人物修炼…",
-                         command=lambda: self.practice_dialog("A"))
-        btn_xl.grid(row=len(save.SaveDoc.ATTR_FIELDS) // 4, column=4,
-                    columnspan=4, sticky="w", padx=(10, 0))
+        xlrow = ttk.Frame(g2)
+        xlrow.grid(row=len(save.SaveDoc.ATTR_FIELDS) // 4, column=4,
+                   columnspan=4, sticky="w", padx=(10, 0))
+        btn_xl = fit_btn(xlrow, text="修炼管理…",
+                         command=lambda: self.practice_dialog())
+        btn_xl.pack(side="left")
         self._bind_tip(btn_xl,
-                       "改这个角色的人物修炼（攻击/法术/防御/法防）。\n"
+                       "一个窗口改这个角色的**人物修炼(A) + 召唤兽修炼(B)**，\n"
+                       "等级直接填（0~25）。窗口里可以切角色。\n"
                        "⚠ 修炼等级是游戏**战斗时现读**的，升级不改任何属性 ——\n"
                        "改完保存、回游戏重开就生效。\n"
-                       "上限：角色 <90 级 20 级，≥90 级 25 级。\n"
-                       "召唤兽修炼在「召唤兽」页。")
+                       "上限：角色 <90 级 20 级，≥90 级 25 级。")
+        btn_xla = fit_btn(xlrow, text="全员拉满", command=self.practice_max_all)
+        btn_xla.pack(side="left", padx=(6, 0))
+        self._bind_tip(btn_xla,
+                       "**所有角色**的 A + B 共 8 项修炼，一次全拉到 25 级。\n"
+                       "· 跳过巨小蛙；经验一律归 0。\n"
+                       "· 无视「<90 级上限 20」—— 游戏面板会显示「25/20」，\n"
+                       "  战斗照吃满加成（游戏读等级时不校验上限）。")
 
         bar = ttk.Frame(left)
         bar.pack(fill="x", pady=(4, 0))
@@ -3604,19 +3613,10 @@ class App(object):
         fit_btn(srow, text="清空", command=self.baby_kw_clear).pack(side="left")
         ttk.Label(srow, text="（名字 / 模板 / 序号 / 模板 id；留空＝全列）",
                   foreground="#888").pack(side="left", padx=6)
-        # 「召唤兽修炼…」（2026-10-08 川）：B 组 4 项。
-        # ⚠ 这 4 项存在**角色**身上（`@sect_data[:修炼][:B_攻击]`…），不是单只
-        #   召唤兽的字段 —— 战斗里走 `宝宝.master.sect_data[:修炼][:B_*]`，
-        #   所以上面「角色」下拉选谁就改谁（跟列表里选中哪只无关）。
-        #   放搜索行末尾（顶栏那排已有 7 个控件，再加会被 pack 切掉）。
-        btn_xlb = fit_btn(srow, text="召唤兽修炼…",
-                          command=lambda: self.practice_dialog("B"))
-        btn_xlb.pack(side="left", padx=(10, 0))
-        self._bind_tip(btn_xlb,
-                       "改这个角色的**召唤兽修炼**（攻击/法术/防御/法防）。\n"
-                       "⚠ 别看名字以为它属于某一只宠物：这 4 项存在角色身上，\n"
-                       "出战的那只召唤兽按主人的 B 组修炼吃加成。\n"
-                       "人物修炼在「角色 / 属性」页。")
+        # ⚠ 「召唤兽修炼…」2026-10-08 已撤：B 组那 4 项存在**角色**身上
+        #   （`@sect_data[:修炼][:B_*]`，战斗走 `宝宝.master.…`），挂在召唤兽页
+        #   反而给人「属于某一只宠物」的错觉。川要求 A/B 都收进「角色 / 属性」页
+        #   的「修炼管理…」+「全员拉满」。
 
         self.var_baby_note = tk.StringVar(value="")
         # ⚠ wraplength 别写死 1180：默认窗口才 1220 宽、川还常缩到 ~1080，写太大会
@@ -5354,6 +5354,9 @@ class App(object):
                 pass
         self.var_path.set(path)
         self.clear_dirty()
+        # 记文件指纹：保存时比一比，就知道「载入之后文件有没有被改过」
+        # （游戏存了档而这边没重新载入 ⇒ 保存会覆盖掉那份进度）。
+        self._load_stamp = self._file_stamp(path)
         # 每个面板单独兜底：一个面板炸了不能把「全部解析数据」也一起带下去
         self._pump("正在刷新各页签 …")
         # 体检表（Lock / 五类记账 / 逐物品计数 / 作弊标记，约 0.1 秒）概览页要画、
@@ -5381,6 +5384,17 @@ class App(object):
         if not self.doc or not self.doc.dirty:
             messagebox.showinfo("保存", "没有改动。", parent=self.root)
             return
+        # ⚠ 先拦「载入之后文件又被改过」（川 2026-10-08 要求）：游戏里存了档、
+        #   这边忘了「重新载入」，一保存就把游戏刚存的进度整档覆盖掉。
+        note = self._stale_note()
+        if note:
+            act = self._stale_confirm(note)
+            if act == "reload":
+                self.reload()
+                return
+            if act != "save":
+                self.set_status("已取消保存：存档在载入之后又被改过。")
+                return
         self._guard_rows = None
         if not self._pre_save_guard():
             return
@@ -5408,6 +5422,91 @@ class App(object):
                if auto else "原文件已备份为 %s.bak.<时间>" % os.path.basename(p)),
             parent=self.root)
         self.set_status("已保存" + self._machine_note_after_save())
+        # 刚写回 = 现在这份就是「最新」—— 重记指纹，免得下次保存拿旧时间戳比对
+        # 报「文件被改过」（那是自己刚才写的）。
+        self._load_stamp = self._file_stamp()
+
+    # ---- 存档「过期」检测（载入之后文件又被改过 = 游戏存了档）
+    def _file_stamp(self, path=None):
+        """存档文件的 `(改时间戳 ns, 大小)`；读不到返回 None。
+
+        用 `st_mtime_ns` 而不是 `st_mtime`：后者在 Windows 上只有秒级
+        （FAT 甚至 2 秒），「载入后一两秒内游戏存了档」就查不出来。
+        """
+        p = path or (self.doc.path if self.doc else "")
+        if not p:
+            return None
+        try:
+            st = os.stat(p)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _stale_note(self):
+        """「文件在载入之后被改过」就返回一句人话说明，否则 None。
+
+        为什么必须拦（2026-10-08 川）：游戏里存了档、这边忘了点「重新载入」，
+        工具手里还是**载入那一刻**的整份数据；这时一保存就是整档覆盖 ——
+        游戏刚打的那部分进度直接没了。
+        """
+        was = getattr(self, "_load_stamp", None)
+        now = self._file_stamp()
+        if was is None or now is None or now == was:
+            return None
+        p = self.doc.path
+
+        def _t(ns):
+            return time.strftime("%H:%M:%S", time.localtime(ns / 1e9))
+
+        other = "" if now[1] == was[1] else "（大小也变了）"
+        gone = "" if os.path.exists(p) else "\n⚠ 这个文件现在读不到了。"
+        return ("文件：%s%s\n"
+                "　载入时：%s　（%s 字节）\n"
+                "　现在：　%s　（%s 字节）%s\n\n"
+                "多半是游戏在你载入之后又存了档。此刻保存 = 用工具里的旧数据"
+                "整档覆盖它，那部分进度会丢。"
+                % (p, gone, _t(was[0]), was[1], _t(now[0]), now[1], other))
+
+    def _stale_confirm(self, note):
+        """过期存档要保存时的确认窗，返回 `"save"` / `"reload"` / `"cancel"`。
+
+        ⚠ 不用 messagebox：这里要三个说得清的选项（重新载入 / 仍然覆盖 / 取消），
+          而 `askyesnocancel` 只有「是 / 否 / 取消」，说不清哪个是哪个。
+        ⚠ 测试要直接桩掉本方法（`wait_window` 会挂住自动化）。
+        """
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root)
+        win.title("存档已被改动")
+        win.transient(self.root)
+        body = ttk.Frame(win, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="⚠ 这个存档在你载入之后被改动过 —— "
+                             "直接保存会把它覆盖掉。",
+                  foreground="#b00000").pack(anchor="w")
+        ttk.Label(body, text=note, justify="left", foreground="#444",
+                  wraplength=560).pack(anchor="w", pady=(8, 0))
+        ttk.Label(body, text="「先重新载入」= 丢掉工具里这次的改动、换成游戏里刚存"
+                             "那份；\n「仍然覆盖」= 保留工具里的改动、把游戏存的"
+                             "那份冲掉。",
+                  justify="left", foreground="#888").pack(anchor="w", pady=(8, 0))
+        pick = {"v": "cancel"}
+
+        def _pick(v):
+            pick["v"] = v
+            win.destroy()
+
+        bar = ttk.Frame(body)
+        bar.pack(fill="x", pady=(14, 0))
+        fit_btn(bar, text="先重新载入（推荐）",
+                command=lambda: _pick("reload")).pack(side="left")
+        fit_btn(bar, text="仍然覆盖",
+                command=lambda: _pick("save")).pack(side="left", padx=(6, 0))
+        fit_btn(bar, text="取消",
+                command=lambda: _pick("cancel")).pack(side="right")
+        center_win(win, self.root)
+        esc_close(win)          # Esc 直接关 = 取消（pick 默认就是 cancel）
+        win.wait_window()
+        return pick["v"]
 
     def _machine_note_after_save(self):
         """保存后在状态栏缀一句机器码提醒 —— **只提示，绝不代写**。
@@ -7839,129 +7938,200 @@ class App(object):
         center_win(win, self.root)
         esc_close(win)
 
-    # ---- 修炼（人物 = A 组 / 召唤兽 = B 组，都在角色的 @sect_data[:修炼]）
-    def _practice_actor(self, group):
-        """修炼改的都是**角色**的数据。
+    # ---- 修炼（人物 A 组 + 召唤兽 B 组，都在角色的 @sect_data[:修炼]）
+    def _practice_who_actor(self):
+        """修炼窗口里「角色」下拉当前选的是哪个角色（没开窗/已关窗返回 None）。
 
-        A 组（人物修炼）看「角色 / 属性」页选中的那个角色；
-        B 组（召唤兽修炼）看「召唤兽」页角色下拉选的那个 —— 这 4 项存在
-        角色身上（战斗里 `宝宝.master.sect_data[:修炼][:B_*]`），与选中的是哪只
-        召唤兽无关。
+        ⚠ 别直接拿 `Combobox.current()` 当索引：**窗口刚开那一下它是 -1**
+          （`textvariable` 初值就等于第 1 项时，ttk 不再置 current）——
+          2026-10-08 测试里栽的就是这个：窗口一开「一键满级」填出来全是 0。
+          改成先按**文本反查** `values`，查不到才退回 `current()`。
         """
-        if group == "A":
-            return self.current_actor()
-        return self._baby_actor()
+        try:
+            names = list(self._practice_cb["values"])
+            v = str(self._practice_var_who.get())
+            i = (names.index(v) if v in names
+                 else int(self._practice_cb.current()))
+            actors = self._practice_actors
+        except Exception:                            # noqa: BLE001
+            return None
+        return actors[i][1] if 0 <= i < len(actors) else None
 
-    def practice_dialog(self, group):
-        """修炼管理：`group` 传 `"A"`（人物）或 `"B"`（召唤兽）。
+    def practice_dialog(self, actor=None):
+        """修炼管理：人物 A 组 + 召唤兽 B 组，一个窗口全给。
 
-        三条设计（2026-10-08 川拍板）：
-          * **主改等级** —— 游戏只在**战斗结算**时读 `[:lv]`，升级不改任何属性
-            （`@attr` 是加点的五维，与修炼无关）⇒ 改完存盘、重开游戏即生效；
-          * **经验格子照给** —— 给「差一点点就升级」的精细还原用；写了会夹到
-            「本级门槛 - 1」（到门槛游戏就该升级了，它自己也不会停在那儿）；
-          * **上限照游戏规则** —— `<90 级 → 20、≥90 级 → 25`，不硬给 25；
-            真要写满 25 也行（战斗不校验上限），但界面会显示「25/20」。
+        2026-10-08 川拍板（推翻了上一版的三条）：
+          * **等级直接输入** —— 原来的滑条拖不准，「进度条没什么用」；
+          * **A/B 都收在这里** —— B 组原挂「召唤兽」页，可那 4 项其实存在角色
+            身上（战斗里走 `宝宝.master.sect_data[:修炼][:B_*]`），挂那边会让人
+            以为属于某一只宠物；
+          * **窗口里能切角色** —— 进来默认选中「角色 / 属性」页当前那个。
+        「一键满级」按游戏规则（`<90 → 20、≥90 → 25`）；要无视规则直接给 25，
+        用「角色 / 属性」页的「全员拉满」（那是对全部角色）。
+        机制：游戏只在**战斗结算**时读 `[:lv]`，升级不改任何属性 ⇒ 改完存盘、
+        回游戏重开即生效。
         """
         tk, ttk = self.tk, self.ttk
-        if not self.g:
+        if not self.g or not self.sv:
             return
-        actor = self._practice_actor(group)
-        if actor is None:
-            messagebox.showinfo("修炼", "先在列表里选一个角色。", parent=self.root)
+        actors = list(self.sv.actors())
+        if not actors:
+            messagebox.showinfo("修炼", "这本存档里没有角色。", parent=self.root)
             return
-        gcn = dict(game.PRACTICE_GROUPS).get(group, group)
-        try:
-            rows = self.g.practice(actor, group)
-        except KeyError as exc:
-            messagebox.showinfo("修炼", human(str(exc)), parent=self.root)
-            return
-        if not rows:
-            return
-        mx = rows[0]["max"]
-        who = self.sv.actor_name(actor)
+        cur = actor if actor is not None else self.current_actor()
+        names = [self.sv.actor_name(a) for _i, a in actors]
+        idx0 = 0
+        for i, (_i, a) in enumerate(actors):
+            if a is cur:
+                idx0 = i
+                break
+        if cur is not None and actors[idx0][1] is not cur:
+            # 对象身份没对上（面板刷新过）→ 退回按名字找
+            cn = self.sv.actor_name(cur)
+            for i, n in enumerate(names):
+                if n == cn:
+                    idx0 = i
+                    break
 
         win = tk.Toplevel(self.root)
-        win.title("%s · %s" % (gcn, who))
+        win.title("修炼管理")
         win.transient(self.root)
         body = ttk.Frame(win, padding=12)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="%s的%s。等级是游戏**战斗时现读**的值 —— 存盘后"
-                             "回游戏重开即生效，升级不改任何属性。\n"
-                             "上限 %d 级（角色 <90 级只有 20 级）。"
-                             % (who, gcn, game.PRACTICE_MAX_LV),
-                  justify="left", foreground="#888").grid(
-            row=0, column=0, columnspan=6, sticky="w", pady=(0, 10))
 
-        items = []
-        for i, r in enumerate(rows):
-            rr = i + 1
-            ttk.Label(body, text=r["name"] + "修炼：").grid(
-                row=rr, column=0, sticky="e", padx=(0, 6), pady=3)
-            var_lv = tk.DoubleVar(value=r["lv"])
-            sc = ttk.Scale(body, from_=0, to=mx, orient="horizontal",
-                           length=170, variable=var_lv)
-            sc.grid(row=rr, column=1, sticky="we", pady=3)
-            var_txt = tk.StringVar()
-            ttk.Label(body, textvariable=var_txt, width=9).grid(
-                row=rr, column=2, sticky="w", padx=(6, 12))
-            ttk.Label(body, text="经验").grid(row=rr, column=3, sticky="e")
-            var_exp = tk.StringVar(value=str(r["exp"]))
-            ttk.Entry(body, textvariable=var_exp, width=7).grid(
-                row=rr, column=4, sticky="w", padx=(4, 0))
-            var_need = tk.StringVar()
-            ttk.Label(body, textvariable=var_need, foreground="#888").grid(
-                row=rr, column=5, sticky="w", padx=(8, 0))
-            items.append([r, var_lv, var_exp, var_txt, var_need])
-            sc.configure(command=lambda _v, i=i: refresh(i))
-        # 留给测试（`tests/test_gui_quick.py`）：不用它去翻 Tk 控件树
-        # 找那 4 个滑条 —— 直接改 `items[i][1]` 再点「保存」就能验收整条写档链。
+        head = ttk.Frame(body)
+        head.grid(row=0, column=0, columnspan=6, sticky="we")
+        ttk.Label(head, text="角色：").pack(side="left")
+        var_who = tk.StringVar(value=names[idx0])
+        cb = ttk.Combobox(head, textvariable=var_who, values=names,
+                          state="readonly", width=14)
+        cb.pack(side="left")
+        cb.current(idx0)
+        ttk.Label(head, text="（A、B 两组改的都是这个角色的）",
+                  foreground="#888").pack(side="left", padx=6)
+
+        ttk.Label(body, text="等级直接填，0~25。游戏规则：角色 <90 级上限 20、"
+                             "≥90 级 25（超了也照写，游戏读等级时不校验上限）。\n"
+                             "⚠ 修炼是游戏**战斗时现读**的 —— 存盘、回游戏重开即生效；"
+                             "它不改任何属性（属性和修炼是两回事）。",
+                  justify="left", foreground="#888").grid(
+            row=1, column=0, columnspan=6, sticky="w", pady=(6, 2))
+
+        items = []       # 每行 [key, 名字, 等级 var, 经验 var, 上限 var, 提示 var]
+        reqrow = 2
+        for g, gcn in game.PRACTICE_GROUPS:
+            ttk.Label(body, text="%s（%s_）" % (gcn, g),
+                      foreground="#555").grid(row=reqrow, column=0, columnspan=6,
+                                              sticky="w", pady=(8, 2))
+            reqrow += 1
+            for nm in game.PRACTICE_NAMES:
+                rr = reqrow
+                reqrow += 1
+                ttk.Label(body, text=nm + "：").grid(
+                    row=rr, column=0, sticky="e", padx=(0, 6), pady=3)
+                var_lv = tk.StringVar()
+                ttk.Spinbox(body, from_=0, to=game.PRACTICE_MAX_LV, width=4,
+                            increment=1, justify="center",
+                            textvariable=var_lv).grid(
+                    row=rr, column=1, sticky="w", pady=3)
+                var_mx = tk.StringVar()
+                ttk.Label(body, textvariable=var_mx, width=6,
+                          foreground="#888").grid(row=rr, column=2, sticky="w")
+                ttk.Label(body, text="经验").grid(row=rr, column=3, sticky="e")
+                var_exp = tk.StringVar()
+                ttk.Entry(body, textvariable=var_exp, width=7).grid(
+                    row=rr, column=4, sticky="w", padx=(4, 0))
+                var_need = tk.StringVar()
+                ttk.Label(body, textvariable=var_need, foreground="#888").grid(
+                    row=rr, column=5, sticky="w", padx=(10, 0))
+                items.append(["%s_%s" % (g, nm), nm, var_lv, var_exp, var_mx,
+                              var_need])
+
+        # 留给测试（`tests/test_gui_quick.py`）：不用去翻 Tk 控件树 ——
+        # 改 `items[i][2]`（等级）/`items[i][3]`（经验）再点「保存」即可。
         self._practice_win = win
         self._practice_items = items
+        self._practice_cb = cb
+        self._practice_var_who = var_who
+        self._practice_actors = actors
+        self._practice_max_lv = game.PRACTICE_MAX_LV
 
-        def refresh(idx):
-            """滑条动了 → 刷「13 / 20」和「升下一级需 N 点」。"""
-            _r, var_lv, _e, var_txt, var_need = items[idx]
-            lv = max(0, min(int(round(var_lv.get())), mx))
-            var_txt.set("%d / %d" % (lv, mx))
-            var_need.set("升下一级需 %d 点"
-                         % self.g.practice_next_exp(lv))
-            return lv
+        def fill():
+            """按「角色」下拉重填 8 行（开窗 / 切角色时调）。"""
+            act = self._practice_who_actor()
+            if act is None:
+                return
+            try:
+                rows = self.g.practice(act)
+            except KeyError as exc:                  # 没修炼数据（剧情角色）
+                for _k, _n, v_lv, v_exp, v_mx, v_nd in items:
+                    v_lv.set("0")
+                    v_exp.set("0")
+                    v_mx.set("/ --")
+                    v_nd.set(human(str(exc)))
+                return
+            mx = rows[0]["max"] if rows else game.PRACTICE_MAX_LV
+            self._practice_max_lv = mx
+            for it, r in zip(items, rows):
+                it[2].set(str(r["lv"]))
+                it[3].set(str(r["exp"]))
+                it[4].set("/ %d" % mx)
+                it[5].set("升下一级需 %d 点" % self.g.practice_next_exp(r["lv"]))
 
-        for i in range(len(items)):
-            refresh(i)
+        self._practice_fill = fill
+        cb.bind("<<ComboboxSelected>>", lambda e: fill())
+        fill()
 
         def set_all(v):
-            """一键满级 / 全部清零（经验都归 0，和游戏里升完级一样）。"""
-            for i, it in enumerate(items):
-                it[1].set(v)
-                it[2].set("0")
-                refresh(i)
+            """一键满级 / 全部清零（经验都归 0，和游戏里升完级一样）。
+
+            `v=None` = 按**这个角色**的游戏规则上限（<90 → 20、≥90 → 25）。
+            """
+            act = self._practice_who_actor()
+            mx = v if v is not None else (
+                self.g.practice_max(act) if act is not None else 0)
+            for _k, _n, v_lv, v_exp, _mx, _nd in items:
+                v_lv.set(str(int(mx)))
+                v_exp.set("0")
 
         def go():
-            for r, var_lv, var_exp, _t, _n in items:
-                lv = max(0, min(int(round(var_lv.get())), mx))
-                raw = var_exp.get().strip()
+            act = self._practice_who_actor()
+            if act is None:
+                return
+            vals = []
+            for key, nm, v_lv, v_exp, _mx, _nd in items:
                 try:
+                    lv = int(str(v_lv.get()).strip() or 0)
+                    raw = str(v_exp.get()).strip()
                     e = int(raw) if raw else 0
                 except ValueError:
                     messagebox.showerror(
-                        "修炼", "「%s」的经验要填整数。" % r["name"], parent=win)
+                        "修炼", "「%s」的等级和经验都要填整数。" % nm,
+                        parent=win)
                     return
+                vals.append((key, nm, max(0, min(lv, game.PRACTICE_MAX_LV)), e))
+            for key, _nm, lv, e in vals:
                 try:
-                    self.g.practice_set(actor, r["key"], lv=lv, exp=e)
-                except KeyError as exc:                  # noqa: BLE001
+                    # ⚠ `clamp=False`：**填多少就写多少**（上界仍是 25）。
+                    #   川要的是「等级直接输入」，那就不该偷偷按 <90→20 夹一刀；
+                    #   界面上也明说了「超了也照写，游戏读等级时不校验上限」。
+                    self.g.practice_set(act, key, lv=lv, exp=e, clamp=False)
+                except KeyError as exc:              # noqa: BLE001
                     messagebox.showerror("修炼", human(str(exc)), parent=win)
                     return
             win.destroy()
             self.mark_dirty()
-            self.set_status("%s：已写 4 项修炼（%s）" % (gcn, who))
+            mx = self._practice_max_lv
+            over = [nm for _k, nm, lv, _e in vals if lv > mx]
+            self.set_status("%s：已写 8 项修炼%s" % (
+                self.sv.actor_name(act),
+                "（%d 项超过游戏上限 %d，战斗照吃）" % (len(over), mx)
+                if over else ""))
 
         bar = ttk.Frame(body)
-        bar.grid(row=len(rows) + 1, column=0, columnspan=6, sticky="we",
-                 pady=(14, 0))
+        bar.grid(row=reqrow, column=0, columnspan=6, sticky="we", pady=(14, 0))
         fit_btn(bar, text="一键满级",
-                command=lambda: set_all(mx)).pack(side="left")
+                command=lambda: set_all(None)).pack(side="left")
         fit_btn(bar, text="全部清零",
                 command=lambda: set_all(0)).pack(side="left", padx=(6, 0))
         fit_btn(bar, text="保存", command=go).pack(side="right")
@@ -7969,6 +8139,49 @@ class App(object):
                                                            padx=(0, 6))
         center_win(win, self.root)
         esc_close(win)
+
+    def practice_max_all(self):
+        """「全员拉满」：所有角色（跳过巨小蛙）的 A+B 共 8 项修炼全设成 25 级。
+
+        ⚠ 无视「<90 级上限 20」的游戏规则（走 `practice_set_everyone`，它内部
+          `clamp=False`）—— 川 2026-10-08 明确要求「设置到 25」。游戏读 lv 时
+          不校验上限，只是面板显示「25/20」；内测版也没有周期检查，不会受罚。
+        """
+        if not self.g or not self.sv:
+            return
+        try:
+            names = [self.sv.actor_name(a) for _i, a in self.sv.actors()]
+        except Exception:                            # noqa: BLE001
+            names = []
+        if not self.confirm(
+                "全员拉满",
+                "把所有角色的 8 项修炼（人物 A + 召唤兽 B）都设成 25 级。\n\n"
+                "· 跳过「巨小蛙」（剧情角色，按模板 id 认）；经验一律归 0；\n"
+                "· 无视「<90 级上限 20」—— 游戏面板会显示「25/20」，"
+                "战斗照吃满加成；\n"
+                "· 改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n"
+                "角色：%s\n\n确定吗？" % ("、".join(names) or "（无）")):
+            return
+        try:
+            n_a, n_i, skipped = self.g.practice_set_everyone()
+        except Exception as exc:                     # noqa: BLE001
+            messagebox.showerror("全员拉满", human(str(exc)), parent=self.root)
+            return
+        self.mark_dirty()
+        # 修炼窗口开着就顺手刷新显示（别让人看着旧值以为没生效）
+        try:
+            self._practice_fill()
+        except Exception:                            # noqa: BLE001
+            pass
+        note = ("；跳过 %s" % "、".join(skipped)) if skipped else ""
+        self.set_status("全员拉满：%d 个角色 / %d 项修炼 → %d 级%s"
+                        % (n_a, n_i, game.PRACTICE_MAX_LV, note))
+        messagebox.showinfo(
+            "全员拉满",
+            "已写 %d 个角色 / %d 项修炼（全部 %d 级）%s。\n\n"
+            "记得点「保存修改」(Ctrl+S) 才写进存档。"
+            % (n_a, n_i, game.PRACTICE_MAX_LV, note),
+            parent=self.root)
 
     # ---- 拖动：物品列表（换格/对调）
     def _pack_drag_start(self, event):

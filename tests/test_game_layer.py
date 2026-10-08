@@ -1272,6 +1272,53 @@ def main():
     check("改修炼**不动属性**（@attr 原样）",
           list(svT.attr_items(aX)) == atrX)
 
+    # ---- 全员拉满（2026-10-08 川）：所有角色 × 8 项 → 25，跳过名单里的角色 ----
+    pairsX = [(a, game.get_int(game.ivar(a, "@actor_id"), -1))
+              for _i, a in svT.actors()]
+    frogX = [a for a, _aid in pairsX if _aid in game.PRACTICE_SKIP_IDS]
+    frogX_before = {}
+    if frogX:
+        try:
+            frogX_before = dict((r["key"], (r["lv"], r["exp"]))
+                                for r in gT.practice(frogX[0]))
+        except KeyError:
+            frogX_before = {}
+    atrX2 = dict((game.get_int(game.ivar(a, "@actor_id"), -1),
+                  list(svT.attr_items(a))) for a, _aid in pairsX)
+    check("跳过名单 = (6,)（巨小蛙）", game.PRACTICE_SKIP_IDS == (6,),
+          game.PRACTICE_SKIP_IDS)
+    nXa, nXi, skipX = gT.practice_set_everyone()
+    check("全员拉满跳过名单里的角色", skipX == ["巨小蛙"], skipX)
+    check("改了 %d 人（总 %d 人）" % (len(pairsX) - 1, len(pairsX)),
+          nXa == len(pairsX) - 1 and len(pairsX) >= 2, (nXa, len(pairsX)))
+    check("记了 %d 项（8 × 人数）" % ((len(pairsX) - 1) * 8),
+          nXi == (len(pairsX) - 1) * 8, nXi)
+    badX = []
+    for a, _aid in pairsX:
+        if _aid in game.PRACTICE_SKIP_IDS:
+            continue
+        badX += ["%s=%s" % (r["key"], r["lv"])
+                 for r in gT.practice(a) if r["lv"] != 25 or r["exp"] != 0]
+    check("除跳过的，所有人 8 项 = 25 级 / 0 经验", not badX, badX[:4])
+    if frogX and frogX_before:
+        got = {}
+        try:
+            got = dict((r["key"], (r["lv"], r["exp"]))
+                       for r in gT.practice(frogX[0]))
+        except KeyError:
+            got = None
+        check("跳过的角色原样未动", got == frogX_before, got)
+    check("全员拉满也不动属性",
+          all(list(svT.attr_items(a)) == atrX2[_aid] for a, _aid in pairsX))
+    check("全员拉满幂等",
+          gT.practice_set_everyone()[:2] == (nXa, nXi))
+    check("clamp=False 也只给到 25（不是无限）",
+          gT.practice_set(aX, "B_攻击", lv=99, exp=0, clamp=False)[0] == 25)
+    check("clamp=True 仍按规则夹到 20",
+          gT.practice_set(aX, "B_攻击", lv=99, exp=0)[0] == 20)
+    check("groups=['A'] 只动 A 组",
+          gT.practice_set_everyone(groups=["A"])[1] == (len(pairsX) - 1) * 4)
+
     # 上限跟着角色等级走：≥90 级 → 25
     gT.sv.set_actor_field(aX, "@level", 90)
     check("90 级 ⇒ 上限 25", gT.practice_max(aX) == 25)

@@ -181,6 +181,9 @@ def main():
     try:
         say("创建窗口…")
         app = huaji2_save_editor.App(root, save_path=None)
+        # ⚠ 过期档确认窗是自定义 Toplevel + `wait_window`：测试里必须桩掉，
+        #   不然一保存就挂在那儿等鼠标点（专用用例会临时换成 "cancel"/"save"）。
+        app._stale_confirm = lambda note: "save"
         kill_timers(root)
         root.update()
         say("窗口创建完成（%d 个页签）" % app.nb.index("end"))
@@ -1721,95 +1724,178 @@ def main():
                   all(x is y for x, y in
                       zip([b for _k, b in app.baby_rows], _keep_n)))
 
-        # ---------------- 2026-10-08：修炼管理（人物 A 组 / 召唤兽 B 组）------
+        # ---------------- 2026-10-08：修炼管理（A+B 都在「角色 / 属性」页）---
         # 机制：游戏**只在战斗结算**读修炼等级，升级不改属性 ⇒ 主改等级。
-        say("修炼管理（人物 / 召唤兽）…")
+        # 川 2026-10-08 的第二轮要求：A/B 收进角色页、等级可直接输入（不要滑条）、
+        # 加「全员拉满」（跳过巨小蛙、直接 25）、保存前拦「存档已被游戏改过」。
+        say("修炼管理（角色 / 属性 页）…")
         _btns_actor = [str(w.cget("text")) for w in walk(app.tab_actor)
                        if w.winfo_class() == "TButton"]
         _btns_baby = [str(w.cget("text")) for w in walk(app.tab_baby)
                       if w.winfo_class() == "TButton"]
-        check("「角色 / 属性」页有「人物修炼…」按钮",
-              "人物修炼…" in _btns_actor, "、".join(_btns_actor))
-        check("「召唤兽」页有「召唤兽修炼…」按钮",
-              "召唤兽修炼…" in _btns_baby, "、".join(_btns_baby))
+        check("「角色 / 属性」页有「修炼管理…」按钮",
+              "修炼管理…" in _btns_actor, "、".join(_btns_actor))
+        check("「角色 / 属性」页有「全员拉满」按钮",
+              "全员拉满" in _btns_actor, "、".join(_btns_actor))
+        check("修炼入口都收在角色页（召唤兽页 / 旧的「人物修炼…」都没了）",
+              "召唤兽修炼…" not in _btns_baby
+              and "人物修炼…" not in _btns_actor,
+              "召唤兽页：%s" % "、".join(_btns_baby))
 
-        _winx = _winb = None
+        _winx = None
         _axl = app.current_actor()
         check("人物页已选中角色", _axl is not None)
         if _axl is not None:
             _mx = app.g.practice_max(_axl)
             _lv_now = app.g.actor_level(_axl)
-            app.practice_dialog("A")
+            app.practice_dialog()
             root.update()
             _winx = getattr(app, "_practice_win", None)
             _ix = getattr(app, "_practice_items", None) or []
-            check("「人物修炼」窗口建得起来（4 项）",
-                  _winx is not None and _winx.winfo_exists() and len(_ix) == 4,
+            check("修炼窗口建得起来（A+B 共 8 项）",
+                  _winx is not None and _winx.winfo_exists() and len(_ix) == 8,
                   len(_ix))
-            check("窗口里 4 项都是 A_ 前缀（人物修炼）",
-                  all(r["key"].startswith("A_") for r, *_ in _ix),
-                  [r["key"] for r, *_ in _ix])
+            check("前 4 项 A_、后 4 项 B_（一个窗口两组）",
+                  [it[0] for it in _ix] ==
+                  ["A_攻击", "A_法术", "A_防御", "A_法防",
+                   "B_攻击", "B_法术", "B_防御", "B_法防"],
+                  [it[0] for it in _ix])
+            _pw = app._practice_who_actor()
+            # ⚠ 不能比对象身份：`sv.actors()` 每次都会给出**新的**解析对象，
+            #   窗口里那份和 `current_actor()` 那份不是同一个实例 ⇒ 比 @actor_id。
+            check("默认选中的是「角色 / 属性」页那个角色",
+                  _pw is not None
+                  and game.get_int(game.ivar(_pw, "@actor_id"), -1)
+                  == game.get_int(game.ivar(_axl, "@actor_id"), -1),
+                  app.sv.actor_name(_pw) if _pw is not None else None)
             check("上限跟着角色等级：%d 级 → %d" % (_lv_now, _mx),
-                  all(r["max"] == _mx for r, *_ in _ix), _mx)
-            check("等级文字显示「x / %d」" % _mx,
-                  all(("/ %d" % _mx) in it[3].get() for it in _ix),
-                  [it[3].get() for it in _ix])
+                  all(it[4].get() == "/ %d" % _mx for it in _ix),
+                  [it[4].get() for it in _ix])
+            check("等级是 8 个可输入的 Spinbox（滑条已撤）",
+                  len([w for w in walk(_winx)
+                       if w.winfo_class() == "TSpinbox"]) == 8
+                  and not [w for w in walk(_winx)
+                           if w.winfo_class() == "TScale"],
+                  sorted(set(w.winfo_class() for w in walk(_winx))))
             _wbtn = [str(w.cget("text")) for w in walk(_winx)
                      if w.winfo_class() == "TButton"]
-            check("有「一键满级 / 全部清零 / 保存」三个按钮",
-                  all(t in _wbtn for t in ("一键满级", "全部清零", "保存")),
+            check("有「一键满级 / 全部清零 / 保存 / 取消」四个按钮",
+                  all(t in _wbtn for t in ("一键满级", "全部清零", "保存", "取消")),
                   "、".join(_wbtn))
             _full = [w for w in walk(_winx) if w.winfo_class() == "TButton"
                      and str(w.cget("text")) == "一键满级"]
             if _full:
                 _full[0].invoke()
                 root.update()
-                check("「一键满级」把 4 项滑条都拉到 %d" % _mx,
-                      all(abs(it[1].get() - _mx) < 0.01 for it in _ix),
-                      [it[1].get() for it in _ix])
+                check("「一键满级」填的是**游戏规则上限** %d" % _mx,
+                      all(it[2].get() == str(_mx) for it in _ix),
+                      [it[2].get() for it in _ix])
+                check("一键满级把经验也归 0",
+                      all(it[3].get() == "0" for it in _ix),
+                      [it[3].get() for it in _ix])
+            for it in _ix:                      # 等级直接敲 25（越规则上限）
+                it[2].set("25")
+                it[3].set("0")
             _sav = [w for w in walk(_winx) if w.winfo_class() == "TButton"
                     and str(w.cget("text")) == "保存"]
             if _sav:
                 _sav[0].invoke()
                 root.update()
-                _nowA = app.g.practice(_axl, "A")
-                check("点「保存」写进副本（A 组 4 项全 %d 级）" % _mx,
-                      all(r["lv"] == _mx for r in _nowA),
+                _nowA = app.g.practice(_axl)
+                check("点「保存」写进副本：8 项全 25 级（越过规则上限 %d）" % _mx,
+                      all(r["lv"] == 25 for r in _nowA),
                       [(r["key"], r["lv"]) for r in _nowA])
                 check("保存后状态行有回执",
                       "修炼" in app.var_status.get(), app.var_status.get())
                 check("保存后窗口自己关掉",
                       _winx is None or not _winx.winfo_exists())
 
-        _bxl = app._baby_actor()
-        check("召唤兽页角色下拉已选中角色", _bxl is not None)
-        if _bxl is not None:
-            app.practice_dialog("B")
-            root.update()
-            _winb = getattr(app, "_practice_win", None)
-            _ib = getattr(app, "_practice_items", None) or []
-            check("「召唤兽修炼」窗口也是 4 项", len(_ib) == 4, len(_ib))
-            check("B 组窗口的项都是 B_ 前缀（召唤兽修炼）",
-                  all(r["key"].startswith("B_") for r, *_ in _ib),
-                  [r["key"] for r, *_ in _ib])
-            _keepA = [(r["key"], r["lv"]) for r in app.g.practice(_bxl, "A")]
-            _sb = [w for w in walk(_winb) if w.winfo_class() == "TButton"
-                   and str(w.cget("text")) == "保存"] if _winb else []
-            if _sb:
-                _sb[0].invoke()
+        # 窗口里能切角色（原来 A 看角色页选中、B 看召唤兽页下拉，现在一处搞定）
+        app.practice_dialog()
+        root.update()
+        _winz = getattr(app, "_practice_win", None)
+        if _winz is not None and _winz.winfo_exists():
+            _cb = getattr(app, "_practice_cb", None)
+            _acts = getattr(app, "_practice_actors", None) or []
+            check("窗口里有角色下拉，列全了角色",
+                  _cb is not None and len(_cb["values"]) == len(_acts),
+                  _cb["values"] if _cb is not None else None)
+            if _cb is not None and len(_acts) > 1:
+                _cb.current(1)
+                app._practice_fill()
                 root.update()
-                check("B 组保存不影响 A 组（两组互不干扰）",
-                      [(r["key"], r["lv"])
-                       for r in app.g.practice(_bxl, "A")] == _keepA,
-                      "%r -> %r" % (_keepA, [(r["key"], r["lv"])
-                                             for r in app.g.practice(_bxl, "A")]))
-
-        for _w in (_winx, _winb):
+                _w2 = app._practice_who_actor()
+                check("切到第 2 个角色：读到的是他的 8 项",
+                      _w2 is _acts[1][1]
+                      and [it[2].get() for it in app._practice_items]
+                      == [str(r["lv"]) for r in app.g.practice(_w2)],
+                      app.sv.actor_name(_w2) if _w2 is not None else None)
             try:
-                if _w is not None and _w.winfo_exists():
-                    _w.destroy()
+                _winz.destroy()
             except Exception:
                 pass
+            root.update()
+
+        # ---------------- 全员拉满（跳过巨小蛙、直接给 25）----------------
+        say("全员拉满（跳过巨小蛙）…")
+        _frog = None
+        for _i, _a in app.sv.actors():
+            if game.get_int(game.ivar(_a, "@actor_id"), -1) in \
+                    game.PRACTICE_SKIP_IDS:
+                _frog = _a
+        check("副本里找得到要跳过的角色（巨小蛙 / id 6）", _frog is not None)
+        _frog_before = (dict((r["key"], (r["lv"], r["exp"]))
+                             for r in app.g.practice(_frog))
+                        if _frog is not None else {})
+        dialogs.clear()
+        app.practice_max_all()
+        root.update()
+        _bad = []
+        for _i, _a in app.sv.actors():
+            if _a is _frog:
+                continue
+            for _r in app.g.practice(_a):
+                if _r["lv"] != 25 or _r["exp"] != 0:
+                    _bad.append("%s/%s=%s" % (app.sv.actor_name(_a),
+                                              _r["key"], _r["lv"]))
+        check("除跳过的那只外，所有角色 8 项都拉到 25", not _bad, _bad[:4])
+        if _frog is not None:
+            check("被跳过的角色原样未动",
+                  dict((r["key"], (r["lv"], r["exp"]))
+                       for r in app.g.practice(_frog)) == _frog_before,
+                  app.sv.actor_name(_frog))
+        check("拉满后标了脏（要记得 Ctrl+S）", app.doc.dirty)
+        check("状态行报了「全员拉满」",
+              "全员拉满" in app.var_status.get(), app.var_status.get())
+
+        # ---------------- 保存前拦「存档已被游戏改过」--------------------
+        # 川 2026-10-08：游戏里存了档、这边忘了重新载入，一保存就丢进度。
+        say("过期档保存拦截…")
+        check("载入时记了文件指纹",
+              getattr(app, "_load_stamp", None) is not None,
+              getattr(app, "_load_stamp", None))
+        check("刚载入（文件没被动过）不报过期", app._stale_note() is None)
+        _keep_stamp = app._load_stamp
+        app._load_stamp = (1, 1)            # 伪造「文件已被改」的旧指纹
+        _note = app._stale_note()
+        check("文件被改过就报过期，说明里给出两次时间",
+              bool(_note) and "载入时" in _note and "现在" in _note,
+              (_note or "")[:36])
+        _orig_confirm = app._stale_confirm
+        app._stale_confirm = lambda note: "cancel"
+        app.mark_dirty()
+        _stamp0 = app._file_stamp()
+        app.save_save()
+        root.update()
+        check("过期时选「取消」不写盘、改动还在",
+              app._file_stamp() == _stamp0 and app.doc.dirty,
+              app._file_stamp())
+        app._stale_confirm = lambda note: "save"
+        app.save_save()
+        root.update()
+        check("过期时选「仍然覆盖」照样写盘", not app.doc.dirty)
+        app._stale_confirm = _orig_confirm
+        app._load_stamp = _keep_stamp
         root.update()
 
         app.baby_add_dialog()          # 打开「新增召唤兽」窗口（不点确定，只建得起来）
@@ -2193,7 +2279,7 @@ def main():
         del dialogs[dlg_mark:]       # 本段自造的弹框（含故意的“打开失败”）不算数
 
         check("全程没弹出错误框", not [d for d in dialogs if d[0] == "error"],
-              "%r" % (dialogs[:2],))
+              "%r" % ([d[1][0] for d in dialogs if d[0] == "error"][:3],))
     except SystemExit:
         pass
     except Exception:

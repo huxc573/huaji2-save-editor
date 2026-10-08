@@ -167,6 +167,10 @@ PRACTICE_DESC = {
 #: 修炼等级上限（角色 ≥90 级时；<90 级只有 20）
 PRACTICE_MAX_LV = 25
 PRACTICE_LV_BELOW_90 = 20
+#: 「全员拉满」跳过的角色 —— 按 **模板 id**（`@actor_id`）判，不按名字：
+#  id 6 = 巨小蛙（2026-10-08 川指定）。真档里它是 60 级的剧情角色，跟 5 个
+#  主力（89 级）不是一路，拉满会把它顶到 25 级。按 id 判才不怕改名/重名。
+PRACTICE_SKIP_IDS = (6,)
 
 
 # --------------------------------------------------------------------------
@@ -2293,16 +2297,19 @@ class GameEditor(object):
                             "desc": PRACTICE_DESC.get(nm, "")})
         return out
 
-    def practice_set(self, actor, key, lv=None, exp=None):
+    def practice_set(self, actor, key, lv=None, exp=None, clamp=True):
         """写一项修炼（`key` 形如 `"A_攻击"`），返回 `(lv, exp)`。
 
-        * `lv` 夹到 `0..practice_max()`；`exp` 夹到 `0..(本级门槛 - 1)`
-          （到门槛游戏就该升级了，它自己也不会停在 ≥ 门槛）。
+        * `clamp=True`：`lv` 夹到 `0..practice_max()`（<90 级 → 20）；`exp` 夹到
+          `0..(本级门槛 - 1)`（到门槛游戏就该升级了，它自己也不会停在 ≥ 门槛）。
+        * `clamp=False`：等级上限放到 `PRACTICE_MAX_LV`(25)，**无视 90 级规则**
+          —— 「全员拉满」用它（川 2026-10-08：一键就要 25；战斗读 lv 时本来
+          也不校验上限，只是游戏面板会显示「25/20」）。
         * 传 `None` = 这一项不动。
         * 只改 `[:lv]` / `[:exp]` 两个整数节点，别的一律不碰。
         """
         h = self._practice_hash(actor)
-        mx = self.practice_max(actor)
+        mx = self.practice_max(actor) if clamp else PRACTICE_MAX_LV
         node = None
         for k, v in h.pairs:
             if M.value_of(_deref(k)) == key:
@@ -2324,17 +2331,49 @@ class GameEditor(object):
         self.doc.set_value(_deref(n_exp), out_exp)
         return out_lv, out_exp
 
-    def practice_set_group(self, actor, group, lv=None, exp=0):
+    def practice_set_group(self, actor, group, lv=None, exp=0, clamp=True):
         """整组一起设（一键满级 / 清零），返回改了几项。
 
-        `lv=None` = 等级保持原样，只动经验。
+        `lv=None` = 等级保持原样，只动经验。`clamp=False` 见 `practice_set`。
         """
         n = 0
         for row in self.practice(actor, group):
             self.practice_set(actor, row["key"],
-                              lv=row["lv"] if lv is None else lv, exp=exp)
+                              lv=row["lv"] if lv is None else lv, exp=exp,
+                              clamp=clamp)
             n += 1
         return n
+
+    def practice_set_everyone(self, lv=PRACTICE_MAX_LV, exp=0, groups=None,
+                              skip_ids=PRACTICE_SKIP_IDS):
+        """**所有角色** × 每组 4 项，等级一起设成 `lv`（默认直接给满级 25）。
+
+        ⚠ 走 `clamp=False`：`lv=25` 就给 25，不按「<90 级 → 20」那套夹
+          —— 这就是「全员拉满」（川 2026-10-08 拍板）。
+        * `skip_ids` 里的角色整人跳过（默认 `PRACTICE_SKIP_IDS` = 巨小蛙）；
+          按 `@actor_id` 判，不按名字。
+        * `groups=None` = A + B 全给。没有 `@sect_data[:修炼]` 的角色**跳过不报错**
+          （只有 NPC / 半截数据才会缺），人名进 `skipped`。
+
+        返回 `(改了几人, 改了几项, 跳过的人名列表)`。
+        """
+        gl = [g for g, _cn in PRACTICE_GROUPS] if groups is None else list(groups)
+        keys = ["%s_%s" % (g, nm) for g in gl for nm in PRACTICE_NAMES]
+        skip_ids = tuple(skip_ids or ())
+        skipped, n_actor, n_item = [], 0, 0
+        for _aid, actor in self.sv.actors():
+            if get_int(ivar(actor, "@actor_id"), -1) in skip_ids:
+                skipped.append(self.sv.actor_name(actor))
+                continue
+            try:
+                for key in keys:
+                    self.practice_set(actor, key, lv=lv, exp=exp, clamp=False)
+            except KeyError:
+                skipped.append(self.sv.actor_name(actor))
+                continue
+            n_item += len(keys)
+            n_actor += 1
+        return n_actor, n_item, skipped
 
     # ==================================================== 角色技能（@skills）
     # 2026-09-20 加的一层：角色技能可视化编辑要用。
