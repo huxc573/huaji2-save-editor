@@ -3167,16 +3167,10 @@ class App(object):
         self._bind_tip(btn_xl,
                        "一个窗口改这个角色的**人物修炼(A) + 召唤兽修炼(B)**，\n"
                        "等级直接填（0~25）。窗口里可以切角色。\n"
+                       "窗口里还有「全员拉满」（所有角色一次拉满、跳过巨小蛙）。\n"
                        "⚠ 修炼等级是游戏**战斗时现读**的，升级不改任何属性 ——\n"
                        "改完保存、回游戏重开就生效。\n"
                        "上限：角色 <90 级 20 级，≥90 级 25 级。")
-        btn_xla = fit_btn(xlrow, text="全员拉满", command=self.practice_max_all)
-        btn_xla.pack(side="left", padx=(6, 0))
-        self._bind_tip(btn_xla,
-                       "**所有角色**的 A + B 共 8 项修炼，一次全拉到 25 级。\n"
-                       "· 跳过巨小蛙；经验一律归 0。\n"
-                       "· 无视「<90 级上限 20」—— 游戏面板会显示「25/20」，\n"
-                       "  战斗照吃满加成（游戏读等级时不校验上限）。")
 
         bar = ttk.Frame(left)
         bar.pack(fill="x", pady=(4, 0))
@@ -5068,16 +5062,17 @@ class App(object):
     def err(self, e):
         self.set_status("出错：%s" % human(str(e)).replace("\n", " ")[:120])
 
-    def confirm(self, title, text):
+    def confirm(self, title, text, parent=None):
         """问一句“要不要”。
 
         走一层包装：测试里把 messagebox 换成了“只记录”的假对象，
         没有 askyesno 时就当“确认”（不然一调就 AttributeError）。
+        `parent` 给了就用它（从子窗口里问时叠在子窗口上），否则挂主窗。
         """
         fn = getattr(messagebox, "askyesno", None)
         if fn is None:
             return True
-        return bool(fn(title, text, parent=self.root))
+        return bool(fn(title, text, parent=parent or self.root))
 
     # ------------------------------------------------------------ 悬浮说明
     def _tip_hide(self, event=None):
@@ -7966,8 +7961,10 @@ class App(object):
             身上（战斗里走 `宝宝.master.sect_data[:修炼][:B_*]`），挂那边会让人
             以为属于某一只宠物；
           * **窗口里能切角色** —— 进来默认选中「角色 / 属性」页当前那个。
-        「一键满级」按游戏规则（`<90 → 20、≥90 → 25`）；要无视规则直接给 25，
-        用「角色 / 属性」页的「全员拉满」（那是对全部角色）。
+        「一键满级」按**这个角色**的游戏规则（`<90 → 20、≥90 → 25`）；窗口里
+        那个「全员拉满」＝所有角色一起拉满、跳过巨小蛙（2026-10-08 从
+        「角色 / 属性」页搬进来），同样按游戏规则逐人算。要无视规则直接给
+        25，就手动把等级填成 25（`clamp=False`）。
         机制：游戏只在**战斗结算**时读 `[:lv]`，升级不改任何属性 ⇒ 改完存盘、
         回游戏重开即生效。
         """
@@ -8134,38 +8131,65 @@ class App(object):
                 command=lambda: set_all(None)).pack(side="left")
         fit_btn(bar, text="全部清零",
                 command=lambda: set_all(0)).pack(side="left", padx=(6, 0))
+        # 「全员拉满」（2026-10-08 川：从「角色 / 属性」页搬进来）——
+        # ⚠ 它和左边那两个**不是一类**：左边只改这一屏的输入框（还要点「保存」），
+        #   它直接改**所有角色**的存档对象（跳过巨小蛙），仍然要 Ctrl+S 落盘。
+        btn_alla = fit_btn(bar, text="全员拉满",
+                           command=lambda: self.practice_max_all(parent=win))
+        btn_alla.pack(side="left", padx=(6, 0))
+        self._bind_tip(btn_alla,
+                       "**所有角色**（不只上面下拉这个）的 A + B 共 8 项，\n"
+                       "按游戏规则一次拉满：<90 级 → 20、≥90 级 → 25；\n"
+                       "· 跳过「巨小蛙」（剧情角色）；经验一律归 0。\n"
+                       "· 它直接写进存档对象（会刷新这一屏），\n"
+                       "  但还要点「保存修改」(Ctrl+S) 才落到文件。")
         fit_btn(bar, text="保存", command=go).pack(side="right")
         fit_btn(bar, text="取消", command=win.destroy).pack(side="right",
                                                            padx=(0, 6))
         center_win(win, self.root)
         esc_close(win)
 
-    def practice_max_all(self):
-        """「全员拉满」：所有角色（跳过巨小蛙）的 A+B 共 8 项修炼全设成 25 级。
+    def practice_max_all(self, parent=None):
+        """「全员拉满」：所有角色（跳过巨小蛙）的 A+B 共 8 项修炼拉满。
 
-        ⚠ 无视「<90 级上限 20」的游戏规则（走 `practice_set_everyone`，它内部
-          `clamp=False`）—— 川 2026-10-08 明确要求「设置到 25」。游戏读 lv 时
-          不校验上限，只是面板显示「25/20」；内测版也没有周期检查，不会受罚。
+        ⚠ **按游戏规则逐人拉**（川 2026-10-08 改的，前一版是统一给 25）：
+          `<90 级 → 20`、`≥90 级 → 25` —— 走 `practice_set_everyone()` 的默认
+          `lv=None`，它内部取每个人的 `practice_max()`。想无视规则直接 25，
+          在修炼窗口里**手动把等级填成 25** 就行（那条走 `clamp=False`）。
+        入口在「修炼管理」窗口里（原来挂在「角色 / 属性」页，已撤）。
         """
         if not self.g or not self.sv:
             return
+        parent = parent or self.root
+        rows = []                       # [(名字, 会被拉到的等级)]
         try:
-            names = [self.sv.actor_name(a) for _i, a in self.sv.actors()]
+            skip_ids = tuple(game.PRACTICE_SKIP_IDS)
+            for _i, a in self.sv.actors():
+                if game.get_int(game.ivar(a, "@actor_id"), -1) in skip_ids:
+                    continue
+                rows.append((self.sv.actor_name(a), self.g.practice_max(a)))
         except Exception:                            # noqa: BLE001
-            names = []
-        if not self.confirm(
-                "全员拉满",
-                "把所有角色的 8 项修炼（人物 A + 召唤兽 B）都设成 25 级。\n\n"
-                "· 跳过「巨小蛙」（剧情角色，按模板 id 认）；经验一律归 0；\n"
-                "· 无视「<90 级上限 20」—— 游戏面板会显示「25/20」，"
-                "战斗照吃满加成；\n"
+            rows = []
+        if not rows:
+            messagebox.showinfo("全员拉满", "这本存档里没有可改的角色。",
+                                parent=parent)
+            return
+        # ⚠ 名单里**只列会被改的角色**（川 2026-10-08：说跳过了巨小蛙、
+        #   名单里却还挂着它，自相矛盾）。跳过的单独用一行文字交代。
+        todo = "、".join("%s→%d" % (nm, lv) for nm, lv in rows)
+        text = ("把下列角色的 8 项修炼（人物 A + 召唤兽 B）拉满 —— "
+                "按游戏规则：\n\n"
+                "· 角色 <90 级 → 20 级，≥90 级 → 25 级；经验一律归 0；\n"
+                "· 跳过「巨小蛙」（剧情角色），不在下面的名单里；\n"
                 "· 改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n"
-                "角色：%s\n\n确定吗？" % ("、".join(names) or "（无）")):
+                "将修改 %d 人：%s\n\n确定吗？" % (len(rows), todo))
+        self._practice_all_text = text          # 留给测试断言文案
+        if not self.confirm("全员拉满", text, parent=parent):
             return
         try:
             n_a, n_i, skipped = self.g.practice_set_everyone()
         except Exception as exc:                     # noqa: BLE001
-            messagebox.showerror("全员拉满", human(str(exc)), parent=self.root)
+            messagebox.showerror("全员拉满", human(str(exc)), parent=parent)
             return
         self.mark_dirty()
         # 修炼窗口开着就顺手刷新显示（别让人看着旧值以为没生效）
@@ -8174,14 +8198,18 @@ class App(object):
         except Exception:                            # noqa: BLE001
             pass
         note = ("；跳过 %s" % "、".join(skipped)) if skipped else ""
-        self.set_status("全员拉满：%d 个角色 / %d 项修炼 → %d 级%s"
-                        % (n_a, n_i, game.PRACTICE_MAX_LV, note))
+        n_low = len([1 for _nm, lv in rows if lv < game.PRACTICE_MAX_LV])
+        detail = ("%d 级 %d 人 / %d 级 %d 人"
+                  % (game.PRACTICE_LV_BELOW_90, n_low,
+                     game.PRACTICE_MAX_LV, len(rows) - n_low))
+        self.set_status("全员拉满：%d 个角色 / %d 项修炼（%s）%s"
+                        % (n_a, n_i, detail, note))
         messagebox.showinfo(
             "全员拉满",
-            "已写 %d 个角色 / %d 项修炼（全部 %d 级）%s。\n\n"
+            "已写 %d 个角色 / %d 项修炼（%s）%s。\n\n"
             "记得点「保存修改」(Ctrl+S) 才写进存档。"
-            % (n_a, n_i, game.PRACTICE_MAX_LV, note),
-            parent=self.root)
+            % (n_a, n_i, detail, note),
+            parent=parent)
 
     # ---- 拖动：物品列表（换格/对调）
     def _pack_drag_start(self, event):

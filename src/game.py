@@ -2303,8 +2303,9 @@ class GameEditor(object):
         * `clamp=True`：`lv` 夹到 `0..practice_max()`（<90 级 → 20）；`exp` 夹到
           `0..(本级门槛 - 1)`（到门槛游戏就该升级了，它自己也不会停在 ≥ 门槛）。
         * `clamp=False`：等级上限放到 `PRACTICE_MAX_LV`(25)，**无视 90 级规则**
-          —— 「全员拉满」用它（川 2026-10-08：一键就要 25；战斗读 lv 时本来
-          也不校验上限，只是游戏面板会显示「25/20」）。
+          —— 修炼窗口里**手动直接把等级填成 25** 时用它（川 2026-10-08：手动
+          可以设到 25；战斗读 lv 时本来也不校验上限，只是面板显示「25/20」）。
+          「全员拉满」不用它 —— 那个走默认 `clamp=True`，逐人按游戏规则拉。
         * 传 `None` = 这一项不动。
         * 只改 `[:lv]` / `[:exp]` 两个整数节点，别的一律不碰。
         """
@@ -2344,12 +2345,14 @@ class GameEditor(object):
             n += 1
         return n
 
-    def practice_set_everyone(self, lv=PRACTICE_MAX_LV, exp=0, groups=None,
+    def practice_set_everyone(self, lv=None, exp=0, groups=None,
                               skip_ids=PRACTICE_SKIP_IDS):
-        """**所有角色** × 每组 4 项，等级一起设成 `lv`（默认直接给满级 25）。
+        """**所有角色** × 每组 4 项，等级一起拉满。
 
-        ⚠ 走 `clamp=False`：`lv=25` 就给 25，不按「<90 级 → 20」那套夹
-          —— 这就是「全员拉满」（川 2026-10-08 拍板）。
+        * `lv=None`（默认）＝**按游戏规则逐人拉满**：`<90 级 → 20、≥90 级 → 25`
+          （每人取自己的 `practice_max()`，走 `clamp=True`）—— 川 2026-10-08：
+          「全员拉满也按游戏规则」。要**无视规则**直接全给 25，显式传 `lv=25`
+          （那时走 `clamp=False`，游戏面板会显示「25/20」，战斗照吃满加成）。
         * `skip_ids` 里的角色整人跳过（默认 `PRACTICE_SKIP_IDS` = 巨小蛙）；
           按 `@actor_id` 判，不按名字。
         * `groups=None` = A + B 全给。没有 `@sect_data[:修炼]` 的角色**跳过不报错**
@@ -2367,7 +2370,13 @@ class GameEditor(object):
                 continue
             try:
                 for key in keys:
-                    self.practice_set(actor, key, lv=lv, exp=exp, clamp=False)
+                    if lv is None:
+                        self.practice_set(actor, key,
+                                          lv=self.practice_max(actor), exp=exp,
+                                          clamp=True)
+                    else:
+                        self.practice_set(actor, key, lv=lv, exp=exp,
+                                          clamp=False)
             except KeyError:
                 skipped.append(self.sv.actor_name(actor))
                 continue

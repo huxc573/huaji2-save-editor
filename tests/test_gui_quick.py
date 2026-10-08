@@ -1735,8 +1735,9 @@ def main():
                       if w.winfo_class() == "TButton"]
         check("「角色 / 属性」页有「修炼管理…」按钮",
               "修炼管理…" in _btns_actor, "、".join(_btns_actor))
-        check("「角色 / 属性」页有「全员拉满」按钮",
-              "全员拉满" in _btns_actor, "、".join(_btns_actor))
+        # 2026-10-08 川：全员拉满从角色页**搬进**了修炼管理窗口
+        check("「全员拉满」已收进修炼窗口（角色页上不再有）",
+              "全员拉满" not in _btns_actor, "、".join(_btns_actor))
         check("修炼入口都收在角色页（召唤兽页 / 旧的「人物修炼…」都没了）",
               "召唤兽修炼…" not in _btns_baby
               and "人物修炼…" not in _btns_actor,
@@ -1779,8 +1780,9 @@ def main():
                   sorted(set(w.winfo_class() for w in walk(_winx))))
             _wbtn = [str(w.cget("text")) for w in walk(_winx)
                      if w.winfo_class() == "TButton"]
-            check("有「一键满级 / 全部清零 / 保存 / 取消」四个按钮",
-                  all(t in _wbtn for t in ("一键满级", "全部清零", "保存", "取消")),
+            check("有「一键满级 / 全部清零 / 全员拉满 / 保存 / 取消」五个按钮",
+                  all(t in _wbtn for t in ("一键满级", "全部清零", "全员拉满",
+                                           "保存", "取消")),
                   "、".join(_wbtn))
             _full = [w for w in walk(_winx) if w.winfo_class() == "TButton"
                      and str(w.cget("text")) == "一键满级"]
@@ -1836,13 +1838,16 @@ def main():
                 pass
             root.update()
 
-        # ---------------- 全员拉满（跳过巨小蛙、直接给 25）----------------
-        say("全员拉满（跳过巨小蛙）…")
-        _frog = None
+        # ---------------- 全员拉满（跳过巨小蛙、按游戏规则）---------------
+        # 2026-10-08 川：① 入口从角色页搬进修炼窗口；② 不再一律给 25，
+        # 改成按游戏规则 `<90 → 20、≥90 → 25`；③ 确认窗名单里别再挂巨小蛙。
+        say("全员拉满（跳过巨小蛙、按游戏规则）…")
+        _frog, _frog_id = None, None
         for _i, _a in app.sv.actors():
             if game.get_int(game.ivar(_a, "@actor_id"), -1) in \
                     game.PRACTICE_SKIP_IDS:
                 _frog = _a
+                _frog_id = game.get_int(game.ivar(_a, "@actor_id"), -1)
         check("副本里找得到要跳过的角色（巨小蛙 / id 6）", _frog is not None)
         _frog_before = (dict((r["key"], (r["lv"], r["exp"]))
                              for r in app.g.practice(_frog))
@@ -1850,15 +1855,26 @@ def main():
         dialogs.clear()
         app.practice_max_all()
         root.update()
+        _ctxt = getattr(app, "_practice_all_text", "") or ""
+        _tail = _ctxt.split("将修改", 1)[-1] if "将修改" in _ctxt else _ctxt
+        check("确认窗名单里没有「巨小蛙」（只在「跳过」那句里出现）",
+              "巨小蛙" in _ctxt and "巨小蛙" not in _tail,
+              _ctxt.replace("\n", " | "))
+        check("确认窗文案改成了游戏规则（<90→20、≥90→25）",
+              "<90 级 → 20" in _ctxt and "≥90 级 → 25" in _ctxt,
+              _ctxt.replace("\n", " | "))
         _bad = []
         for _i, _a in app.sv.actors():
-            if _a is _frog:
+            # ⚠ 别比对象身份：`sv.actors()` 每次给的都是新解析对象
+            if game.get_int(game.ivar(_a, "@actor_id"), -1) == _frog_id:
                 continue
+            _want = app.g.practice_max(_a)
             for _r in app.g.practice(_a):
-                if _r["lv"] != 25 or _r["exp"] != 0:
-                    _bad.append("%s/%s=%s" % (app.sv.actor_name(_a),
-                                              _r["key"], _r["lv"]))
-        check("除跳过的那只外，所有角色 8 项都拉到 25", not _bad, _bad[:4])
+                if _r["lv"] != _want or _r["exp"] != 0:
+                    _bad.append("%s/%s=%s(应%d)" % (app.sv.actor_name(_a),
+                                                   _r["key"], _r["lv"], _want))
+        check("除跳过的那只外，所有角色 8 项都按**各自规则上限**拉满",
+              not _bad, _bad[:4])
         if _frog is not None:
             check("被跳过的角色原样未动",
                   dict((r["key"], (r["lv"], r["exp"]))
@@ -1867,6 +1883,27 @@ def main():
         check("拉满后标了脏（要记得 Ctrl+S）", app.doc.dirty)
         check("状态行报了「全员拉满」",
               "全员拉满" in app.var_status.get(), app.var_status.get())
+        # 规则真的在跑：同一个角色 89 级拉 20、90 级拉 25（改完等级还回去）
+        _tgt = None
+        for _i, _a in app.sv.actors():
+            if game.get_int(game.ivar(_a, "@actor_id"), -1) != _frog_id:
+                _tgt = _a
+                break
+        if _tgt is not None:
+            _lv0 = app.g.actor_level(_tgt)
+            app.sv.set_actor_field(_tgt, "@level", 89)
+            app.practice_max_all()
+            root.update()
+            check("89 级角色 → 拉 20（不是 25）",
+                  all(r["lv"] == 20 for r in app.g.practice(_tgt)),
+                  [r["lv"] for r in app.g.practice(_tgt)])
+            app.sv.set_actor_field(_tgt, "@level", 90)
+            app.practice_max_all()
+            root.update()
+            check("90 级角色 → 拉 25",
+                  all(r["lv"] == 25 for r in app.g.practice(_tgt)),
+                  [r["lv"] for r in app.g.practice(_tgt)])
+            app.sv.set_actor_field(_tgt, "@level", _lv0)
 
         # ---------------- 保存前拦「存档已被游戏改过」--------------------
         # 川 2026-10-08：游戏里存了档、这边忘了重新载入，一保存就丢进度。

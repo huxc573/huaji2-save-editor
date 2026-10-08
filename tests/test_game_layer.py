@@ -1272,7 +1272,9 @@ def main():
     check("改修炼**不动属性**（@attr 原样）",
           list(svT.attr_items(aX)) == atrX)
 
-    # ---- 全员拉满（2026-10-08 川）：所有角色 × 8 项 → 25，跳过名单里的角色 ----
+    # ---- 全员拉满（2026-10-08 川）：所有角色 × 8 项按**游戏规则**拉满 ----
+    # ⚠ 不是一律 25（那是上一版）：<90 级 → 20、≥90 级 → 25，逐人取上限；
+    #   想无视规则全给 25 要显式传 `lv=25`。
     pairsX = [(a, game.get_int(game.ivar(a, "@actor_id"), -1))
               for _i, a in svT.actors()]
     frogX = [a for a, _aid in pairsX if _aid in game.PRACTICE_SKIP_IDS]
@@ -1293,13 +1295,18 @@ def main():
           nXa == len(pairsX) - 1 and len(pairsX) >= 2, (nXa, len(pairsX)))
     check("记了 %d 项（8 × 人数）" % ((len(pairsX) - 1) * 8),
           nXi == (len(pairsX) - 1) * 8, nXi)
-    badX = []
+    badX, seenX = [], {}
     for a, _aid in pairsX:
         if _aid in game.PRACTICE_SKIP_IDS:
             continue
-        badX += ["%s=%s" % (r["key"], r["lv"])
-                 for r in gT.practice(a) if r["lv"] != 25 or r["exp"] != 0]
-    check("除跳过的，所有人 8 项 = 25 级 / 0 经验", not badX, badX[:4])
+        want = gT.practice_max(a)
+        seenX[want] = seenX.get(want, 0) + 1
+        badX += ["%s=%s(应%d)" % (r["key"], r["lv"], want)
+                 for r in gT.practice(a) if r["lv"] != want or r["exp"] != 0]
+    check("除跳过的，所有人 8 项 = **各自规则上限** / 0 经验", not badX, badX[:4])
+    if game.get_int(game.ivar(aX, "@actor_id"), -1) not in game.PRACTICE_SKIP_IDS:
+        check("<90 级角色（aX = %d 级）拉出来是 20" % gT.actor_level(aX),
+              seenX.get(game.PRACTICE_LV_BELOW_90, 0) >= 1, seenX)
     if frogX and frogX_before:
         got = {}
         try:
@@ -1312,6 +1319,14 @@ def main():
           all(list(svT.attr_items(a)) == atrX2[_aid] for a, _aid in pairsX))
     check("全员拉满幂等",
           gT.practice_set_everyone()[:2] == (nXa, nXi))
+    # 想无视规则、一律 25 ⇒ 显式传 `lv=25`（那时才走 clamp=False）
+    _n25a, _n25i, _s25 = gT.practice_set_everyone(lv=25)
+    check("显式 lv=25 仍能无视规则全给 25",
+          _s25 == skipX and all(
+              r["lv"] == 25 for a, _aid in pairsX
+              if _aid not in game.PRACTICE_SKIP_IDS
+              for r in gT.practice(a)), _s25)
+    gT.practice_set_everyone()                      # 复位回规则上限
     check("clamp=False 也只给到 25（不是无限）",
           gT.practice_set(aX, "B_攻击", lv=99, exp=0, clamp=False)[0] == 25)
     check("clamp=True 仍按规则夹到 20",
