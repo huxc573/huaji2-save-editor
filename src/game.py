@@ -861,13 +861,18 @@ class GameEditor(object):
             return None, None
         t = M.value_of(_deref(hash_get(d, "type")))
         inner = _deref(hash_get(d, "data"))
+        # ⚠ 乾坤袋的 `data` 是**空 Hash**（它跟 `max` 平级，游戏读的是
+        #   `item.data[:data].length`）—— 空 Hash 不能当"内容本体"，否则
+        #   摘要/界面上读不到旁边的 `max`。
+        if isinstance(inner, M.HashNode) and not inner.pairs:
+            inner = None
         return t, (d if inner is None else inner)
 
     def item_needs_payload(self, kind, item_id):
         """这件东西是不是“游戏运行时才生成内容”（孵化蛋、各类礼包…）。"""
         import datatables
         nm = datatables.name_map(kind).get(item_id, "")
-        return itemattr.needs_payload(nm), nm
+        return itemattr.needs_payload(nm, item_id), nm
 
     def payload_template(self, kind, item_id):
         """从存档里任意一件**有内容**的同款物品上把 `@attr` 整份抄下来。"""
@@ -1010,6 +1015,7 @@ class GameEditor(object):
     #: 口径照游戏自己的物品浮窗（脚本 `case item.data[:type]` 那段）。
     _PAYLOAD_KINDS = {
         "孵化蛋": "egg", "baby_egg": "egg",
+        "坐骑蛋蛋": "ride",
         "魔兽要诀": "book", "高级魔兽要诀": "book", "超级魔兽要诀": "book",
         "特殊魔兽要诀": "book", "低级内丹": "book", "高级内丹": "book",
         "skill_book": "book",
@@ -1030,6 +1036,17 @@ class GameEditor(object):
         "点化石": "dianhua",
         "鬼谷子": "formation", "formation": "formation",
         "礼盒": "gift",
+        # ---- 2026-10-08 补齐的那批（type 符号 → 解释方式）----
+        "乾坤袋": "qiankun",
+        "天材地宝": "tiancai",
+        "圣者精气": "jingqi", "战神精气": "jingqi", "仙人精气": "jingqi",
+        "本源精气": "jingqi",
+        "蟠桃": "peach",
+        "符文": "fuwen",
+        "上古技能残卷": "canjuan",
+        "银票": "silver",
+        "提神泪": "tishenlei",
+        "摇钱树树苗": "qian_tree",
     }
 
     def payload_summary(self, node):
@@ -1053,6 +1070,17 @@ class GameEditor(object):
             s = "蛋→%s(%s)" % (acts.get(kid, "?"), kid)
             if dv("mutation"):
                 s += " 变异"
+            return s
+        if kind == "ride":
+            rid = dv("id")
+            q = dv("type")
+            sp = dv("speed")
+            acts = self._name_map("Actors")
+            qs = itemattr.RIDE_QUALITY_NAMES[q] \
+                if isinstance(q, int) and 0 <= q < 3 else "?"
+            s = "坐骑→%s(%s) 品质%s" % (acts.get(rid, "?"), rid, qs)
+            if isinstance(sp, float):
+                s += " 移速%g%%" % (round(sp * 100, 2))
             return s
         if kind == "book":
             kid = dv("id")
@@ -1128,6 +1156,37 @@ class GameEditor(object):
         if kind == "formation":
             key = dv("key")
             return "鬼谷子→阵法·%s" % (key or "?")
+        # ---- 2026-10-08 补齐的那批 ----
+        if kind == "qiankun":
+            return "乾坤袋→容量 %s 格" % dv("max")
+        if kind == "tiancai":
+            return "天材地宝→%s 档（上限 %s）" % (dv("lv"), dv("limit"))
+        if kind == "jingqi":
+            # 四类精气：本源只有 seed；圣者是属性点；战神/仙人各带一个技能。
+            hold = "skill" if t == "战神精气" else \
+                ("skills" if t == "仙人精气" else None)
+            hv = _deref(hash_get(d, hold)) if (d is not None and hold) else None
+            kid = None
+            if isinstance(hv, M.HashNode) and hv.pairs:
+                kv = M.value_of(_deref(hv.pairs[0][0]))
+                kid = kv if isinstance(kv, int) else None
+            if kid is not None:
+                return "%s→技能·%s" % (t, self._name_map("Skills").get(kid, kid))
+            pl = _deref(hash_get(d, "point")) if d is not None else None
+            n = len(pl.items) if isinstance(pl, M.ArrayNode) else 0
+            return "%s%s" % (t, ("→属性 %d 项" % n) if n else "")
+        if kind == "peach":
+            return "蟠桃→%s 年" % dv("year")
+        if kind == "fuwen":
+            return "符文→%s 星 等级%s" % (dv("star"), dv("lv"))
+        if kind == "canjuan":
+            return "上古技能残卷→门派%s" % dv("id")
+        if kind == "silver":
+            return "银票→%s 金" % dv("gold")
+        if kind == "tishenlei":
+            return "提神泪→恢复 %s" % dv("value")
+        if kind == "qian_tree":
+            return "摇钱树树苗"
         return "%s→%s" % (t, self._plain_text(d))
 
     @staticmethod
@@ -1180,6 +1239,11 @@ class GameEditor(object):
             return str_node(value)
         if isinstance(value, str):
             return str_node(value)
+        if isinstance(value, itemattr.IntHash):
+            # 键要是**整数**的 Hash（战神精气的 `{技能id => 数值}`）—— 下面
+            # 那条默认把键写成符号，游戏读不出来。
+            return M.HashNode([(self._plain_node(k), self._plain_node(v))
+                               for k, v in value.items()], default=None)
         if isinstance(value, dict):
             return M.HashNode([(self._sym(k), self._plain_node(v))
                                for k, v in value.items()], default=None)

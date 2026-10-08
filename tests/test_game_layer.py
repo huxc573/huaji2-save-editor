@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.stdout.reconfigure(errors="replace")
 
 import backup  # noqa: E402
+import datatables  # noqa: E402
 import paths  # noqa: E402
 import game  # noqa: E402
 import itemattr  # noqa: E402
@@ -387,6 +388,71 @@ def main():
         check("对空格子重抽会报错", "空" in str(e), "%s" % type(e).__name__)
     g.clear_slot("Items", probe3)
 
+    # ---------------- 2026-10-08：补齐 `special?` 里剩下能静态复刻的家族
+    #  `Game_Party#special?` 有 40 来个 id 要求 `item.data` 有内容，工具原
+    #  先只覆盖一半。没覆盖的那些「加进背包」时不写 `@attr` —— 数据为 nil
+    #  游戏会自己填，但角标/浮窗那几处是**直接读** `item.data[:data]` 的，
+    #  所以能照脚本抄的就抄一份（不能抄的不写，见 107）。
+    print("\n== 2026-10-08 补齐家族：内丹 / 点化石 / 如意丹 / 精气 …")
+    _new18 = ((131, "如意丹"), (224, "点化石"), (123, "乾坤袋"),
+              (133, "低级内丹"), (134, "高级内丹"), (140, "天材地宝"),
+              (141, "圣者精气"), (142, "战神精气"), (143, "仙人精气"),
+              (144, "本源精气"), (150, "灵饰指南书"), (151, "元灵晶石"),
+              (157, "蟠桃"), (159, "符文"), (160, "上古技能残卷"),
+              (276, "银票"), (277, "提神泪"), (280, "摇钱树树苗"))
+    _names = datatables.name_map("Items")
+    _miss = [i for i, _t in _new18 if not g.item_needs_payload("Items", i)[0]]
+    check("18 个家族都认得出是运行时内容物品", not _miss, "漏 %r" % (_miss,))
+    # ⚠ 名字撞车：225「十个点化石」、158「符文碎片」都不需要内容；107
+    #   「点化石」的内容来自运行期 TemplateManager，静态抄不出来 ⇒ 三个都 False。
+    _notneed = [i for i in (107, 158, 225)
+                if g.item_needs_payload("Items", i)[0]]
+    check("名字撞车的 107/158/225 不被误认", not _notneed, "%r" % (_notneed,))
+    _slots18, _bad18 = [], []
+    for _iid, _want in _new18:
+        _s = [s for s in g.empty_slots("Items") if s not in _slots18][0]
+        _slots18.append(_s)
+        g.add_item("Items", _s, _iid, 1, clone_like=False)
+        _tt, _dd = g.item_payload(_item_of(g, "Items", _s))
+        if _tt != _want or _dd is None:
+            _bad18.append((_iid, _tt))
+    check("18 个家族写出来的 type 与脚本一致", not _bad18, "%r" % (_bad18,))
+    _spec_bad = [i for i, t in _new18
+                 if itemattr.payload_spec(_names.get(i, ""), i)[0] != t]
+    check("18 个家族在重抽管理里都报得出家族名", not _spec_bad,
+          "%r" % (_spec_bad,))
+    _sum_bad = [g.payload_summary(_item_of(g, "Items", _s))
+                for _s in _slots18
+                if not g.payload_summary(_item_of(g, "Items", _s))
+                or "None" in g.payload_summary(_item_of(g, "Items", _s))
+                or g.payload_summary(_item_of(g, "Items", _s)) == "?"]
+    check("18 个家族的摘要都能读出来", not _sum_bad, "%r" % (_sum_bad,))
+    # 乾坤袋的 `data` 是**空 Hash**（跟 max 平级）—— 别当成"内容本体"，
+    # 不然摘要与界面读不到 max（2026-10-08 自己踩到）。
+    _qz = _slots18[_new18.index((123, "乾坤袋"))]
+    _tq, _dq = g.item_payload(_item_of(g, "Items", _qz))
+    check("乾坤袋的 max 平级读得到（空 data 不吞内容）",
+          M.value_of(save._deref(save.hash_get(_dq, "max"))) == 20,
+          g.payload_summary(_item_of(g, "Items", _qz)))
+    # 战神精气的 skill 是**整数键** Hash（写成符号键游戏读不出来）
+    _zsp = _slots18[_new18.index((142, "战神精气"))]
+    _tz, _dz = g.item_payload(_item_of(g, "Items", _zsp))
+    _hv = save._deref(save.hash_get(_dz, "skill"))
+    _k0 = save._deref(_hv.pairs[0][0]) if isinstance(_hv, M.HashNode) \
+        and _hv.pairs else None
+    check("战神精气的 skill 用整数键", isinstance(_k0, M.IntNode), "%r" % (_k0,))
+    # 精气的 seed 是 30 位大整数（Fixnum 装不下 ⇒ 必须走大整数编码）
+    _byp = _slots18[_new18.index((144, "本源精气"))]
+    _tb, _db = g.item_payload(_item_of(g, "Items", _byp))
+    _sd = M.value_of(save._deref(save.hash_get(_db, "seed")))
+    check("精气的 seed 是大整数（>2^63）",
+          isinstance(_sd, int) and _sd > 2 ** 63, "%r" % (_sd,))
+    # 提神泪：界面回填的是**存值** ⇒ 生成器不能再除一次 2.2（会越改越小）
+    check("提神泪按存值原样写入（不二次缩水）",
+          itemattr.build("提神泪", 277, over={"value": 500})[1]["value"] == 500)
+    for _s in _slots18:
+        g.clear_slot("Items", _s)
+
     # ---------------- 2026-10-07：抽选带范围、默认最大范围（元宵）
     #  川：重抽要能指定具体数值，范围照游戏脚本，默认填上限（成长 0.02）。
     _t, _flds = itemattr.payload_spec("元宵", 104)
@@ -494,6 +560,7 @@ def main():
         91: "真知棒", 92: "超级真知棒", 93: "鬼谷子",
         68: "制造指南书", 69: "百炼精铁", 70: "上古锻造图策",
         71: "天眼珠", 73: "宝石",
+        148: "坐骑蛋蛋",
     }
     free = list(g.empty_slots("Items"))
     bad_sym = []
@@ -524,6 +591,76 @@ def main():
           "%d 只（普通 %d + 生肖 %d）"
           % (len(_gods), len(itemattr.egg_pool(221)),
              len(itemattr.egg_pool(222))))
+    # ---------------- 2026-10-08：坐骑蛋蛋(148) 必须带内容（川报「用了卡死」）
+    #  公共事件 24「WITH_[孵化蛋]」拿到它就 `d = $item_obj.data[:data]` 再
+    #  `add_ride(d)`；@attr 空 ⇒ nil[:data] 当场 NoMethodError（游戏日志实证）。
+    check("认得出坐骑蛋蛋要运行时内容",
+          g.item_needs_payload("Items", 148)[0])
+    slots = list(g.empty_slots("Items"))
+    rslot = slots.pop(0)
+    g.add_item("Items", rslot, 148, 1, clone_like=False)
+    rit = _item_of(g, "Items", rslot)
+    rt, rd = g.item_payload(rit)
+    rid = save.M.value_of(save._deref(save.hash_get(rd, "id")))
+    rq = save.M.value_of(save._deref(save.hash_get(rd, "type")))
+    rsp = save.M.value_of(save._deref(save.hash_get(rd, "speed")))
+    rseed = save.M.value_of(save._deref(save.hash_get(rd, "seed")))
+    check("新加的坐骑蛋蛋写好了 data[:data]（不再是一用就崩）",
+          rt == "坐骑蛋蛋" and rid in itemattr.RIDE_IDS
+          and rq in (0, 1, 2) and isinstance(rsp, float)
+          and isinstance(rseed, int),
+          "type=%r id=%r 品质=%r 移速=%r seed=%r"
+          % (rt, rid, rq, rsp, rseed))
+    _i = itemattr.RIDE_IDS.index(rid)
+    _lo, _hi = itemattr.RIDE_SPEED_RANGE[_i]
+    _cap = _hi * (itemattr.RIDE_QUALITY_MULT[rq - 1][1] if rq else 1.0)
+    check("移速在该坐骑的区间内（品质再乘倍率）",
+          _lo - 1e-9 <= rsp <= _cap + 1e-9,
+          "%s %s 区间 %s~%s 倍率上限 %s ⇒ 实得 %s"
+          % (rid, itemattr.RIDE_NAMES[_i], _lo, _hi, _cap, rsp))
+    check("摘要按游戏浮窗口径解出坐骑名",
+          "坐骑→" in g.payload_summary(rit)
+          and itemattr.RIDE_NAMES[_i] in g.payload_summary(rit),
+          g.payload_summary(rit))
+    _spec_t, _spec_f = itemattr.payload_spec("坐骑蛋蛋", 148)
+    check("重抽管理能挑坐骑 / 品质 / 移速",
+          _spec_t == "坐骑蛋蛋"
+          and [f["key"] for f in _spec_f] == ["id", "type", "speed"],
+          "%r" % (_spec_f,))
+    # 2026-10-08 川报：界面「封印坐骑」候选 0 项 —— 坐骑不是召唤兽，
+    # kind 必须是 "ride"（界面走 itemattr.ride_rows()，不走召唤兽表）。
+    check("「封印坐骑」字段走 ride 候选（8 只，名字＝Actors 表）",
+          _spec_f[0]["kind"] == "ride"
+          and len(itemattr.ride_rows()) == 8
+          and [r[1] for r in itemattr.ride_rows()] == list(itemattr.RIDE_NAMES)
+          and datatables.name_map("Actors").get(258) == "汗血宝马",
+          "%r" % (itemattr.ride_rows()[:2],))
+    # 2026-10-08 川：每项默认取最大 —— 坐骑取移速上限最高的、品质神骑、
+    #   移速＝该组合的上限（跟着坐骑+品质现算）。
+    check("默认最大值：坐骑 best＝移速上限最高那只（258）",
+          _spec_f[0].get("best") == itemattr.ride_best_id() == 258,
+          "%r" % (_spec_f[0].get("best"),))
+    check("默认最大值：品质 best＝神骑(2)", _spec_f[1].get("best") == 2,
+          "%r" % (_spec_f[1].get("best"),))
+    check("移速区间跟着坐骑+品质现算（汗血宝马+神骑 → 0.105~0.19）",
+          itemattr.ride_speed_rng(258, 2) == (0.105, 0.19)
+          and itemattr.ride_speed_rng(258, 0) == (0.07, 0.095),
+          "%r / %r" % (itemattr.ride_speed_rng(258, 2),
+                       itemattr.ride_speed_rng(258, 0)))
+    g.set_payload("Items", rslot, over={"id": 258, "type": 2, "speed": 0.19},
+                  force=True)
+    _r3, _d3 = g.item_payload(_item_of(g, "Items", rslot))
+    check("移速可以直接指定（over['speed'] 照写）",
+          abs(save.M.value_of(save._deref(save.hash_get(_d3, "speed")))
+              - 0.19) < 1e-9,
+          g.payload_summary(_item_of(g, "Items", rslot)))
+    g.set_payload("Items", rslot, over={"id": 258, "type": 2}, force=True)
+    rt2, rd2 = g.item_payload(_item_of(g, "Items", rslot))
+    check("指定坐骑/品质后写的就是指定的",
+          save.M.value_of(save._deref(save.hash_get(rd2, "id"))) == 258
+          and save.M.value_of(save._deref(save.hash_get(rd2, "type"))) == 2,
+          "%r" % (g.payload_summary(_item_of(g, "Items", rslot)),))
+    g.clear_slot("Items", rslot)
 
     # ---------------- 保存 / 重开
     before = dict((r[0], r[5]) for r in g.bag("Items"))

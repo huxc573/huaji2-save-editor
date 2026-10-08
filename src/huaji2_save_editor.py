@@ -1338,6 +1338,16 @@ class SkillManager(object):
             pass
 
 
+#: 重抽管理表单里控件的字符宽（同一列 `sticky="ew"` ⇒ 实际宽度由最宽的控件定，
+#: 所以下拉与输入框给同一个值就能右边缘对齐）。
+_PAY_W = 26
+#: 长候选那个过滤框占的列宽（像素）—— 它只在候选多的行出现，短候选 / 数值行
+#: 该列是空的，靠这个 minsize 撑住，免得整列的控件跟着左右晃。
+_PAY_FILTER_W = 76
+#: 「家族」下拉在 `rows` 里的记号（它不是某个字段，是整张表的第一行）。
+_PAY_FAM = "\x00fam"
+
+
 class PayloadManager(object):
     """重抽管理 —— 给背包里选中的格子重新指定「运行时内容」的独立窗口。
 
@@ -1358,7 +1368,9 @@ class PayloadManager(object):
         self.order = []          # 家族出现顺序
         self.fam = None
         self.picked = {}         # {家族: {字段键: 值}}
-        self.cands = []          # 当前候选 [(值, 名称, 分类, 说明)]
+        self.rows = {}           # 字段键 -> 那一行的控件记录（见 `_add_field_row`）
+        self.pop_paths = {}      # 字段键 -> 下拉弹层 listbox 的 Tcl 路径
+        self.b_focus = None      # 开窗时给谁焦点（第一个字段的控件）
         self.desc_full = ""
         self._babies = None
         self._skmeta = None
@@ -1371,88 +1383,63 @@ class PayloadManager(object):
         self.win = win
         win.title("重抽管理")
         win.transient(app.root)
-        win.geometry("820x600")
+        win.geometry("680x470")
+        # ⚠ 最小宽别小于四列之和（标签 52 + 过滤框 76 + 控件 205 + 提示 250 左右）
+        #   —— 提示列是唯一带 weight 的，窗口再窄就先裁它。
+        win.minsize(600, 360)
         f = ttk.Frame(win, padding=8)
         f.pack(fill="both", expand=True)
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(2, weight=1)          # 说明框吸收多余的竖直空间
 
         # ---- 目标行（选中了哪些格子、各自现在是什么内容）
         self.var_target = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.var_target, justify="left",
-                  wraplength=780).pack(anchor="w")
+                  wraplength=640).grid(row=0, column=0, sticky="w")
 
-        # ---- 筛选行：家族 / 字段 / 搜索
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(6, 0))
-        ttk.Label(bar, text="家族").pack(side="left")
+        # ---- 表单：家族行 + 每个可挑字段一行
+        # ⚠ 2026-10-08 川「排版修一下」：整张表走**同一套 grid**（不再是每行一个
+        #   Frame）⇒ 标签 / 过滤框 / 控件 / 提示四列全局共列宽，左边缘与提示起
+        #   点全对齐；控件一律 `sticky="ew"`，右边缘也齐。原来「家族」标签没进
+        #   这张表、控件宽度还各写各的（下拉 26 字符 / 输入框 14），看着参差。
+        form = ttk.Frame(f)
+        form.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.form = form
+        form.columnconfigure(0, weight=0)               # 标签（右对齐）
+        form.columnconfigure(1, weight=0, minsize=_PAY_FILTER_W)
+        form.columnconfigure(2, weight=0)               # 控件（同宽 ⇒ 提示齐）
+        form.columnconfigure(3, weight=1)               # 提示（吸收剩余宽度）
+        self._form_row = 0
+
+        ttk.Label(form, text="家族", anchor="e").grid(
+            row=0, column=0, sticky="e", padx=(0, 6), pady=(0, 4))
         self.var_fam = tk.StringVar()
-        self.cb_fam = ttk.Combobox(bar, textvariable=self.var_fam,
-                                   state="readonly", width=24)
-        self.cb_fam.pack(side="left", padx=4)
+        self.cb_fam = ttk.Combobox(form, textvariable=self.var_fam,
+                                   state="readonly", width=_PAY_W)
+        self.cb_fam.grid(row=0, column=2, sticky="ew", pady=(0, 4))
         self.cb_fam.bind("<<ComboboxSelected>>", lambda e: self.pick_family())
-        ttk.Label(bar, text="字段").pack(side="left", padx=(8, 0))
-        self.var_field = tk.StringVar()
-        self.cb_field = ttk.Combobox(bar, textvariable=self.var_field,
-                                     state="readonly", width=14)
-        self.cb_field.pack(side="left", padx=4)
-        self.cb_field.bind("<<ComboboxSelected>>", lambda e: self.show_field())
-        ttk.Label(bar, text="搜索").pack(side="left", padx=(8, 0))
-        self.var_kw = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=self.var_kw, width=14)
-        ent.pack(side="left", padx=4)
-        ent.bind("<KeyRelease>", lambda e: self.fill_cands())
-        fit_btn(bar, text="清空", command=self.kw_clear).pack(side="left")
+        self._bind_pop_tip(self.cb_fam, _PAY_FAM)
         self.var_info = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.var_info,
-                  foreground="#8a8a8a").pack(side="right", padx=6)
+        ttk.Label(form, textvariable=self.var_info, foreground="#8a8a8a").grid(
+            row=0, column=3, sticky="w", padx=(6, 0))
+        self._form_row = 1
 
-        # ---- 列表 + 说明
-        # ⚠ 说明框先 pack：空间不够时挨刀的是列表（它自带滚动条，可缩）。
-        body = ttk.Panedwindow(f, orient="horizontal")
-        body.pack(fill="both", expand=True, pady=(6, 0))
-        self.desc = tk.Text(body, height=18, width=26, wrap="word",
+        # ---- 说明框（贴底：多余空间都给它）
+        self.desc = tk.Text(f, height=8, width=26, wrap="word",
                             font=("Microsoft YaHei UI", 9), relief="flat",
                             highlightthickness=1, highlightbackground="#ddd",
                             state="disabled")
-        self.desc.pack(side="right", fill="y", padx=(6, 0))
-
-        left = ttk.Frame(body)
-        self.box_list = ttk.Frame(left)
-        self.tv = ttk.Treeview(self.box_list,
-                               columns=("id", "name", "cls", "note"),
-                               show="headings", height=18, selectmode="browse")
-        # ⚠ 2026-10-07 川：编号、分类各占一列 —— 原来挤在悬停浮窗里太碍眼。
-        for c, t2, w in (("id", "编号", 54), ("name", "名称", 148),
-                         ("cls", "分类", 100), ("note", "说明", 248)):
-            self.tv.heading(c, text=t2)
-            # ⚠ 只让「说明」列 stretch（多余宽度摊给名字会在右边留一段空白）
-            self.tv.column(c, width=w, stretch=(c == "note"),
-                           anchor="w" if c != "id" else "center")
-        vs = ttk.Scrollbar(self.box_list, orient="vertical",
-                           command=self.tv.yview)
-        self.tv.configure(yscrollcommand=vs.set)
-        vs.pack(side="right", fill="y")
-        self.tv.pack(side="left", fill="both", expand=True)
-        self.box_int = ttk.Frame(left)
-        ttk.Label(self.box_int, text="值：").pack(side="left")
-        self.var_int = tk.StringVar(value="")
-        self.ent_int = ttk.Entry(self.box_int, textvariable=self.var_int,
-                                 width=12)
-        self.ent_int.pack(side="left", padx=6)
-        self.var_int_note = tk.StringVar(value="")
-        ttk.Label(self.box_int, textvariable=self.var_int_note,
-                  foreground="#8a8a8a").pack(side="left")
-        self.var_int.trace_add("write", lambda *a: self._int_changed())
-        body.add(left, weight=3)
+        self.desc.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
 
         # ---- 操作行
         ops = ttk.Frame(f)
-        ops.pack(fill="x", pady=(6, 0))
+        ops.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         self.b_apply = fit_btn(ops, text="应用选中的内容", command=self.apply)
         self.b_apply.pack(side="left")
         self.app._bind_tip(self.b_apply,
-                           "把左边选中（或整数字段填好）的内容写到\n"
-                           "**当前家族**里所有选中的格子（覆盖原来的内容）。\n"
-                           "没挑的字段按游戏规则随机。")
+                           "把上面这一组值写到**当前家族**里所有选中的格子\n"
+                           "（覆盖原来的内容）。\n"
+                           "每一项**默认已经取最大值**，不想动的自己改回去。")
         self.b_rand = fit_btn(ops, text="随机重抽这些格子", command=self.random_all)
         self.b_rand.pack(side="left", padx=4)
         self.app._bind_tip(self.b_rand,
@@ -1461,17 +1448,14 @@ class PayloadManager(object):
         fit_btn(ops, text="刷新", command=self.refill).pack(side="left", padx=(8, 0))
         fit_btn(ops, text="关闭", command=self.close).pack(side="right")
 
-        self.tv.bind("<<TreeviewSelect>>", lambda e: self.on_cand())
-        self.tv.bind("<Motion>", self.row_tip)
-        self.tv.bind("<Leave>", lambda e: app._tip_hide())
         self.desc.bind("<Motion>", self.desc_tip)
         self.desc.bind("<Leave>", lambda e: app._tip_hide())
 
         self.refill()
         center_win(win, app.root)
         esc_close(win)
-        if first:
-            ent.focus_set()             # ⚠ 得写在 esc_close 之后才优先
+        if first and getattr(self, "b_focus", None) is not None:
+            self.b_focus.focus_set()    # ⚠ 得写在 esc_close 之后才优先
         win.protocol("WM_DELETE_WINDOW", self.close)
 
     # ------------------------------------------------------------ 名字/候选表
@@ -1592,13 +1576,10 @@ class PayloadManager(object):
     def _render_none(self):
         self.cb_fam.configure(values=())
         self.var_fam.set("")
-        self.cb_field.configure(values=())
-        self.var_field.set("")
+        self._clear_rows()
+        self.rows = {}
+        self.b_focus = None
         self.var_info.set("")
-        self.box_int.pack_forget()
-        self.box_list.pack(fill="both", expand=True)
-        self.tv.delete(*self.tv.get_children())
-        self.cands = []
         self.set_desc("")
         self.b_apply.state(["disabled"])
         self.b_rand.state(["disabled"])
@@ -1606,59 +1587,85 @@ class PayloadManager(object):
     def _fam(self):
         return self.groups.get(self.fam)
 
+    def _clear_rows(self):
+        """删掉所有**字段行**（家族行在 `form` 的 row 0，留着不动）。"""
+        for w in list(self.form.grid_slaves()):
+            try:
+                if int(w.grid_info().get("row", 0)) > 0:
+                    w.destroy()
+            except Exception:
+                pass
+        self._form_row = 1
+
     def _sync_fields(self):
-        """家族定下来后，把「字段」下拉填成这个家族能挑的字段。"""
+        """家族定下来后，把该家族**所有字段都铺成行**（每行一个控件）。
+
+        ⚠ 2026-10-08 川：不要「先选字段、再看候选」那套切来切去 —— 一个字段
+          一行，选择项直接下拉、数值直接填，改完一起「应用」。
+        """
+        self._clear_rows()
+        self.rows = {}
+        self.var_info.set("")
+        self.b_apply.state(["!disabled"])
+        self.b_rand.state(["!disabled"])
         grp = self._fam()
         fields = grp["fields"] if grp else []
-        self.cb_field.configure(state="readonly",
-                                values=tuple(fd["label"] for fd in fields))
         if not fields:
-            self.var_field.set("")
-            self.box_int.pack_forget()
-            self.box_list.pack(fill="both", expand=True)
-            self.tv.delete(*self.tv.get_children())
-            self.cands = []
-            self.var_info.set("")
-            self.b_apply.state(["!disabled"])
-            self.b_rand.state(["!disabled"])
+            self.b_focus = None
             self.set_desc("「%s」的内容是游戏写死的，挑不了具体值 ——\n"
                           "直接点「应用选中的内容」（或「随机重抽」）按游戏规则\n"
                           "生成一份即可。\n\n字段：%s"
                           % (self.fam, "、".join(sorted(
                               self._fields_of_first())) or "（无）"))
             return
-        self.b_apply.state(["!disabled"])
-        self.b_rand.state(["!disabled"])
         self._seed_fields(fields)
-        self.var_field.set(fields[0]["label"])
-        self.show_field()
+        for fd in fields:
+            self._add_field_row(fd)
+        self.var_info.set("每一项默认已取最大值；改完点「应用选中的内容」")
+        _first = self.rows.get(fields[0]["key"]) or {}
+        self.b_focus = _first.get("ent") or _first.get("cb")
+        self._show_field_desc(fields[0]["key"])
+
+    def _default_of(self, fd):
+        """字段的默认值 —— 口径：**能取最大就取最大**（2026-10-08 川）。
+
+        1. 显式给了 `best`（离散项的「最大」：坐骑取移速上限最高的、品质取神骑）；
+        2. 数值字段取区间上限（`rng` / `rng_by_type` / `rng_fn` 三条来源都算）；
+        3. 都不是 → `None`（交给「回填现值」，再读不出由候选行兜底成第一项）。
+        """
+        if fd["kind"] in ("int", "num"):
+            rng = self._rng_of(fd)
+            return rng[1] if rng else None
+        return fd.get("best")
 
     def _seed_fields(self, fields):
-        """给这个家族的所有字段填初值。
+        """给这个家族的所有字段填初值 —— **一律先取最大**（`_default_of`）；
+        没有「最大」概念的字段才回填现值（`payload_fields` 读出来那份）。
 
-        两条口径：
-
-        1. **读得出当前值的按原样回填**（老行为 —— `payload_fields` 的「用户不
-           改就原样写回」）；
-        2. **读不出的数值字段填区间上限**（2026-10-07 川：「抽选有范围的，默认抽
-           最大范围」，元宵的成长就是 0.02）。清空输入框＝这一项按游戏规则随机。
-
-        ⚠ 必须**先**过一遍所有字段、再给数值字段兜底：元宵的「数值」区间是跟着
-          「涨哪项资质」走的（`rng_by_type`），得等 `type` 先落进 `picked`。
+        ⚠ 数值字段的区间可能是**现算**的（`rng_fn`：坐骑移速跟着「坐骑 + 品质」
+          走）⇒ 必须先让被依赖的字段（id / 品质）落进 `picked`，再算它。所以
+          分两趟：先所有非现算字段，再 `rng_fn` 字段。
+        ⚠ 清空输入框＝这一项按游戏规则随机（`_num_input` 删键）。
         """
         cur = self.picked.setdefault(self.fam, {})
-        for fd in fields:
-            if fd["key"] in cur:
+        for fd in fields:                       # 第一趟：区间不现算的字段
+            if fd.get("rng_fn"):
                 continue
-            got = self._current_value(fd["key"])
-            if got is not None:
-                cur[fd["key"]] = got
-        for fd in fields:
-            if fd["kind"] not in ("int", "num") or cur.get(fd["key"]) is not None:
+            val = self._default_of(fd)
+            if val is None:
+                val = self._current_value(fd["key"])
+            if val is not None:
+                cur[fd["key"]] = val
+        for fd in fields:                       # 第二趟：区间现算的数值字段
+            if not fd.get("rng_fn"):
                 continue
             rng = self._rng_of(fd)
             if rng:
                 cur[fd["key"]] = rng[1]
+            elif cur.get(fd["key"]) is None:
+                got = self._current_value(fd["key"])
+                if got is not None:
+                    cur[fd["key"]] = got
 
     def _fields_of_first(self):
         """当前家族第一格**现在**的内容字段名（只给说明文字用）。"""
@@ -1676,6 +1683,7 @@ class PayloadManager(object):
 
     def pick_family(self):
         """用户换了家族下拉（取下拉里显示的名字反查）。"""
+        self.app._tip_hide()          # 弹层里那个浮窗别留着
         txt = self.var_fam.get()
         for typ in self.order:
             if txt.startswith(typ + " "):
@@ -1689,73 +1697,308 @@ class PayloadManager(object):
         """换了家族/格子 → 忘掉「用户自己填过」的标记，让默认值（上限）重新生效。"""
         self._num_edited = set(k for k in self._num_edited if k[0] != fam)
 
-    def pick_field(self):
-        """当前字段（字段下拉的显示名 → 字段 dict）。"""
-        grp = self._fam()
-        if not grp:
-            return None
-        lbl = self.var_field.get()
-        for fd in grp["fields"]:
-            if fd["label"] == lbl:
-                return fd
-        return grp["fields"][0] if grp["fields"] else None
+    # ------------------------------------------------------------ 字段行
+    def _cand_pairs(self, fd):
+        """字段的候选 `([值…], [显示名…])`（两个列表同序，索引就是映射）。
 
-    # ------------------------------------------------------------ 候选列表
-    def show_field(self):
-        """按当前字段的类型渲染左栏：列表（actor/skill/choice）或数值框。"""
-        grp = self._fam()
-        fd = self.pick_field()
-        if grp is None or fd is None:
-            return
-        cur = (self.picked.setdefault(self.fam, {}) or {})
-        if fd["key"] not in cur:
-            got = self._current_value(fd["key"])
-            if got is not None:
-                cur[fd["key"]] = got
-        if fd["kind"] in ("int", "num"):
-            self._show_num(fd, cur)
-            return
-        self.box_int.pack_forget()
-        self.box_list.pack(fill="both", expand=True)
-        self.fill_cands()
-
-    def _show_num(self, fd, cur):
-        """数值字段：一个输入框 + 取值范围提示。
-
-        `num` 是浮点档（元宵的成长 0.01~0.02），`int` 是整数档。
+        来源按 `kind` 分流：`choice` 自带 `choices`、`ride` 走坐骑名表（**坐骑
+        不是召唤兽**，别拿召唤兽表去筛）、`actor` 走召唤兽表、`skill` 走技能表；
+        带 `pool` 的再按本物品的池子筛一道。
         """
-        is_num = fd["kind"] == "num"
-        self.box_list.pack_forget()
-        self.box_int.pack(fill="x")
-        self.cands = []
-        rng = self._rng_of(fd)
-        fmt = (lambda v: "%g" % float(v)) if is_num else (lambda v: str(int(v)))
-        if not rng:
-            self.var_int_note.set("")
-            desc = "「%s」的「%s」直接填个数就行。" % (self.fam, fd["label"])
+        grp = self._fam() or {}
+        pool = (grp.get("pools") or {}).get(fd["key"])
+        want = set(pool) if pool else None
+        if fd["kind"] == "choice":
+            src = list(fd["choices"])
+        elif fd["kind"] == "ride":
+            src = [(i, nm) for i, nm, _n in itemattr.ride_rows()]
+        elif fd["kind"] == "actor":
+            src = list(self._baby_rows())
+        elif fd["kind"] == "skill":
+            src = [(i, nm) for i, nm, _d in self._skill_rows()]
         else:
-            if cur.get(fd["key"]) is None:
-                cur[fd["key"]] = rng[1]              # 默认抽上限
-            self.var_int_note.set("范围 %s ~ %s（默认上限；清空＝随机）"
-                                  % (fmt(rng[0]), fmt(rng[1])))
-            desc = ("「%s」的「%s」直接填个数就行。\n"
-                    "取值范围：%s ~ %s —— 默认填**上限**。\n"
-                    "（清空输入框＝这一项交回游戏规则随机）"
-                    % (self.fam, fd["label"], fmt(rng[0]), fmt(rng[1])))
-        self._loading_int = True                  # 回填不算“用户改过”
+            src = []
+        vals, labels = [], []
+        for v, lb in src:
+            if want is not None and v not in want:
+                continue
+            vals.append(v)
+            labels.append(str(lb))
+        return vals, labels
+
+    def _add_field_row(self, fd):
+        """一个字段一行：`标签 | 过滤框 | 控件 | 提示`（四列 grid，列宽全局共享）。
+
+        ⚠ 控件直接挂在这**一张** `form` 上（不是每行一个 Frame）—— 列宽只有全
+          局共享才能保证「四个列各自对齐」（2026-10-08 川「排版修一下」）。
+        ⚠ 控件一律 `sticky="ew"`：列宽＝该列最宽控件的请求宽，窄的那些被拉齐
+          ⇒ 右边缘一致，右边那列提示文字的起点也就整齐。
+        """
+        row = self._form_row
+        self._form_row += 1
+        ttk.Label(self.form, text=fd["label"], anchor="e").grid(
+            row=row, column=0, sticky="e", padx=(0, 6), pady=2)
+        rec = {"fd": fd, "kind": fd["kind"], "row": row}
+        self.rows[fd["key"]] = rec
+        if fd["kind"] in ("int", "num"):
+            rec["var"] = tk.StringVar()
+            rec["ent"] = ttk.Entry(self.form, textvariable=rec["var"],
+                                   width=_PAY_W)
+            rec["ent"].grid(row=row, column=2, sticky="ew", pady=2)
+            rec["var"].trace_add(
+                "write", lambda *a, k=fd["key"]: self._num_input(k))
+            rec["ent"].bind(
+                "<FocusIn>", lambda e, k=fd["key"]: self._show_field_desc(k))
+        else:
+            vals, labels = self._cand_pairs(fd)
+            rec["values"], rec["labels"] = vals, labels
+            rec["all_values"], rec["all_labels"] = list(vals), list(labels)
+            if len(vals) > 20:            # 长候选（召唤兽/技能）给小过滤框
+                rec["kw"] = tk.StringVar()
+                _ent = ttk.Entry(self.form, textvariable=rec["kw"], width=8)
+                _ent.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=2)
+                _ent.bind("<KeyRelease>",
+                          lambda e, k=fd["key"]: self._filter_row(k))
+                _ent.bind("<FocusIn>",
+                          lambda e, k=fd["key"]: self._show_field_desc(k))
+            rec["cb"] = ttk.Combobox(self.form, state="readonly", width=_PAY_W)
+            rec["cb"].grid(row=row, column=2, sticky="ew", pady=2)
+            rec["cb"].configure(values=labels)
+            rec["cb"].bind("<<ComboboxSelected>>",
+                           lambda e, k=fd["key"]: self._choice_picked(k))
+            rec["cb"].bind(
+                "<FocusIn>", lambda e, k=fd["key"]: self._show_field_desc(k))
+            rec["cb"].bind("<Button-1>", lambda e: self.app._tip_hide(),
+                           add="+")
+            self._bind_pop_tip(rec["cb"], fd["key"])
+        rec["note"] = ttk.Label(self.form, foreground="#8a8a8a")
+        rec["note"].grid(row=row, column=3, sticky="w", padx=(6, 0))
+        self._set_row_value(fd["key"])
+        self._row_note(fd["key"])
+
+    # ------------------------------------------------------------ 下拉浮窗
+    def _bind_pop_tip(self, cb, key):
+        """给 `ttk.Combobox` 的**下拉弹层**挂鼠标说明（2026-10-08 川报缺这个）。
+
+        为什么只能走纯 Tcl：ttk 的下拉弹层是 Tcl 侧建的 `.<cb>.popdown`，**不在
+        Python 的 widget 树里** —— `nametowidget` 沿 `children` 逐级找会
+        `KeyError: 'popdown'`。所以：
+          * 弹层路径问 `ttk::combobox::PopdownWindow` 要；
+          * 它下面还有个滚动条（`.sb`）和列表（`.l`），**顺序不保证**，按名字挑；
+          * 事件用 `bind <Motion> +<注册的命令>` 挂，坐标靠 `%x %y` 传。
+        弹层是**复用同一个 listbox**（过滤框不断重设 `values` 也不换）⇒ 绑一次
+        就够，不必每次开下拉重绑。
+        """
         try:
-            v = cur.get(fd["key"])
-            self.var_int.set("" if v is None else fmt(v))
-        finally:
-            self._loading_int = False
-        self.set_desc(desc)
+            pop = cb.tk.call("ttk::combobox::PopdownWindow", cb)
+            lb = None
+            for sub in cb.tk.call("winfo", "children", pop):
+                for leaf in cb.tk.call("winfo", "children", sub):
+                    if str(leaf).endswith(".l"):
+                        lb = leaf
+                        break
+                if lb:
+                    break
+            if not lb:
+                return
+            self.pop_paths[key] = lb
+            rec = self.rows.get(key)
+            if rec is not None:
+                rec["pop"] = lb
+            # ⚠ 一个命令名两用：<Leave> 传 -1 -1 当「隐藏」
+            cmd = cb.register(
+                lambda x, y, k=key, w=lb: self._pop_tip(k, w, int(x), int(y)))
+            cb.tk.call("bind", lb, "<Motion>", "+%s %%x %%y" % cmd)
+            cb.tk.call("bind", lb, "<Leave>", "+%s -1 -1" % cmd)
+        except Exception:
+            pass
+
+    def _pop_tip(self, key, lbpath, x, y):
+        """下拉弹层里鼠标停在某一行 → 浮窗显示那一项的说明。
+
+        ⚠ 弹层只能走 Tcl（见 `_bind_pop_tip`）：取行号 / 取文本 / 取坐标都得
+          `tk.call`。⚠ 用的是 `root.tk`（Tcl 解释器），不是 `app.tk`（那是
+          `tkinter` **模块**，没有 `call`）—— 写错过一次，异常被下面那个
+          `except` 吞了，表现就是「浮窗死活不出来」。
+        """
+        tk_ = self.app.root.tk
+        if x < 0 or y < 0:                        # <Leave>
+            self.app._tip_hide()
+            return
+        rec = self.rows.get(key) if key != _PAY_FAM else None
+        try:
+            idx = int(tk_.call(lbpath, "nearest", y))
+            txt = str(tk_.call(lbpath, "get", idx))
+        except tk.TclError:               # 弹层已经销毁 / 路径失效
+            return
+        if not txt:
+            return
+        if key == _PAY_FAM:                       # 家族下拉：说明这个家族能挑什么
+            base = self.var_fam.get()
+            typ = self.fam
+            for t in self.order:
+                if base.startswith(t + " "):
+                    typ = t
+                    break
+            grp = self.groups.get(typ) or {}
+            fl = [f["label"] for f in grp.get("fields") or []]
+            body = ("「%s」能挑：%s" % (typ, "、".join(fl)) if fl
+                    else "「%s」的内容是游戏写死的，挑不了具体值。" % typ)
+            tipkey = ("paym:pop", key, typ)
+            _x0, _y0 = self.cb_fam.winfo_rootx(), self.cb_fam.winfo_rooty()
+        else:
+            if not rec:
+                return
+            labels = rec.get("labels") or []
+            vals = rec.get("values") or []
+            if txt not in labels:
+                labels, vals = rec.get("all_labels") or [], \
+                    rec.get("all_values") or []
+            if txt not in labels:
+                return
+            val = vals[labels.index(txt)]
+            body = self._field_desc(rec["fd"], val, txt)
+            tipkey = ("paym:pop", key, idx)
+            _x0, _y0 = (self.rows[key]["cb"].winfo_rootx(),
+                        self.rows[key]["cb"].winfo_rooty())
+        if getattr(self.app, "_tip_key", None) == tipkey:
+            return
+        try:
+            rx = int(tk_.call("winfo", "rootx", lbpath))
+            ry = int(tk_.call("winfo", "rooty", lbpath))
+        except Exception:
+            rx, ry = _x0, _y0
+        self.app._tip_show(body, rx + x + 12, ry + y + 12, key=tipkey)
+
+    def _set_row_value(self, key):
+        """把 `picked` 里这个字段的值刷进控件（数值→输入框、选择项→下拉）。"""
+        rec = self.rows.get(key)
+        if not rec:
+            return
+        cur = self.picked.setdefault(self.fam, {})
+        val = cur.get(key)
+        if rec["kind"] in ("int", "num"):
+            self._loading_int = True        # 回填不算“用户改过”
+            try:
+                if val is None:
+                    rec["var"].set("")
+                elif rec["kind"] == "num":
+                    rec["var"].set("%g" % float(val))
+                else:
+                    rec["var"].set(str(int(val)))
+            finally:
+                self._loading_int = False
+            return
+        if val is None:                     # 没值 → 兜底成第一个候选
+            if not rec["all_values"]:
+                return
+            val = rec["all_values"][0]
+            cur[key] = val
+        if val in rec["all_values"]:
+            rec["cb"].set(rec["all_labels"][rec["all_values"].index(val)])
+
+    def _row_note(self, key):
+        """每行右边的灰字：范围 / 可选项 / 候选个数。"""
+        rec = self.rows.get(key)
+        if not rec:
+            return
+        fd = rec["fd"]
+        if fd["kind"] in ("int", "num"):
+            rng = self._rng_of(fd)
+            if not rng:
+                rec["note"].configure(text="直接填个数（清空＝按游戏规则随机）")
+                return
+            fmt = ((lambda v: "%g" % float(v)) if fd["kind"] == "num"
+                   else (lambda v: str(int(v))))
+            rec["note"].configure(text="范围 %s ~ %s（默认上限；清空＝随机）"
+                                       % (fmt(rng[0]), fmt(rng[1])))
+        elif fd["kind"] == "choice":
+            rec["note"].configure(text=" / ".join(rec["all_labels"]))
+        elif fd["kind"] == "ride":
+            rec["note"].configure(
+                text="%d 只 · 默认取移速上限最高的" % len(rec["all_values"]))
+        else:
+            rec["note"].configure(
+                text="共 %d 项%s" % (len(rec["all_values"]),
+                                     "（限本物品的池子）" if fd.get("pool")
+                                     else ""))
+
+    def _filter_row(self, key):
+        """长候选的过滤框：边打边收窄下拉候选（当前选中项的显示不受影响）。"""
+        rec = self.rows.get(key)
+        if not rec or "kw" not in rec:
+            return
+        kw = (rec["kw"].get() or "").strip().lower()
+        vals, labels = [], []
+        for v, lb in zip(rec["all_values"], rec["all_labels"]):
+            if kw and kw not in str(v) and kw not in lb.lower():
+                continue
+            vals.append(v)
+            labels.append(lb)
+        rec["values"], rec["labels"] = vals, labels
+        rec["cb"].configure(values=labels)
+        self.var_info.set("候选 %d 项" % len(labels))
+
+    def _num_input(self, key):
+        """数值框被改 → 记进 `picked`；清空＝这一项交回游戏规则随机。"""
+        if self._loading_int:                # 我自己回填的，不算用户改
+            return
+        rec = self.rows.get(key)
+        if not rec:
+            return
+        cur = self.picked.setdefault(self.fam, {})
+        txt = (rec["var"].get() or "").strip()
+        if txt == "":
+            cur.pop(key, None)
+            self._num_edited.discard((self.fam, key))
+            return
+        try:
+            val = float(txt) if rec["kind"] == "num" else int(txt, 0)
+        except ValueError:
+            return
+        cur[key] = val
+        self._num_edited.add((self.fam, key))
+
+    def _choice_picked(self, key):
+        """下拉换了值 → 记进 `picked`，并让依赖它的字段重算默认值。"""
+        self.app._tip_hide()          # 弹层里那个浮窗别留着（值都换了）
+        rec = self.rows.get(key)
+        if not rec:
+            return
+        txt = rec["cb"].get()
+        if txt in rec["labels"]:
+            val = rec["values"][rec["labels"].index(txt)]
+        elif txt in rec["all_labels"]:
+            val = rec["all_values"][rec["all_labels"].index(txt)]
+        else:
+            return
+        self.picked.setdefault(self.fam, {})[key] = val
+        self._num_edited.discard((self.fam, key))
+        self._row_note(key)
+        self._refresh_dep_defaults(key)
+        self._show_field_desc(key)
 
     def _rng_of(self, fd):
-        """字段的取值范围；带 `rng_by_type` 的按**当前挑的那个字段**现算。
+        """字段的取值范围，三条来源（取不到返回 `None`）：
 
-        元宵的「数值」就是这么走的：涨攻击资质是 4~8，涨成长是 0.01~0.02。
-        取不到依赖值时退回第一个区间（宁可给个能用的默认，不弹错）。
+        1. `rng_fn`：**现算** —— 坐骑的「移速」跟着「坐骑 + 品质」合成
+           （`itemattr.ride_speed_rng`），拿到的是 `(下限, 上限)`；
+        2. `rng_by_type`：按**某个**依赖字段的取值索引区间 —— 元宵的「数值」
+           跟着「涨哪项资质」（攻/防/速 4~8、成长 0.01~0.02）；
+        3. `rng`：固定区间。
         """
+        fn = fd.get("rng_fn")
+        if fn:
+            cur = dict(self.picked.get(self.fam) or {})
+            for k in (fd.get("rng_deps") or ()):    # 依赖字段还没挑 → 读存档现值
+                if k not in cur:
+                    got = self._current_value(k)
+                    if got is not None:
+                        cur[k] = got
+            try:
+                return fn(cur)
+            except Exception:
+                return None
         table = fd.get("rng_by_type")
         if table:
             dep = fd.get("depends_on")
@@ -1769,9 +2012,10 @@ class PayloadManager(object):
         return fd.get("rng")
 
     def _refresh_dep_defaults(self, changed):
-        """某个字段换了取值 → 依赖它的数值字段按新范围重算默认值。
+        """某个字段换了取值 → 依赖它的数值字段按新范围重算默认值、并刷新控件。
 
-        元宵：把「涨哪项资质」从成长改成攻击 → 「数值」的默认从 0.02 变 8。
+        元宵：把「涨哪项资质」从成长改成攻击 → 「数值」默认从 0.02 变 8；
+        坐骑：换了坐骑/品质 → 「移速」的区间与默认值跟着变。
         ⚠ 用户自己填过的（`_num_edited`）不覆盖。
         """
         grp = self._fam()
@@ -1779,13 +2023,19 @@ class PayloadManager(object):
             return
         cur = self.picked.setdefault(self.fam, {})
         for fd in grp["fields"]:
-            if fd.get("depends_on") != changed:
+            if fd["kind"] not in ("int", "num"):
                 continue
-            if fd["key"] in cur and (self.fam, fd["key"]) in self._num_edited:
+            deps = ([fd["depends_on"]] if fd.get("depends_on") else [])
+            deps.extend(fd.get("rng_deps") or ())
+            if changed not in deps:
+                continue
+            if (self.fam, fd["key"]) in self._num_edited:
                 continue
             rng = self._rng_of(fd)
             if rng:
                 cur[fd["key"]] = rng[1]
+                self._set_row_value(fd["key"])
+                self._row_note(fd["key"])
 
     def _current_value(self, key):
         """选中格子现在这一项的字段值（取第一个格子的）。"""
@@ -1799,72 +2049,6 @@ class PayloadManager(object):
             return self.app.g.payload_fields(it).get(key)
         except Exception:
             return None
-
-    def fill_cands(self):
-        fd = self.pick_field()
-        if fd is None or fd["kind"] == "int":
-            return
-        kw = (self.var_kw.get() or "").strip().lower()
-        grp = self._fam()
-        pool = grp["pools"].get(fd["key"]) if grp else None
-        rows = []
-        if fd["kind"] == "choice":
-            for val, label in fd["choices"]:
-                nm = str(label)
-                if kw and kw not in nm.lower() and kw not in str(val).lower():
-                    continue
-                rows.append((val, nm, "", ""))
-        elif fd["kind"] == "actor":
-            want = set(pool) if pool else None
-            for i, nm in self._baby_rows():
-                if want is not None and i not in want:
-                    continue
-                if kw and kw not in str(i) and kw not in nm.lower():
-                    continue
-                # 分类＝档位；说明＝Actors 表里的描述
-                rows.append((i, nm, self._baby_note(i),
-                             self._short(self._data_desc("Actors", i), 40)))
-        elif fd["kind"] == "skill":
-            want = set(pool) if pool else None
-            for i, nm, desc in self._skill_rows():
-                if want is not None and i not in want:
-                    continue
-                if kw and kw not in str(i) and kw not in nm.lower():
-                    continue
-                # 分类＝归属（分段名 > 门派）；说明＝技能描述摘要
-                rows.append((i, nm, self._own_of(i), self._short(desc)))
-        self.cands = rows
-        self.tv.delete(*self.tv.get_children())
-        for n, (val, nm, cls, note) in enumerate(rows):
-            self.tv.insert("", "end", iid="c%d" % n,
-                           values=(val, nm, cls, note))
-        picked = (self.picked.get(self.fam) or {}).get(fd["key"])
-        hit = None
-        for n, (val, _nm, _cls, _note) in enumerate(rows):
-            if val == picked:
-                hit = "c%d" % n
-                break
-        if hit is None and rows:
-            hit = "c0"
-        if hit is not None:
-            self.tv.selection_set(hit)
-            self.tv.see(hit)
-        self.var_info.set("候选 %d 项%s" % (
-            len(rows), "（限本物品的池子）" if pool else ""))
-        self.on_cand()
-
-    def _baby_note(self, i):
-        try:
-            bd = self.app.babies_ed()
-            return bd.type_of(i) or "" if bd else ""
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _short(text, n=56):
-        """详情 → 一行摘要（列表「说明」列用）：换行/连续空白压成单个空格。"""
-        s = " ".join((text or "").split())
-        return s if len(s) <= n else s[:n] + "…"
 
     def _data_desc(self, kind, iid):
         """Data 表某个 id 的完整说明（读不到返回空串）。"""
@@ -1909,33 +2093,30 @@ class PayloadManager(object):
             lines.append(d)
         return "\n".join(lines)
 
-    def kw_clear(self):
-        self.var_kw.set("")
-        self.fill_cands()
-
-    def on_cand(self):
-        fd = self.pick_field()
-        sel = self.tv.selection()
-        if fd is None or not sel:
+    def _show_field_desc(self, key):
+        """说明框显示「这个字段现在这个值」的详情（焦点落在哪一行就显示哪行）。"""
+        rec = self.rows.get(key)
+        if not rec:
             return
-        n = int(sel[0][1:])
-        if not (0 <= n < len(self.cands)):
-            return
-        val, nm, _cls, _note = self.cands[n]
-        self.picked.setdefault(self.fam, {})[fd["key"]] = val
-        self._refresh_dep_defaults(fd["key"])
-        self.set_desc(self._cand_desc(fd, val, nm))
+        val = (self.picked.get(self.fam) or {}).get(key)
+        nm = ""
+        if rec.get("all_values") and val in rec["all_values"]:
+            nm = rec["all_labels"][rec["all_values"].index(val)]
+        self.set_desc(self._field_desc(rec["fd"], val, nm))
 
-    def _cand_desc(self, fd, val, nm, head=True):
-        """选中候选的详情：技能读技能管理器的说明，召唤兽读档位/资质/描述。
-
-        head=True 时开头带一行「字段 = 名字」（说明框用）；悬停浮窗传
-        False —— 鼠标就停在那行候选上，再报一遍名字是多余的（2026-10-07
-        川）。编号 / 分类已在列表的两列里，这里一律不重复。
-        """
-        first = ("%s = %s" % (fd["label"], nm)) if head else ""
+    def _field_desc(self, fd, val, nm):
+        """字段详情：技能读技能表的说明，召唤兽读档位/资质/描述，坐骑读移速。"""
+        head = "%s = %s" % (fd["label"], nm if nm else val)
         if fd["kind"] == "actor":
             body = self._actor_detail(val) or ("召唤兽 id %s" % val)
+        elif fd["kind"] == "ride":
+            body = ""
+            for i, _nm2, note in itemattr.ride_rows():
+                if i == val:
+                    body = ("坐骑 id %d：蛋开出来就是它。%s（品质「靓仔」再乘 "
+                            "1.0~1.5、「神骑」乘 1.5~2.0）。" % (i, note))
+                    break
+            body = body or ("坐骑 id %s" % val)
         elif fd["kind"] == "skill":
             body = ""
             for i, _n, d in self._skill_rows():
@@ -1943,28 +2124,19 @@ class PayloadManager(object):
                     body = d or ""
                     break
             body = body or "（没有说明）"
+        elif fd["kind"] in ("int", "num"):
+            rng = self._rng_of(fd)
+            if not rng:
+                body = "直接填个数就行（清空＝这一项交回游戏规则随机）。"
+            else:
+                fmt = ((lambda v: "%g" % float(v)) if fd["kind"] == "num"
+                       else (lambda v: str(int(v))))
+                body = ("取值范围 %s ~ %s，默认填**上限**；"
+                        "清空输入框＝这一项交回游戏规则随机。"
+                        % (fmt(rng[0]), fmt(rng[1])))
         else:
-            body = "点「应用选中的内容」写进选中的格子。"
-        return "\n".join(x for x in (first, body) if x)
-
-    def _int_changed(self):
-        fd = self.pick_field()
-        if fd is None or fd["kind"] not in ("int", "num"):
-            return
-        if self._loading_int:        # 我自己回填的默认值，不算用户改
-            return
-        txt = (self.var_int.get() or "").strip()
-        if txt == "":
-            # 清空＝不看这一项 → 交回游戏规则随机
-            self.picked.setdefault(self.fam, {}).pop(fd["key"], None)
-            self._num_edited.discard((self.fam, fd["key"]))
-            return
-        try:
-            val = float(txt) if fd["kind"] == "num" else int(txt, 0)
-        except ValueError:
-            return
-        self.picked.setdefault(self.fam, {})[fd["key"]] = val
-        self._num_edited.add((self.fam, fd["key"]))
+            body = "选一个写进选中的格子。"
+        return "\n".join(x for x in (head, body) if x)
 
     # ------------------------------------------------------------ 说明 / 提示
     def _item_line(self):
@@ -2003,28 +2175,6 @@ class PayloadManager(object):
                            self.desc.winfo_rootx() + event.x + 12,
                            self.desc.winfo_rooty() + event.y + 12,
                            key="paym:desc")
-
-    def row_tip(self, event):
-        row = self.tv.identify_row(event.y)
-        if not row:
-            self.app._tip_hide()
-            return
-        tipkey = "paym:%s" % row
-        if getattr(self.app, "_tip_key", None) == tipkey:
-            return
-        n = int(row[1:])
-        if not (0 <= n < len(self.cands)):
-            return
-        fd = self.pick_field()
-        val, nm, _cls, note = self.cands[n]
-        body = (self._cand_desc(fd, val, nm, head=False)
-                if fd is not None else note)
-        if not body:
-            self.app._tip_hide()
-            return
-        self.app._tip_show(body,
-                           self.tv.winfo_rootx() + event.x + 12,
-                           self.tv.winfo_rooty() + event.y + 12, key=tipkey)
 
     # ------------------------------------------------------------ 写档
     def apply(self):
@@ -2090,6 +2240,7 @@ class PayloadManager(object):
         self.refill()
 
     def close(self):
+        self.app._tip_hide()
         try:
             self.app._payload_win = None
         except Exception:

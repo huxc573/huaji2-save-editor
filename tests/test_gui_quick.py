@@ -47,6 +47,19 @@ def check(name, cond, extra=""):
     say("%-46s %s %s" % (name, "[OK]" if cond else "[NG]", extra))
 
 
+def tip_text(app):
+    """当前悬停浮窗里的文字（没浮窗返回 None）。"""
+    w = getattr(app, "_tip_win", None)
+    if w is None:
+        return None
+    try:
+        for ch in w.winfo_children():
+            return ch.cget("text")
+    except Exception:
+        pass
+    return ""
+
+
 class FakeDialog(object):
     """顶掉 EditDialog：不弹模态、不进 mainloop，直接把"用户输入"摆在 result 上。
 
@@ -811,26 +824,20 @@ def main():
         if _w is not None and "元宵" in _w.groups:
             _w.fam = "元宵"
             _w._sync_fields()
-            check("「元宵」家族能挑两个字段（资质 + 数值）",
-                  len(_w.groups["元宵"]["fields"]) == 2,
-                  "%r" % (_w.groups["元宵"]["fields"],))
-            _w.var_field.set("涨哪项资质")
-            _w.show_field()
-            _go = [c for c in _w.tv.get_children()
-                   if str(_w.tv.item(c, "values")[1]) == "成长"]
-            if _go:
-                _w.tv.selection_set(_go[0])
-                root.update()
-                _w.on_cand()               # <<TreeviewSelect>> 是排队的，直接调保险
+            check("「元宵」家族两个字段各占一行（涨哪项资质 + 数值）",
+                  list(_w.rows) == ["type", "value"]
+                  and len(_w.groups["元宵"]["fields"]) == 2,
+                  "%r" % (list(_w.rows),))
+            _w.rows["type"]["cb"].set("成长")
+            _w._choice_picked("type")      # <<ComboboxSelected>> 是排队的，直接调
             check("挑「成长」→「数值」默认＝该档上限 0.02",
                   abs(float(_w.picked["元宵"].get("value") or 0) - 0.02) < 1e-9,
                   "%r" % (_w.picked["元宵"],))
-            _w.var_field.set("数值")
-            _w.show_field()
             check("数值框回填 0.02、提示写着 0.01 ~ 0.02",
-                  _w.var_int.get() == "0.02" and "0.01 ~ 0.02" in
-                  _w.var_int_note.get(),
-                  "%s / %s" % (_w.var_int.get(), _w.var_int_note.get()))
+                  _w.rows["value"]["var"].get() == "0.02"
+                  and "0.01 ~ 0.02" in _w.rows["value"]["note"].cget("text"),
+                  "%s / %s" % (_w.rows["value"]["var"].get(),
+                               _w.rows["value"]["note"].cget("text")))
             _w.apply()
             root.update()
             _sum2 = app.g.payload_summary(app.g._item_node("Items", _yx))
@@ -839,6 +846,122 @@ def main():
             _w.close()
             root.update()
         app.g.clear_slot("Items", _yx)
+
+        # ---- 2026-10-08 川：重抽管理里「封印坐骑」候选是空的 -----------------
+        #  根因：坐骑 id(256~263) 在 Actors 表里有名字但**不是召唤兽**，
+        #  旧代码走 kind="actor" → 被 is_baby_entry 筛掉 ⇒ 0 项。
+        say("重抽管理：坐骑蛋蛋能挑「封印坐骑」…")
+        _rd = [s for s in app.g.empty_slots("Items")
+               if s not in (egg_slot, _yx)][0]
+        app.g.add_item("Items", _rd, 148, 1, clone_like=False)
+        app.mark_dirty()
+        app.var_bag_page.set(_rd // 20)
+        app.fill_party()
+        root.update()
+        app.tv_pack.selection_set("s%d" % _rd)
+        _w2 = app.open_payload_manager()
+        root.update()
+        check("坐骑蛋蛋被认成「坐骑蛋蛋」家族",
+              _w2 is not None and "坐骑蛋蛋" in _w2.groups,
+              "%r" % (list(_w2.groups) if _w2 is not None else None,))
+        if _w2 is not None and "坐骑蛋蛋" in _w2.groups:
+            _w2.fam = "坐骑蛋蛋"
+            _w2._sync_fields()
+            root.update()
+            check("「坐骑蛋蛋」三个字段各占一行",
+                  list(_w2.rows) == ["id", "type", "speed"],
+                  "%r" % (list(_w2.rows),))
+            check("「封印坐骑」下拉有 8 只坐骑（含汗血宝马）",
+                  len(_w2.rows["id"]["all_labels"]) == 8
+                  and "汗血宝马" in _w2.rows["id"]["all_labels"],
+                  "%r" % (_w2.rows["id"]["all_labels"],))
+            # 2026-10-08 川：每一项默认取最大（坐骑取移速上限最高的、品质神骑、
+            #   移速＝该组合上限 9.5% × 神骑倍率 2.0）。
+            _pv = _w2.picked.get("坐骑蛋蛋") or {}
+            check("默认取最大：坐骑 258 / 品质神骑 / 移速 0.19",
+                  _pv.get("id") == 258 and _pv.get("type") == 2
+                  and abs(float(_pv.get("speed") or 0) - 0.19) < 1e-9,
+                  "%r" % (_pv,))
+            _w2.rows["id"]["cb"].set("汗血宝马")
+            _w2._choice_picked("id")       # <<ComboboxSelected>> 是排队的，直接调
+            _w2.apply()
+            root.update()
+            _s3 = app.g.payload_summary(app.g._item_node("Items", _rd))
+            check("挑「汗血宝马」应用后摘要里出现它（品质神骑、移速拉满）",
+                  "汗血宝马" in _s3 and "神骑" in _s3 and "移速19%" in _s3, _s3)
+
+            # ---- 2026-10-08 川：「排版修一下」+「筛选框下拉移动没有浮窗说明」
+            say("重抽管理：四列对齐 / 下拉浮窗…")
+            # ⚠ 量控件的像素位置要求窗口**已映射**：withdraw 时 Tk 不做布局，
+            #   winfo_x() 全是 0 —— 那样断言会假通过。临时挪到屏幕外映射一下。
+            _g0 = root.geometry()
+            try:
+                root.geometry("900x620+3000+3000")
+                root.deiconify()
+                root.update()
+                _cells = {}
+                for _ch in _w2.form.grid_slaves():
+                    _gi = _ch.grid_info()
+                    _cells.setdefault(int(_gi["row"]), {})[int(_gi["column"])] = _ch
+                _frows = [r for r in sorted(_cells) if r > 0]
+                _lab, _cx, _cw, _nx = set(), set(), set(), set()
+                for _r in _frows:
+                    _row = _cells[_r]
+                    if 0 in _row:
+                        _lab.add(_row[0].winfo_x() + _row[0].winfo_width())
+                    if 2 in _row:
+                        _cx.add(_row[2].winfo_x())
+                        _cw.add(_row[2].winfo_width())
+                    if 3 in _row:
+                        _nx.add(_row[3].winfo_x())
+                check("四列对齐：标签右缘 / 控件左缘 / 控件同宽 / 提示起点",
+                      len(_lab) == 1 and len(_cx) == 1 and len(_cw) == 1
+                      and len(_nx) == 1 and len(_frows) == len(_w2.rows),
+                      "%r %r %r %r" % (sorted(_lab), sorted(_cx), sorted(_cw),
+                                       sorted(_nx)))
+                check("家族下拉与字段控件左边缘齐（同一张表）",
+                      _w2.cb_fam.winfo_x() in _cx,
+                      "%d vs %r" % (_w2.cb_fam.winfo_x(), sorted(_cx)))
+                check("说明框在最后一行、四向填满",
+                      int(_w2.desc.grid_info()["row"]) == 2
+                      and set(_w2.desc.grid_info()["sticky"]) == set("nsew"),
+                      "%s/%s" % (_w2.desc.grid_info()["row"],
+                                 _w2.desc.grid_info()["sticky"]))
+            finally:
+                root.geometry(_g0)
+                root.withdraw()
+                root.update()
+            _pop = (_w2.rows.get("id") or {}).get("pop")
+            check("下拉弹层拿到了 listbox（拿不到就挂不了说明）",
+                  bool(_pop) and str(_pop).endswith(".l"), "%r" % (_pop,))
+            check("数值字段（移速）没有下拉、不挂弹层",
+                  "pop" not in (_w2.rows.get("speed") or {}))
+            check("弹层上确实挂了 <Motion> 说明",
+                  bool(_pop)
+                  and bool(root.tk.call("bind", _pop, "<Motion>")),
+                  "%r" % (root.tk.call("bind", _pop, "<Motion>") if _pop
+                          else None,))
+            check("家族下拉也挂了弹层说明",
+                  any(k not in _w2.rows for k in _w2.pop_paths),
+                  "%r" % (list(_w2.pop_paths),))
+            if _pop:
+                # ⚠ 测试里窗口是 withdraw 的 ⇒ 弹层不会真 post，listbox 是空的
+                #   （ttk 只在 post 那一刻把 values 灌进去）⇒ 手塞两行等价内容。
+                root.tk.call(_pop, "delete", 0, "end")
+                root.tk.call(_pop, "insert", "end", "神气小龟")
+                root.tk.call(_pop, "insert", "end", "汗血宝马")
+                app._tip_hide()
+                _w2._pop_tip("id", _pop, 5, 4)
+                root.update()
+                _tt = tip_text(app)
+                check("鼠标划到坐骑项 → 浮窗给出该坐骑说明",
+                      bool(_tt) and "坐骑 id 256" in _tt, "%r" % (_tt,))
+                app._tip_hide()
+                _w2._pop_tip("id", _pop, -1, -1)
+                check("离开弹层 → 浮窗收掉", app._tip_win is None)
+                root.tk.call(_pop, "delete", 0, "end")   # listbox 是共用的
+            _w2.close()
+        app.g.clear_slot("Items", _rd)
 
 
         # ---------------- 召唤兽

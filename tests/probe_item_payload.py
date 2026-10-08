@@ -36,7 +36,11 @@ ITEMS = (110, 111, 112, 113, 221, 222, 223, 244,  # 蛋
          235, 94, 275,                            # 礼盒 / 导航旗
          66, 67, 152, 161,                        # 四种要诀
          135, 104, 90,                            # 元宵丹 / 元宵 / 人参果
-         91, 92, 93, 68, 69, 70, 71, 73)          # 真知棒 / 阵法 / 装备产出
+         91, 92, 93, 68, 69, 70, 71, 73,          # 真知棒 / 阵法 / 装备产出
+         148,                                     # 坐骑蛋蛋（2026-10-08 补）
+         # 2026-10-08 补齐的那批
+         131, 224, 123, 133, 134, 140, 141, 142, 143, 144,
+         150, 151, 157, 159, 160, 276, 277, 280)
 
 
 def _item_of(g, kind, slot):
@@ -59,11 +63,13 @@ def main():
     print("存档副本 = %s\n" % copy)
 
     bad = 0
-    used = []
     for iid in ITEMS:
-        slots = [s for s in g.empty_slots("Items") if s not in used]
-        slot = slots[0]
-        used.append(slot)
+        slots = g.empty_slots("Items")
+        if not slots:
+            print("  [NG] 没空槽了（真档副本的背包格不够）")
+            bad += 1
+            break
+        slot = slots[0]          # 每轮都清掉 ⇒ 一个槽反复用
         nm = g.item_needs_payload("Items", iid)[1]
         try:
             g.add_item("Items", slot, iid, 1, clone_like=False)
@@ -94,6 +100,7 @@ def main():
                 bad += 1
             else:
                 print("       [OK] id=%s 落在兽池（%d 只）里" % (inner_id, len(pool)))
+        g.clear_slot("Items", slot)
 
     # 三档蛋池互不重叠、且都在脚本的 list 里
     print("\n== 三档蛋池")
