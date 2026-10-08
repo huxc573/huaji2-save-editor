@@ -646,9 +646,89 @@ def main():
           and B5.g.baby_value(_same[0], "hpq") == caps["神兽_p"]["hp"],
           "%r" % ([B5.g.baby_value(x, "atk") for x in _same],))
 
+    # ---------------- 排序（2026-10-08 川：拖动排序 / 移到最前 · 最后）--------
+    # 「召唤兽是有序数组」⇒ 这里是**插到那一行**，跟背包格的「对调」不是一套。
+    # 真档每只角色只有 1 只，先补到 5 只才够测整组。
+    # ⚠ 必须重新开一份：上面 `sv3.doc.save()` 之后旧节点全失效（重解析），
+    #   继续用 `a3`/B3 改的是**脱离文档的孤儿节点**（探针踩过）。
+    svR = save.SaveDoc(path)
+    gR = game.GameEditor(svR)
+    BR = babies.Babies(gR)
+    aR = svR.actors()[0][1]
+    while len(gR.babies(aR)) < 5:
+        have = set(_order_ids(BR, aR))
+        nxt = [c["id"] for c in BR.candidates() if c["id"] not in have]
+        if not nxt:
+            break
+        BR.add(aR, nxt[0])
+    o0 = _order_ids(BR, aR)
+    n0 = len(o0)
+    check("够 5 只召唤兽（够测整组 / 拖动）", n0 >= 5, n0)
+    if n0 >= 5:
+        act_before = save._deref(save.ivar(aR, "@baby"))
+        BR.move(aR, 2, 0)
+        check("单只 move：第 3 只 → 第 1 行",
+              _order_ids(BR, aR) == [o0[2], o0[0], o0[1]] + o0[3:],
+              "→".join(_order_names(BR, aR)[:3]))
+        check("重排不增减召唤兽数量", len(gR.babies(aR)) == n0)
+        o1 = _order_ids(BR, aR)
+        BR.move(aR, 0, n0 - 1)
+        check("单只 move：第 1 只 → 最后一行",
+              _order_ids(BR, aR) == o1[1:] + [o1[0]],
+              _order_names(BR, aR)[-1])
+        check("dst 落在组里 = 不动（返回原下标）",
+              BR.reorder(aR, [1], 1) == [1]
+              and _order_ids(BR, aR) == o1[1:] + [o1[0]])
+        o2 = _order_ids(BR, aR)
+        check("整组 to_front：第 2、3 只一起到最前（组内保序）",
+              BR.to_front(aR, [2, 1]) == [0, 1]
+              and _order_ids(BR, aR) == [o2[1], o2[2], o2[0]] + o2[3:],
+              "→".join(_order_names(BR, aR)[:3]))
+        o3 = _order_ids(BR, aR)
+        check("整组 to_back：第 1、2 只一起到最后（组内保序）",
+              BR.to_back(aR, [0, 1]) == [n0 - 2, n0 - 1]
+              and _order_ids(BR, aR) == o3[2:] + [o3[0], o3[1]],
+              "→".join(_order_names(BR, aR)[-2:]))
+        check("出战对象身份不变（重排不按下标重设 @baby）",
+              save._deref(save.ivar(aR, "@baby")) is act_before)
+        ai = BR.active_index(aR)
+        check("active_index 跟着挪（★ 还在同一只身上）",
+              ai >= 0 and _order_ids(BR, aR)[ai]
+              == game.get_int(save.ivar(act_before, "@actor_id"), -1), ai)
+        safe = _order_ids(BR, aR)
+        for _bad, _dst in ((n0, 0), (-1, 0), (0, n0 + 5)):
+            try:
+                BR.reorder(aR, [_bad], _dst)
+                check("越界参数被拒（src=%d dst=%d）" % (_bad, _dst),
+                      False, "居然通过了")
+            except IndexError:
+                check("越界参数被拒（src=%d dst=%d）" % (_bad, _dst), True)
+        check("被拒之后顺序没被改动", _order_ids(BR, aR) == safe)
+        want_ord = _order_ids(BR, aR)
+        want_n = len(gR.babies(aR))
+        svR.doc.save()
+        sv9 = save.SaveDoc(path)
+        B9 = babies.Babies(game.GameEditor(sv9))
+        a9 = sv9.actors()[0][1]
+        check("落盘重开后顺序一致", _order_ids(B9, a9) == want_ord,
+              "→".join(_order_names(B9, a9)[:3]))
+        check("落盘重开后数量一致", len(B9.g.babies(a9)) == want_n, want_n)
+        check("落盘重开后 ★ 还在同一只身上", B9.active_index(a9) == ai,
+              B9.active_index(a9))
+
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
     return 1 if OK[1] else 0
+
+
+def _order_ids(B, actor):
+    """这个角色当前顺序的**模板 id** 列表（比显示名靠得住：名字可能重）。"""
+    return [game.get_int(save.ivar(x, "@actor_id"), -1)
+            for _i, x in B.g.babies(actor)]
+
+
+def _order_names(B, actor):
+    return [B.display_name(x) for _i, x in B.g.babies(actor)]
 
 
 def _deref_attr(baby, name):

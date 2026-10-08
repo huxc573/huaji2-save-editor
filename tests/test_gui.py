@@ -48,7 +48,7 @@ def kill_timers(root):
 
 TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_saves", "存档管理"),
         ("tab_tree", "全部解析数据"),
-        ("tab_actor", "角色 / 属性"), ("tab_party", "背包 / 物品"),
+        ("tab_actor", "角色 / 属性"), ("tab_party", "物品"),
         ("tab_baby", "召唤兽"),
         ("tab_machine", "机器码"),
         ("tab_db", "数据表 (CSV)"), ("tab_help", "说明 / 机制"),
@@ -56,6 +56,7 @@ TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_saves", "存档管理"),
 # ⚠ v0.5.4 起「开关 / 变量」页并入「概览 / 快捷修改」，页签 11 → 10 个。
 # 这条断言当时没跟着改，而 GUI 组一直被没 tkinter 的解释器整组跳过，
 # 所以直到 2026-09-20 换成 3.12 跑才暴露（同 test_gui_quick 那批老断言）。
+# ⚠ 2026-10-08：「背包 / 物品」改名「物品」（背包可切成仓库，页签名别再叫背包）。
 
 
 def main():

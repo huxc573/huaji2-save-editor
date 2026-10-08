@@ -1056,6 +1056,161 @@ def main():
           and sect.sect_skill_ids(999) == ()
           and sect.sect_of_skill(999999) is None)
 
+    # ---------------- 2026-10-08：仓库 / 搬格对调 / 复制 / 整理 --------------
+    # ⚠ 单开一份副本：前面几段改的是同一份 sv，这段要干净的初始状态。
+    copyS = os.path.join(WORK, "game_slots.rvdata2")
+    shutil.copyfile(real, copyS)
+    svS = save.SaveDoc(copyS)
+    gS = game.GameEditor(svS)
+
+    def snapS(kind="pack"):
+        return dict((s, (iid, cnt)) for s, _p, _i, iid, _n, cnt in gS.bag(kind))
+
+    pkS, whS = snapS("pack"), snapS("warehouse")
+    check("仓库容器读得出来（形状与背包一致）",
+          isinstance(gS.warehouse_hash(), M.HashNode),
+          "%d 件 / 已开 %d 页" % (len(whS), gS.warehouse_page()))
+    check("仓库页数 = 已开页数（夹在 1~%d）" % game.MAX_WAREHOUSE_PAGES,
+          1 <= gS.page_count("warehouse") <= game.MAX_WAREHOUSE_PAGES,
+          gS.page_count("warehouse"))
+    check("背包页数恒为 4（跟仓库不是一套）",
+          gS.page_count("pack") == 4, gS.page_count("pack"))
+    check("老 KINDS 的 @weapons / @armors 仍是空容器（真值 0 对）",
+          len(gS.container("Weapons").pairs) == 0
+          and len(gS.container("Armors").pairs) == 0)
+    check("_db_of 把 pack/warehouse 都映到 Items 表",
+          game.GameEditor._db_of("pack") == "Items"
+          and game.GameEditor._db_of("warehouse") == "Items")
+    slotsS = sorted(pkS)
+    check("背包至少 2 格（够测对调）", len(slotsS) >= 2, len(slotsS))
+
+    if len(slotsS) >= 2:
+        sa, sb = slotsS[0], slotsS[1]
+        ia, ib = pkS[sa][0], pkS[sb][0]
+        gS.move_slots("pack", [sa], target=sb)
+        now = snapS()
+        check("单格对调：源格内容换到目标格", now[sb][0] == ia,
+              "槽 %d → %d" % (sa, sb))
+        check("单格对调：目标格原来的换回源格", now[sa][0] == ib)
+        check("对调后每格数量跟着走",
+              now[sb][1] == pkS[sa][1] and now[sa][1] == pkS[sb][1])
+        check("对调不增减格子数", len(now) == len(pkS), len(now))
+        gS.move_slots("pack", [sa], target=sb)
+        check("再对调一次回到原样（幂等）", snapS() == pkS)
+
+    # 整理：受控场景。挑一个**本来空的**背包页（真档第 3 页是空的）
+    blank = None
+    for _p in range(gS.page_count("pack")):
+        if not gS.bag("pack", _p):
+            blank = _p
+            break
+    check("找得到一个空的背包页（受控测整理）", blank is not None, blank)
+    mergeable = None
+    for s, _p, _i, iid, _nm, _c in gS.bag("pack"):
+        if gS.stack_key(gS._item_node("pack", s)) is not None:
+            mergeable = iid
+            break
+    check("背包里找得到可合并的道具（同类合并才有意义）",
+          mergeable is not None, "id=%s" % mergeable)
+
+    if blank is not None and mergeable is not None:
+        s0 = gS.slot_key(blank, 0)
+        s2 = gS.slot_key(blank, 2)
+        s3 = gS.slot_key(blank, 3)
+        other = 2 if mergeable != 2 else 3
+        gS.set_item("pack", s0, mergeable, count=5)
+        gS.set_item("pack", s2, mergeable, count=3)
+        gS.set_item("pack", s3, other, count=7)
+        mv, mg = gS.arrange("pack", blank, compact=True, merge=False)
+        now = snapS()
+        check("紧凑排列：中间的空格被消掉（槽 %d 三格连排）" % s0,
+              [now.get(s0 + i, (None,))[0] for i in range(3)]
+              == [mergeable, mergeable, other],
+              [now.get(s0 + i, (None, 0))[0] for i in range(3)])
+        check("紧凑排列：搬了 2 格、没合并", (mv, mg) == (2, 0), (mv, mg))
+        check("紧凑排列：腾空的格子变空", s3 not in now, sorted(now)[:4])
+        mv, mg = gS.arrange("pack", blank, compact=True, merge=True)
+        now = snapS()
+        check("同类合并：5 + 3 叠成一格 8", now.get(s0, (None, 0)) == (mergeable, 8),
+              now.get(s0))
+        check("同类合并：另一格补上来（%s 落到槽 %d）" % (other, s0 + 1),
+              now.get(s0 + 1, (None,))[0] == other, now.get(s0 + 1))
+        check("同类合并：合并 1 格、紧凑 1 格", (mv, mg) == (1, 1), (mv, mg))
+        check("整理后不超每格上限",
+              all(gS.stack_limit(gS._item_node("pack", s)) >= c
+                  for s, (_i2, c) in now.items()))
+        # 武器/防具不可叠：stack_key 必须是 None、上限 1（整理不去合并它们）
+        n_non = 0
+        for s, _p, _i, _iid, _nm, _c in gS.bag("pack"):
+            nd = gS._item_node("pack", s)
+            if getattr(save._deref(nd), "cls", "") != "RPG::Item":
+                n_non += 1
+                if not (gS.stack_key(nd) is None and gS.stack_limit(nd) == 1):
+                    check("武器/防具不可叠（stack_key=None、上限 1）", False,
+                          "槽 %d" % s)
+                    break
+        else:
+            check("武器/防具不可叠（stack_key=None、上限 1）", True,
+                  "本档背包里有 %d 件武器/防具" % n_non)
+
+        # 复制：进空格 ⇒ 持有数 +N；进有货格 ⇒ 必须被拒
+        free = list(gS.empty_slots("pack", blank))[:2]
+        check("整理后那一页还有空格可复制", len(free) >= 2, free)
+        if len(free) >= 2:
+            sid = mergeable
+            cnt_s = snapS()[s0][1]
+            before_cnt = gS.item_counts().get(sid, 0)
+            before_sec = gS.security_total(sid)
+            gS.move_slots("pack", [s0], target=free[0], copy=True)
+            now = snapS()
+            check("复制进了空格", now.get(free[0], (None,))[0] == sid,
+                  "槽 %d" % free[0])
+            check("源格还在（复制 ≠ 搬走）", now.get(s0, (None,))[0] == sid)
+            check("持有数 +%d" % cnt_s,
+                  gS.item_counts().get(sid, 0) == before_cnt + cnt_s,
+                  "%d -> %d" % (before_cnt, gS.item_counts().get(sid, 0)))
+            if before_sec is not None:
+                check("记账 security[:items] 跟着 +%d" % cnt_s,
+                      gS.security_total(sid) == before_sec + cnt_s,
+                      "%s -> %s" % (before_sec, gS.security_total(sid)))
+            else:
+                print("  [--] 本档 security[:items] 里没有这件东西的账"
+                      "（V2.201 常见），跳过记账断言")
+            try:
+                gS.move_slots("pack", [s0], target=s0 + 1, copy=True)
+                check("复制进有货格被拒", False, "居然通过了")
+            except ValueError:
+                check("复制进有货格被拒", True)
+
+        # 跨容器：背包 → 仓库（保序、总数不变）
+        wsrc = [s for s in (s0, s0 + 1) if s in snapS()][:1]
+        if wsrc and gS.page_count("warehouse") >= 1:
+            s1 = wsrc[0]
+            tot_before = gS.item_counts()
+            wid = snapS()[s1][0]
+            _n, used = gS.move_slots("pack", [s1], dst="warehouse", target=0)
+            check("跨容器搬运：仓库第 1 格有货", snapS("warehouse").get(0, (None,))[0] == wid,
+                  "槽号 %s" % used)
+            check("跨容器搬运：背包那一格空了", s1 not in snapS())
+            check("跨容器搬运：总持有数不变", gS.item_counts() == tot_before)
+            check("跨容器搬运：不落在仓库页数之外",
+                  all(s < gS.page_count("warehouse") * game.PACK_PAGE_SIZE
+                      for s in used))
+
+    # 落盘重开：仓库与背包内容都要一致（整档重写别坏结构）
+    want_pk, want_wh = snapS("pack"), snapS("warehouse")
+    pages_before = [len(gS.bag("pack", p)) for p in range(4)]
+    svS.doc.save()
+    svT = save.SaveDoc(copyS)
+    gT = game.GameEditor(svT)
+    now_pk = dict((s, (iid, cnt)) for s, _p, _i, iid, _n, cnt in gT.bag("pack"))
+    now_wh = dict((s, (iid, cnt))
+                  for s, _p, _i, iid, _n, cnt in gT.bag("warehouse"))
+    check("重开后背包一致", now_pk == want_pk, "%d 格" % len(now_pk))
+    check("重开后仓库一致", now_wh == want_wh, "%d 格" % len(now_wh))
+    check("重开后每页件数不变",
+          [len(gT.bag("pack", p)) for p in range(4)] == pages_before)
+
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
     return 1 if OK[1] else 0

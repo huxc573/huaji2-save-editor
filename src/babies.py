@@ -751,6 +751,58 @@ class Babies(object):
                 return i
         return -1
 
+    # ------------------------------------------------------------------ 排序
+    def babies_of(self, actor):
+        """角色的召唤兽数组（`@babys` ArrayNode）；没有就返回 None。"""
+        arr = _deref(ivar(actor, "@babys"))
+        return arr if isinstance(arr, M.ArrayNode) else None
+
+    def reorder(self, actor, srcs, dst):
+        """把 `srcs`（原始下标，可多只）整组挪到第 `dst` 位，组内相对顺序不变。
+
+        * 召唤兽是**有序数组**，所以这里是"插到那一行"（其余整段顺移），
+          不是背包格那种"对调"。单只拖拽时等价于"松手在哪一行就落在哪一行"。
+        * `dst` 落在 `srcs` 里＝没动，直接返回。
+        * ⚠ 不动 `@baby`（出战）：它指向的是**对象**，重排后 ★ 跟着行跑，
+          不需要（也不能）按下标重设，否则会指错对象。
+        * 返回移动后的新下标列表（与 `srcs` 同序）。
+        """
+        arr = self.babies_of(actor)
+        if arr is None:
+            raise IndexError("这个角色没有召唤兽列表")
+        n = len(arr.items)
+        srcs = sorted(set(int(s) for s in srcs))
+        if not srcs or srcs[0] < 0 or srcs[-1] >= n:
+            raise IndexError("召唤兽序号超出范围（共 %d 只）" % n)
+        if not (0 <= dst < n):
+            raise IndexError("要挪到第 %d 行，但只有 %d 行" % (dst + 1, n))
+        if dst in srcs:
+            return list(srcs)
+        sset = set(srcs)
+        grp = [arr.items[s] for s in srcs]
+        rest = [x for i, x in enumerate(arr.items) if i not in sset]
+        # 「第 p 个非移动元素之前」——单只时 p == dst，与直觉（落在那一行）一致；
+        # 多只往下拽且超出剩余长度时夹到末尾（一组人不可能整体越过数组尾）。
+        p = min(dst, len(rest))
+        arr.items[:] = rest[:p] + grp + rest[p:]
+        self.doc.mark_structural()
+        return list(range(p, p + len(grp)))
+
+    def move(self, actor, src, dst):
+        """单只挪到第 dst 位（`reorder` 的单只快捷版）。返回新下标。"""
+        return self.reorder(actor, [src], dst)[0]
+
+    def to_front(self, actor, srcs):
+        """把 `srcs`（可多只）整组挪到最前，组内相对顺序不变。"""
+        return self.reorder(actor, srcs, 0)
+
+    def to_back(self, actor, srcs):
+        """把 `srcs`（可多只）整组挪到最后，组内相对顺序不变。"""
+        arr = self.babies_of(actor)
+        if arr is None:
+            raise IndexError("这个角色没有召唤兽列表")
+        return self.reorder(actor, srcs, len(arr.items) - 1)
+
     # ------------------------------------------------------------------ 技能
     def skills(self, baby):
         arr = _deref(ivar(baby, "@skills"))

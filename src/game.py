@@ -104,6 +104,34 @@ KINDS = (("Items", "@items", "道具", "Items"),
          ("Weapons", "@weapons", "武器", "Weapons"),
          ("Armors", "@armors", "防具", "Armors"))
 
+#: 「位置」= 背包 / 仓库（2026-10-08 川：背包可切换成仓库）。
+#:
+#: ⚠ 探针实测（`!tmp/probe_warehouse.py`，真档副本）：**背包只有一个容器** ——
+#:   `@items` 这个 `Hash{槽号 => [对象, 数量]}` 里**混装**道具/武器/防具，游戏自己按
+#:   `is_a?(RPG::Item/Weapon/Armor)` 分流（脚本 `def weapons; @items.sort.select{…}`）。
+#:   上面 `KINDS` 里的 `@weapons`/`@armors` 是**遗留空容器**（真档 0 对）
+#:   ⇒ 界面的「种类」不能再切容器，只能对 `@items` 做**类过滤**（`CLASS_ONLY`）。
+#:   仓库＝`$game_party.hash[:warehouse]`，形状与背包装的一模一样，页数看
+#:   `hash[:warehouse_page]`（**已开页数**，上限 12 + 会员 3/5）。
+SRCS = (("pack", "背包"), ("warehouse", "仓库"))
+
+#: 「筛选」＝按物件类过滤（键 → 中文）。
+CLASS_ONLY = (("all", "全部"), ("item", "道具"),
+              ("weapon", "武器"), ("armor", "防具"))
+_CLS_ONLY = {"RPG::Item": "item", "RPG::Weapon": "weapon", "RPG::Armor": "armor"}
+
+#: 每格数量上限，照游戏 `Game_Party#max_item_number`（script00:14440）——
+#: 默认 `Config::Game::MAX_ITEM`（99），下面这些 id 是特例。
+MAX_ITEM_BY_ID = {2: 9999, 3: 9999,        # 包子 / 佛手
+                  115: 9999, 116: 9999,     # 金锭 / 仙丹
+                  63: 999, 273: 999,        # 飞行符 / 天眼通符
+                  145: 500,
+                  146: 999, 147: 999,       # 锻造灵石 / 锻造晶石
+                  158: 9999}
+
+#: 仓库页数上限（工具不判会员，按脚本 `max_warehouse` 的最大值 12+3+5=20 兜着）。
+MAX_WAREHOUSE_PAGES = 20
+
 
 # --------------------------------------------------------------------------
 # 节点小工具
@@ -320,7 +348,19 @@ class GameEditor(object):
 
     # ==================================================== 背包
     def container(self, kind="Items"):
-        """返回容器 HashNode（key = 槽号，value = [对象, 数量]）。"""
+        """返回容器 HashNode（key = 槽号，value = [对象, 数量]）。
+
+        `kind` 可以是老的三种（`Items`/`Weapons`/`Armors`），也可以是
+        `"pack"`（＝`@items`）与 `"warehouse"`（＝`hash[:warehouse]`）——
+        后两个就是界面上「位置」那个下拉的两个值，语义层里形状完全一样。
+        """
+        if kind == "pack":
+            kind = "Items"
+        elif kind == "warehouse":
+            node = self.warehouse_hash(create=True)
+            if node is None:
+                raise KeyError("存档里没有 party.hash[:warehouse]")
+            return node
         for key, ivname, _cn, _db in KINDS:
             if key == kind:
                 node = _deref(ivar(self.sv.section("party"), ivname))
@@ -328,6 +368,48 @@ class GameEditor(object):
                     return node
                 raise KeyError("存档里没有 %s" % ivname)
         raise KeyError("不认识的背包类型 %r" % kind)
+
+    def warehouse_hash(self, create=False):
+        """仓库容器 `$game_party.hash[:warehouse]`（`Hash{槽号 => [对象, 数量]}`）。
+
+        脚本里 `def warehouse; $game_party.hash[:warehouse]; end`（15318）；
+        ⚠ 它跟背包是**同一个形状**，只是**页数**看 `hash[:warehouse_page]`
+        （已开页数）—— 所以工具里两边可以共用一整套读写。
+        `create=True` 时（键不存在/为 nil）就地建一个空 Hash 写回去：
+        游戏自己 `initialize` 里也有这一键（`warehouse: {}`，14073）。
+        """
+        ph = self._hash()
+        if not isinstance(ph, M.HashNode):
+            return None
+        h = _deref(hash_get(ph, "warehouse"))
+        if isinstance(h, M.HashNode):
+            return h
+        if not create:
+            return None
+        node = M.HashNode([])
+        for i, (k, v) in enumerate(ph.pairs):
+            if M.value_of(_deref(k)) == "warehouse":
+                ph.pairs[i] = (k, node)
+                break
+        else:
+            ph.pairs.append((str_node("warehouse"), node))
+        self.doc.mark_structural()
+        return node
+
+    def page_count(self, kind="Items"):
+        """这个容器有几页（1 页 = `PACK_PAGE_SIZE` 格）。
+
+        背包恒 `MAX_PACK_PAGE`(4)；仓库看存档里的 `hash[:warehouse_page]`
+        （已开页数，脚本 `get_maxpage`: `min(warehouse_page, max_warehouse)`）。
+        """
+        if kind != "warehouse":
+            return MAX_PACK_PAGE
+        n = self.warehouse_page() or 0
+        return max(1, min(int(n), MAX_WAREHOUSE_PAGES))
+
+    def item_class(self, node):
+        """物件类 → 筛选键（`"item"`/`"weapon"`/`"armor"`），认不出给 `None`。"""
+        return _CLS_ONLY.get(getattr(_deref(node), "cls", ""))
 
     def slot_key(self, page, index):
         return page * PACK_PAGE_SIZE + index
@@ -338,11 +420,14 @@ class GameEditor(object):
                 return i
         return -1
 
-    def bag(self, kind="Items", page=None):
-        """背包内容：[(槽号, 翻页, 页内格, id, 名称, 数量), ...]，空槽不列。
+    def bag(self, kind="Items", page=None, only=None):
+        """背包/仓库内容：[(槽号, 翻页, 页内格, id, 名称, 数量), ...]，空槽不列。
 
-        page=None 表示整本背包（4 页 × 20 格），给了 page 就只看那一页。
-        名称按**物件自己的类**选表（背包里混装着道具/武器/防具）。
+        page=None 表示整本，给了 page 就只看那一页。
+        名称按**物件自己的类**选表（一个容器里混装着道具/武器/防具）。
+        `only` 是**类过滤**（`"item"`/`"weapon"`/`"armor"`）—— 界面的「筛选」
+        下拉用它；⚠ 因为它过滤的是同一个 `@items`，所以别再用老 `KINDS`
+        那三个容器去切（`@weapons`/`@armors` 是 0 对的遗留字段）。
         """
         h = self.container(kind)
         out = []
@@ -357,6 +442,8 @@ class GameEditor(object):
             if not isinstance(arr, M.ArrayNode) or not arr.items:
                 continue
             item = _deref(arr.items[0])
+            if only and only != "all" and self.item_class(item) != only:
+                continue
             iid = get_int(ivar(item, "@id"), -1) if item is not None else -1
             nm = self.item_display_name(item, "?") if item is not None else "?"
             count = get_int(arr.items[1]) if len(arr.items) > 1 else 1
@@ -380,12 +467,12 @@ class GameEditor(object):
         import datatables
         kw = (keyword or "").strip().lower()
         try:
-            m = datatables.item_map(kind)
+            m = datatables.item_map(self._db_of(kind))
             rows = [(i, m[i][0] or ("#%d" % i), m[i][1]) for i in sorted(m)]
         except Exception:
             rows = []
         if not rows:
-            rows = datatables.builtin_rows(kind)
+            rows = datatables.builtin_rows(self._db_of(kind))
         out = []
         for i, nm, desc in rows:
             desc = (desc or "").strip().replace("\r\n", "\n")
@@ -402,13 +489,17 @@ class GameEditor(object):
         `======剑=======` 那一层，口径见 `datatables.item_group()`）。"""
         import datatables
         try:
-            return datatables.item_group(kind)
+            return datatables.item_group(self._db_of(kind))
         except Exception:
             return {}
 
     def set_all_counts(self, kind="Items", count=99, page=None):
-        """把（某一页/整本）已有的格子数量批量改成 count（仿画迹1 的批量改）。"""
-        count = max(0, min(int(count), MAX_ITEM))
+        """把（某一页/整本）已有的格子数量批量改成 count（仿画迹1 的批量改）。
+
+        ⚠ 这里**不预先夹**到 `MAX_ITEM` —— 每件东西自己的上限不同
+        （包子 9999、飞行符 999…），交给 `set_count` 按 `stack_limit` 夹。
+        """
+        count = max(0, int(count))
         n = 0
         for slot, _p, _i, iid, _nm, cur in self.bag(kind, page):
             if cur == count:
@@ -431,7 +522,10 @@ class GameEditor(object):
           * 同一件东西占了多个格子（游戏按 id 取数量，重复会算不清）
         """
         out = []
-        for key, _iv, cn, db in KINDS:
+        # ⚠ 仓库（`"warehouse"`）与背包共用同一张名字表（都是 Items 那一个容器）
+        #   —— `_db_of` 负责把这层差异抹平。
+        kinds_all = list(KINDS) + [("warehouse", None, "仓库", "Items")]
+        for key, _iv, cn, db in kinds_all:
             if kinds and key not in kinds:
                 continue
             try:
@@ -468,10 +562,12 @@ class GameEditor(object):
                 if cnt <= 0:
                     out.append((key, slot, nm, "数量是 %d" % cnt, True,
                                 {"id": iid, "count": cnt}))
-                elif cnt > MAX_ITEM:
-                    out.append((key, slot, nm, "数量 %d 超过单格上限 %d"
-                                % (cnt, MAX_ITEM), True,
-                                {"id": iid, "count": cnt}))
+                else:
+                    lim = self.stack_limit(item)
+                    if cnt > lim:
+                        out.append((key, slot, nm, "数量 %d 超过单格上限 %d"
+                                    % (cnt, lim), True,
+                                    {"id": iid, "count": cnt}))
                 if iid in seen:
                     out.append((key, slot, nm, "和 %d 号格子重复（同一物品占两格）"
                                 % seen[iid], True,
@@ -480,7 +576,7 @@ class GameEditor(object):
                     seen[iid] = slot
                 # 孵化蛋/礼包这类“运行时才填内容”的东西：@attr 空的话一用就报
                 # `undefined method '[]' for nil:NilClass`
-                need_pay, _nm = self.item_needs_payload(key, iid)
+                need_pay, _nm = self.item_needs_payload(self._db_of(key), iid)
                 if need_pay:
                     pt, _pd = self.item_payload(item)
                     if not pt:
@@ -514,7 +610,7 @@ class GameEditor(object):
                 if it is None:
                     continue
                 before, _b = self.item_payload(it)
-                self._fix_payload(it, kind, extra.get("id", -1))
+                self._fix_payload(it, self._db_of(kind), extra.get("id", -1))
                 after, _a = self.item_payload(it)
                 if after and not before:
                     self.doc.mark_structural()
@@ -526,15 +622,20 @@ class GameEditor(object):
                 keep = extra["dup_of"]
                 cur = dict((s, c) for s, _p, _i, _id, _n, c in self.bag(kind))
                 total = cur.get(keep, 0) + (cnt or 0)
-                if total > MAX_ITEM:            # 上限就留一格 99、多余丢掉
-                    total = MAX_ITEM
+                _it = self._item_node(kind, keep)
+                _lim = self.stack_limit(_it) if _it is not None else MAX_ITEM
+                if total > _lim:              # 上限就留一格（包子 9999 / 默认 99）
+                    total = _lim
                 self.set_count(kind, keep, total)
                 self.clear_slot(kind, slot)
                 done.append((kind, slot, "%s 并到 %d 号格子（现在 %d 个）"
                              % (name, keep, total)))
                 continue
             if "超过" in why:
-                self.set_count(kind, slot, MAX_ITEM)
+                _it = self._item_node(kind, slot)
+                self.set_count(kind, slot,
+                               self.stack_limit(_it) if _it is not None
+                               else MAX_ITEM)
                 done.append((kind, slot, "%s 数量 %s → %d"
                              % (name, cnt, MAX_ITEM)))
                 continue
@@ -628,7 +729,7 @@ class GameEditor(object):
                 arr = _deref(v)
                 if isinstance(arr, M.ArrayNode) and arr.items:
                     used.add(slot)
-        pages = [page] if page is not None else range(MAX_PACK_PAGE)
+        pages = [page] if page is not None else range(self.page_count(kind))
         out = []
         for p in pages:
             for i in range(PACK_PAGE_SIZE):
@@ -640,7 +741,7 @@ class GameEditor(object):
     def _name_map(self, kind):
         import datatables
         try:
-            return datatables.name_map(kind)
+            return datatables.name_map(self._db_of(kind))
         except Exception:
             return {}
 
@@ -688,7 +789,7 @@ class GameEditor(object):
             import datatables
             m = {}
             try:
-                pairs = datatables.item_map(kind)
+                pairs = datatables.item_map(self._db_of(kind))
             except Exception:
                 pairs = {}
             for i, (nm, desc) in pairs.items():
@@ -729,9 +830,10 @@ class GameEditor(object):
             raise KeyError("第 %d 格结构不对" % slot)
         item = _deref(arr.items[0])
         iid = get_int(ivar(item, "@id"), -1)
-        count = max(0, min(int(count), 99 * 99))
+        # 上限照游戏 `max_item_number`（包子 9999 / 飞行符 999 / 默认 99）。
+        count = max(0, min(int(count), self.stack_limit(item)))
         self.doc.set_value(_deref(arr.items[1]), count)
-        if kind == "Items":
+        if self._is_sec_kind(kind):
             self.sync_security_item(iid)
         return count
 
@@ -751,23 +853,29 @@ class GameEditor(object):
             iid = get_int(ivar(_deref(arr.items[0]), "@id"), -1)
         h.pairs[i] = (h.pairs[i][0], nil_node())
         self.doc.mark_structural()
-        if kind == "Items" and iid >= 0:
+        if self._is_sec_kind(kind) and iid >= 0:
             self.sync_security_item(iid)
         return True
 
-    def add_item(self, kind, slot, item_id, count=1, kid=None, clone_like=True):
+    def add_item(self, kind, slot, item_id, count=1, kid=None, clone_like=True,
+                 db=None):
         """往空格子里加一件物品（结构性改动）。
 
         优先克隆**存档里同款**（带运行时内容）；没有才用 Data 模板新建。
         只允许往**空槽**加：这样不会覆盖玩家已有的东西。
+
+        `db` ＝从哪张 Data 表取模板（默认按容器推断 → 都是 `Items`）。
+        界面上「筛选」选了武器/防具时要显式传 `db="Weapons"`，否则拿武器 id
+        去 Items 表里找必然找不到。
         """
+        db = db or self._db_of(kind)
         h = self.container(kind)
         if self._pair_index(h, slot) >= 0:
             arr = _deref(h.pairs[self._pair_index(h, slot)][1])
             if isinstance(arr, M.ArrayNode) and arr.items:
                 raise ValueError("第 %d 格已经有东西了" % slot)
-        like = self.find_like(kind, item_id) if clone_like else None
-        node = self.make_item(kind, item_id, kid=kid, like=like)
+        like = self.find_like(db, item_id) if clone_like else None
+        node = self.make_item(db, item_id, kid=kid, like=like)
         arr = M.ArrayNode([node, int_node(count)])
         i = self._pair_index(h, slot)
         key = int_node(slot)
@@ -781,7 +889,7 @@ class GameEditor(object):
                     pos = j
                     break
             h.pairs.insert(pos, (key, arr))
-        if kind == "Items":
+        if self._is_sec_kind(kind):
             self.sync_security_item(item_id)
         self.doc.mark_structural()
         return node
@@ -794,26 +902,255 @@ class GameEditor(object):
         return None
 
     def set_item(self, kind, slot, item_id, count=None, kid=None,
-                 clone_like=True):
+                 clone_like=True, db=None):
         """把某一格**换成**另一件物品（从 Data 模板新建对象，仿画迹1 的"写入槽位"）。
 
         count=None 表示沿用原来那一格的数量（原来是空的就是 1）。
         这是结构性改动（保存时会整档重写），并且会自动同步物品计数校验。
+        `db` ＝模板表（默认按容器推断）。⚠ 改前先确认能造出来，别改到一半失败。
         """
+        db = db or self._db_of(kind)
         old = self.slot_info(kind, slot)
         if count is None:
             count = old[1] if old else 1
         count = max(0, min(int(count), MAX_ITEM))
         try:
-            self.make_item(kind, item_id, kid=kid,
-                           like=self.find_like(kind, item_id) if clone_like
-                           else None)      # 先确认能造出来，别改到一半失败
+            self.make_item(db, item_id, kid=kid,
+                           like=self.find_like(db, item_id) if clone_like
+                           else None)
         except KeyError:
             raise
         if old is not None:
             self.clear_slot(kind, slot)         # 先腾空（置 nil，不删 key）
-        self.add_item(kind, slot, item_id, count, kid=kid, clone_like=clone_like)
+        self.add_item(kind, slot, item_id, count, kid=kid, clone_like=clone_like,
+                      db=db)
         return count
+
+    # -------------------------------------------------- 格子搬运 / 复制 / 整理
+    # 2026-10-08 川要的三件事：列表拖动排序、右键「移动到 / 复制到」、快捷整理。
+    # 语义层全在这儿，界面只调这些方法（别在界面里拼字节）。
+    @staticmethod
+    def _is_sec_kind(kind):
+        """这个容器的货物算不算进 `security[:items]` 记账。
+
+        ⚠ 仓库的货**也算**（`item_counts(include_warehouse=True)`）——
+        所以背包 ↔ 仓库互搬不改变总数，但**复制**会。
+        """
+        return kind in ("Items", "pack", "warehouse")
+
+    @staticmethod
+    def _db_of(kind):
+        """容器键 → `Data\\*.rvdata2` 表键。
+
+        ⚠ 背包与仓库都是 `@items` 那一个容器（里面混装道具/武器/防具），
+        所以它们的**模板表**永远是 `Items` —— 造物件时别拿容器键去查表。
+        """
+        return "Items" if kind in ("pack", "warehouse") else kind
+
+    def _slot_node_of(self, h, slot):
+        """取某槽的值节点；没有这一对返回 None（键在、值是 nil 的算"有键"）。"""
+        i = self._pair_index(h, slot)
+        return None if i < 0 else h.pairs[i][1]
+
+    def _slot_alive(self, h, slot):
+        """这一格有货吗（值是 `[对象, 数量]` 才算）。"""
+        v = _deref(self._slot_node_of(h, slot))
+        return isinstance(v, M.ArrayNode) and bool(v.items)
+
+    def _put_slot(self, h, slot, value):
+        """写回某一槽的值；没有这一对就**按槽号顺序**插进去。
+
+        ⚠ 老档里被清空的格子**键还留着**（值是 nil）—— 那种只换值、不加键，
+        免得凭空多出一对把后面的 `@N` 编号整体挪位。
+        """
+        i = self._pair_index(h, slot)
+        if i >= 0:
+            h.pairs[i] = (h.pairs[i][0], value)
+            return
+        pos = len(h.pairs)
+        for j, (k, _v) in enumerate(h.pairs):
+            kv = M.value_of(_deref(k))
+            if isinstance(kv, int) and kv > slot:
+                pos = j
+                break
+        h.pairs.insert(pos, (int_node(slot), value))
+
+    def move_slots(self, src, slots, dst=None, target=None, copy=False):
+        """把 `src` 里这些格子整格搬到 `dst` 的第 `target` 格起（或复制过去）。
+
+        * **同容器**（`dst` 省略/相同）＝**对称互换**：源格内容按顺序落到目标格，
+          目标格原来的内容按顺序回到源格 —— 单格就是「有物则交换」，
+          多格保持相对顺序（列表拖动排序就是这个语义）。
+        * **跨容器**（背包 ↔ 仓库）＝**找空格放**：从 `target` 起往后找够空位，
+          放不下就**整批不动**并报错（绝不覆盖对面已有的东西）。
+        * `copy=True` ＝复制（`clone_node` 深拷贝，`@attr` 运行时内容一起带上）；
+          ⚠ 目标格**必须为空**（覆盖会静默丢东西），且复制会增加持有数 ⇒
+          完事要按件同步 `security[:items]`。
+
+        返回 `(搬运格数, 目标槽列表)`。属**结构性改动**。
+        """
+        slots = sorted({int(s) for s in slots})
+        if not slots:
+            return 0, []
+        h1 = self.container(src)
+        same = (dst is None) or (dst == src)
+        h2 = h1 if same else self.container(dst)
+        n = len(slots)
+        target = int(slots[0] if target is None else target)
+        if same:
+            tgt = [target + i for i in range(n)]
+            if copy:
+                busy = [t for t in tgt if self._slot_alive(h2, t)]
+                if busy:
+                    raise ValueError("第 %s 格已经有东西了，复制只能进空格"
+                                     % "、".join(str(b) for b in busy))
+            # ⚠ 先把两边**写之前**的快照读出来：源/目标区间重叠时也不会互相踩。
+            old_s = {s: self._slot_node_of(h1, s) for s in slots}
+            old_t = {t: self._slot_node_of(h2, t) for t in tgt}
+            for s, t in zip(slots, tgt):
+                v = old_s[s]
+                if v is None:
+                    self._put_slot(h2, t, nil_node())
+                else:
+                    self._put_slot(h2, t, clone_node(v) if copy else v)
+            if not copy:                       # 目标区原来的东西回到源格
+                for t, s in zip(tgt, slots):
+                    v = old_t[t]
+                    self._put_slot(h1, s, nil_node() if v is None else v)
+        else:
+            limit = self.page_count(dst) * PACK_PAGE_SIZE
+            free, s = [], target
+            while len(free) < n and s < limit:
+                if not self._slot_alive(h2, s):
+                    free.append(s)
+                s += 1
+            if len(free) < n:
+                raise ValueError(
+                    "%s 从第 %d 格起只有 %d 个空位，放不下 %d 格"
+                    % (dict(SRCS).get(dst, dst), target, len(free), n))
+            for s, t in zip(slots, free):
+                v = self._slot_node_of(h1, s)
+                self._put_slot(h2, t, clone_node(v) if copy else
+                               (nil_node() if v is None else v))
+                if not copy:
+                    self._put_slot(h1, s, nil_node())
+            tgt = free
+        self.doc.mark_structural()
+        if copy and self._is_sec_kind(src):
+            ids = set()
+            for t in tgt:
+                arr = _deref(self._slot_node_of(h2, t))
+                if isinstance(arr, M.ArrayNode) and arr.items:
+                    ids.add(get_int(ivar(_deref(arr.items[0]), "@id"), -1))
+            for iid in ids:
+                if iid >= 0:
+                    self.sync_security_item(iid)
+        return n, tgt
+
+    def stack_limit(self, node):
+        """这一格最多叠多少 —— 照游戏 `max_item_number`（script00:14440）。"""
+        n = _deref(node)
+        if getattr(n, "cls", "") != "RPG::Item":
+            return 1                # 武器/防具：游戏那边也是 1（不叠）
+        return MAX_ITEM_BY_ID.get(get_int(ivar(n, "@id"), -1), MAX_ITEM)
+
+    def _tmpl_note(self, item_id):
+        """同 id 的 Data 模板备注（物件自己没带 `@note` 时用它兜底）。
+
+        `[single]` / `[superposition]` 这两个标记就写在备注里，
+        游戏 `single?` / `superposition?`（script00:42995）读的是 `$data_items[id].note`。
+        """
+        m = getattr(self, "_note_cache", None)
+        if m is None:
+            m = {}
+            try:
+                import datatables
+                _root, items = datatables.load("Items")
+                for i, n in items:
+                    m[i] = _as_str(ivar(n, "@note")) or ""
+            except Exception:
+                m = {}
+            self._note_cache = m
+        return m.get(item_id, "")
+
+    def stack_key(self, node):
+        """可堆叠「同款」的归一 key；不可堆叠返回 None（照游戏 `get_slot`，14896）。
+
+        * 武器 / 防具、带 `[single]` 的 ⇒ 不可堆（游戏那边也是 1 件一格）
+        * 带 `[superposition]` 的（按内容堆叠）⇒ **本轮不合并**：游戏合并这类
+          还要把内容里的 `count` 累加（14701），工具不猜那份结构，宁可不动
+        * 其余普通道具 ⇒ 同 id 即可（同 id 的 price 必然相同，游戏正是这么判的）
+        """
+        n = _deref(node)
+        if getattr(n, "cls", "") != "RPG::Item":
+            return None
+        iid = get_int(ivar(n, "@id"), -1)
+        note = (_as_str(ivar(n, "@note")) or "") or self._tmpl_note(iid)
+        if "[single]" in note or "[superposition]" in note:
+            return None
+        return (iid,)
+
+    def arrange(self, kind="Items", page=None, compact=True, merge=True):
+        """整理：**紧凑排列**（消掉中间空格）+ **同类合并**（叠到每格上限）。
+
+        只做这两件，**不发明排序** —— 游戏自带的「整理」（`arrange`，14704）是按
+        `$game_system.config[:item_sort]` 那套规则排的，工具不去猜它。
+        返回 `(紧凑挪了几格, 合并了几格)`。
+        """
+        h = self.container(kind)
+        pages = [page] if page is not None else range(self.page_count(kind))
+        lo, hi = min(pages) * PACK_PAGE_SIZE, (max(pages) + 1) * PACK_PAGE_SIZE
+        merged = 0
+        if merge:
+            heads = []                  # [(key, (槽, arr))]，第一格当"主格"
+            for s, _p, _i, _id, _nm, _c in self.bag(kind):
+                if not (lo <= s < hi):
+                    continue
+                arr = _deref(self._slot_node_of(h, s))
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    continue
+                key = self.stack_key(_deref(arr.items[0]))
+                cnt = get_int(arr.items[1]) if len(arr.items) > 1 else 1
+                hit = None
+                if key is not None:
+                    for k2, pair in heads:
+                        if k2 == key:
+                            hit = pair
+                            break
+                if hit is None:
+                    heads.append((key, (s, arr)))
+                    continue
+                _s2, arr2 = hit
+                limit = self.stack_limit(_deref(arr2.items[0]))
+                cur = get_int(arr2.items[1]) if len(arr2.items) > 1 else 1
+                take = max(0, min(int(limit) - cur, cnt))
+                if take <= 0:           # 主格已满 ⇒ 这一格自己当新的主格
+                    heads.append((key, (s, arr)))
+                    continue
+                self.doc.set_value(_deref(arr2.items[1]), cur + take)
+                left = cnt - take
+                if left > 0:
+                    self.doc.set_value(_deref(arr.items[1]), left)
+                    heads.append((key, (s, arr)))
+                else:
+                    self._put_slot(h, s, nil_node())
+                merged += 1
+        moved = 0
+        if compact:
+            alive = [s for s, _p, _i, _id, _nm, _c in self.bag(kind)
+                     if lo <= s < hi]
+            cap = hi - lo
+            if len(alive) > cap:
+                raise ValueError("这一段只有 %d 格，装不下 %d 件"
+                                 % (cap, len(alive)))
+            for tgt, s in zip(range(lo, hi), alive):
+                if tgt != s:
+                    self._put_slot(h, tgt, self._slot_node_of(h, s))
+                    self._put_slot(h, s, nil_node())
+                    moved += 1
+        if moved or merged:
+            self.doc.mark_structural()
+        return moved, merged
 
     def make_item(self, kind, item_id, kid=None, like=None):
         """造一个物品对象。
@@ -831,7 +1168,7 @@ class GameEditor(object):
             node = clone_node(like)
             self._fix_payload(node, kind, item_id, kid)
             return node
-        _root, items = datatables.load(kind)
+        _root, items = datatables.load(self._db_of(kind))
         tpl = None
         for i, n in items:
             if i == item_id:
@@ -869,14 +1206,26 @@ class GameEditor(object):
         return t, (d if inner is None else inner)
 
     def item_needs_payload(self, kind, item_id):
-        """这件东西是不是“游戏运行时才生成内容”（孵化蛋、各类礼包…）。"""
+        """这件东西是不是“游戏运行时才生成内容”（孵化蛋、各类礼包…）。
+
+        ⚠ `kind` 既可能是**容器键**（`"pack"`/`"warehouse"`，界面「位置」下拉
+        那条路：`set_payload` → `_fix_payload`），也可能是**表键**
+        （`"Items"`/`"Weapons"`/`"Armors"`，「重抽管理」窗口那条路）——
+        所以取名字表**必须过 `_db_of`**。2026-10-08 漏了这一步：传进来
+        `"pack"` 时 `name_map` 查空 ⇒ `nm=""`、`need=False`，于是
+        `itemattr.build("", 110, over={"id": 21})` 拿不到家族、按 id 区间
+        瞎抽了一份（测试里 `bag_reroll` 指定 21 却写出了沙狸 320）。
+        """
         import datatables
-        nm = datatables.name_map(kind).get(item_id, "")
+        nm = datatables.name_map(self._db_of(kind)).get(item_id, "")
         return itemattr.needs_payload(nm, item_id), nm
 
     def payload_template(self, kind, item_id):
-        """从存档里任意一件**有内容**的同款物品上把 `@attr` 整份抄下来。"""
-        for key, _iv, _cn, _db in KINDS:
+        """从存档里任意一件**有内容**的同款物品上把 `@attr` 整份抄下来。
+
+        ⚠ 背包和仓库都要翻 —— 同款东西可能只躺在仓库里（2026-10-08 加仓库后）。
+        """
+        for key in ("Items", "warehouse"):
             try:
                 h = self.container(key)
             except KeyError:
@@ -1263,17 +1612,24 @@ class GameEditor(object):
         return _deref(arr.items[0])
 
     def find_like(self, kind, item_id):
-        """在**同一个容器**里找一件同类的现成物件（用来克隆运行时内容）。"""
-        h = self.container(kind)
-        for _k, v in h.pairs:
-            arr = _deref(v)
-            if not isinstance(arr, M.ArrayNode) or not arr.items:
+        """找一件同类的现成物件（克隆它的运行时内容用）。
+
+        ⚠ 背包和仓库都翻 —— 同款可能只躺在仓库里。
+        """
+        for key in ("Items", "warehouse"):
+            try:
+                h = self.container(key)
+            except KeyError:
                 continue
-            it = _deref(arr.items[0])
-            if it is None:
-                continue
-            if get_int(ivar(it, "@id"), -1) == int(item_id):
-                return it
+            for _k, v in h.pairs:
+                arr = _deref(v)
+                if not isinstance(arr, M.ArrayNode) or not arr.items:
+                    continue
+                it = _deref(arr.items[0])
+                if it is None:
+                    continue
+                if get_int(ivar(it, "@id"), -1) == int(item_id):
+                    return it
         return None
 
     def _extra_ivars(self, kind):

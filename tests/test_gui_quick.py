@@ -60,6 +60,31 @@ def tip_text(app):
     return ""
 
 
+def page_of(slot):
+    """槽号 → 界面「页」下拉的值。
+
+    ⚠ 2026-10-08：页从 Spinbox（0 起的整数）改成下拉（**1 起**的字符串，
+    见 `App._bag_page_no`）。测试里一律走这个换算，别自己写 `slot // 20`。
+    """
+    return str(slot // 20 + 1)
+
+
+class Ev(object):
+    """假事件：拖动回调只看 x/y（和 x_root/y_root 给右键菜单）。"""
+
+    def __init__(self, x, y, xr=0, yr=0):
+        self.x, self.y = x, y
+        self.x_root, self.y_root = xr, yr
+
+
+def row_mid(app, tv, iid):
+    """列表里某一行的**可见中点 y**；行不可见（列表太短）返回 None。"""
+    bb = tv.bbox(iid)
+    if not bb:
+        return None
+    return bb[1] + bb[3] // 2
+
+
 class FakeDialog(object):
     """顶掉 EditDialog：不弹模态、不进 mainloop，直接把"用户输入"摆在 result 上。
 
@@ -626,8 +651,8 @@ def main():
         say("往空格加一件物品…")
         free = app.g.empty_slots("Items")[0]
         # 空格可能在别的翻页上：先切到那一页，列里才有这个格子
-        if free // 20 != app.var_bag_page.get():
-            app.var_bag_page.set(free // 20)
+        if page_of(free) != app.var_bag_page.get():
+            app.var_bag_page.set(page_of(free))
             app.fill_party()
             root.update()
         app.var_bag_id.set("1")
@@ -643,8 +668,8 @@ def main():
         root.update()
         check("界面清空格子生效",
               not [r for r in app.g.bag("Items") if r[0] == free])
-        if app.var_bag_page.get() != 0:      # 切回第 1 页，后面的用例按第 1 页写的
-            app.var_bag_page.set(0)
+        if app.var_bag_page.get() != "1":    # 切回第 1 页，后面的用例按第 1 页写的
+            app.var_bag_page.set("1")
             app.fill_party()
             root.update()
 
@@ -684,8 +709,8 @@ def main():
         #   而 `tv_pack` 只有当前页那 20 格。第 1 页装满时第一个空格会落到第 2 页，
         #   不切页就 `selection_set("s28")` → TclError: Item s28 not found
         #   （2026-09-20 真档第 1 页刚好 20/20 满，暴露出这处漏切页）。
-        if free2 // 20 != app.var_bag_page.get():
-            app.var_bag_page.set(free2 // 20)
+        if page_of(free2) != app.var_bag_page.get():
+            app.var_bag_page.set(page_of(free2))
             app.fill_party()
             root.update()
         tid = int(app.tv_tpl.item(app.tv_tpl.get_children()[0], "values")[0])
@@ -706,8 +731,8 @@ def main():
         # ⚠ free2 可能落在别的翻页上（上面为它切过去了）→ 切回第 1 页：
         #   下面的「批量改本页」按第 1 页写（`set_all_counts(..., 0)`），
         #   不切回来的话改的是没显示的那一页，断言必然失败。
-        if app.var_bag_page.get() != 0:
-            app.var_bag_page.set(0)
+        if app.var_bag_page.get() != "1":
+            app.var_bag_page.set("1")
             app.fill_party()
             root.update()
         n_all = app.g.set_all_counts("Items", 9, 0)
@@ -727,6 +752,114 @@ def main():
         check("修完计数校验仍对齐",
               all(r[2] == r[3] for r in app.g.security_rows()),
               "%r" % [r for r in app.g.security_rows() if r[2] != r[3]][:2])
+
+        # ------------- 2026-10-08 川：物品页改版（位置/页/筛选 + 右键 + 拖动）
+        say("物品页：页签 / 三只下拉 / 右键 / 拖动…")
+        _tabs = [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]
+        check("页签已改名「物品」（不再是「背包 / 物品」）",
+              "物品" in _tabs and "背包 / 物品" not in _tabs, _tabs)
+        check("顶栏有「位置 / 页 / 筛选」三只下拉",
+              all(hasattr(app, n)
+                  for n in ("cb_bag_src", "cb_bag_page", "cb_bag_only")))
+        check("位置下拉 = 背包 / 仓库",
+              list(app.cb_bag_src["values"]) == ["背包", "仓库"],
+              list(app.cb_bag_src["values"]))
+        check("初始 位置=背包 / 页=1 / 筛选=全部",
+              app._bag_src() == "pack" and app._bag_page_no() == 0
+              and app._bag_only() == "all",
+              "%s / %s / %d" % (app._bag_src(), app._bag_only(),
+                                app._bag_page_no()))
+        app.var_bag_src.set("仓库")
+        app.bag_src_changed()
+        root.update()
+        _wh = app.g.bag("warehouse")
+        _listed = sorted(int(app.tv_pack.item(r, "values")[0])
+                         for r in app.tv_pack.get_children()
+                         if app.tv_pack.item(r, "values")[2] != "（空）")
+        check("切到仓库：列出来的槽号就是仓库那些（不再一切就空/串 0 对）",
+              _listed == sorted(s for s, _p, _i, _a, _b, _c in _wh),
+              "仓库 %d 件 / 列了 %d 格" % (len(_wh), len(_listed)))
+        check("「页」下拉跟着位置换（仓库已开页数 vs 背包 4 页）",
+              len(app.cb_bag_page["values"]) == app.g.page_count("warehouse")
+              and len(app.cb_bag_page["values"]) != app.g.page_count("pack"),
+              "%r 页" % (len(app.cb_bag_page["values"]),))
+        app.var_bag_src.set("背包")
+        app.bag_src_changed()
+        root.update()
+        app.var_bag_only.set("道具")
+        app.fill_party()
+        root.update()
+        _only = [app.tv_pack.item(r, "values")
+                 for r in app.tv_pack.get_children()]
+        check("筛选「道具」：只列道具、不列空格",
+              _only and all(r[2] != "（空）" for r in _only)
+              and len(_only) == len(app.g.bag("pack", 0, only="item")),
+              "%d 行 / 该页道具 %d 件"
+              % (len(_only), len(app.g.bag("pack", 0, only="item"))))
+        app.var_bag_only.set("全部")
+        app.fill_party()
+        root.update()
+        check("筛选切回「全部」：空格重新列出来（20 行）",
+              len(app.tv_pack.get_children()) == 20,
+              "%d 行" % len(app.tv_pack.get_children()))
+        check("物品列表绑了右键菜单 + 拖动三个事件",
+              bool(app.tv_pack.bind("<Button-3>"))
+              and bool(app.tv_pack.bind("<ButtonPress-1>"))
+              and bool(app.tv_pack.bind("<B1-Motion>"))
+              and bool(app.tv_pack.bind("<ButtonRelease-1>")),
+              [bool(app.tv_pack.bind(s)) for s in
+               ("<Button-3>", "<ButtonPress-1>", "<B1-Motion>",
+                "<ButtonRelease-1>")])
+        _occ = [r for r in app.tv_pack.get_children()
+                if app.tv_pack.item(r, "values")[2] != "（空）"]
+        if len(_occ) >= 2:
+            _a, _b = _occ[0], _occ[1]
+            _sa = int(app.tv_pack.item(_a, "values")[0])
+            _sb = int(app.tv_pack.item(_b, "values")[0])
+            _map = dict((r[0], r[3]) for r in app.g.bag("pack", 0))
+            # ⚠ 行坐标要靠 Tk 布局算：withdraw 状态下 Tk 不做布局、而且**没选中的
+            #   页签根本不映射**（ttk 会把非当前页 unmount）⇒ `bbox()` 全空。
+            #   临时选中「物品」页 + 映射到屏幕外量一次。
+            _g0 = root.geometry()
+            _tab0 = app.nb.index(app.nb.select())
+            try:
+                app.nb.select(app.tab_party)
+                root.geometry("1240x760+3000+3000")
+                root.deiconify()
+                root.update()
+                _ya = row_mid(app, app.tv_pack, _a)
+                _yb = row_mid(app, app.tv_pack, _b)
+                if _ya is None or _yb is None:
+                    say("  [--] 那两行还不可见（列表太短），跳过拖动用例")
+                else:
+                    app.tv_pack.selection_set(_a)
+                    app._pack_drag_start(Ev(6, _ya))
+                    app._pack_drag_motion(Ev(6, _yb))
+                    check("拖动时状态行报目标槽号",
+                          str(_sb) in app.var_status.get(), app.var_status.get())
+                    app._pack_drag_drop(Ev(6, _yb))
+                    root.update()
+                    _now = dict((r[0], r[3]) for r in app.g.bag("pack", 0))
+                    check("拖动＝拖到哪格就搬到哪格（那一格有货就对调）",
+                          _now.get(_sa) == _map[_sb]
+                          and _now.get(_sb) == _map[_sa],
+                          "槽 %d ↔ %d" % (_sa, _sb))
+                    check("拖完选中回到搬过去的格子",
+                          app.tv_pack.selection() in (("s%d" % _sa,),
+                                                      ("s%d" % _sb,)),
+                          app.tv_pack.selection())
+                    app._pack_drag_drop(Ev(6, _yb))     # 没按下就松手：不该动
+                    root.update()
+                    check("没按下就松手不会乱动",
+                          dict((r[0], r[3]) for r in app.g.bag("pack", 0)) == _now)
+            finally:
+                try:
+                    app.nb.select(_tab0)
+                except Exception:
+                    pass
+                root.geometry(_g0)
+                root.withdraw()
+                root.update()
 
         # ---------------- v0.5：机器码
         say("读机器码…")
@@ -788,7 +921,7 @@ def main():
             egg_slot = app.g.empty_slots("Items")[0]
             app.g.add_item("Items", egg_slot, 110, 1, clone_like=False)
             app.mark_dirty()
-        app.var_bag_page.set(egg_slot // 20)
+        app.var_bag_page.set(page_of(egg_slot))
         app.fill_party()
         root.update()
         app.tv_pack.selection_set("s%d" % egg_slot)     # 刷完再选（刷新会清选中）
@@ -812,7 +945,7 @@ def main():
                if s != egg_slot][0]
         app.g.add_item("Items", _yx, 104, 1, clone_like=False)
         app.mark_dirty()
-        app.var_bag_page.set(_yx // 20)
+        app.var_bag_page.set(page_of(_yx))
         app.fill_party()
         root.update()
         app.tv_pack.selection_set("s%d" % _yx)
@@ -855,7 +988,7 @@ def main():
                if s not in (egg_slot, _yx)][0]
         app.g.add_item("Items", _rd, 148, 1, clone_like=False)
         app.mark_dirty()
-        app.var_bag_page.set(_rd // 20)
+        app.var_bag_page.set(page_of(_rd))
         app.fill_party()
         root.update()
         app.tv_pack.selection_set("s%d" % _rd)
@@ -1518,6 +1651,76 @@ def main():
         check("多选删的是选中的那两只（中间那只没被误删）",
               any(x is _keep for _i, x in app.baby_rows),
               "剩 %d 只" % len(app.baby_rows))
+
+        # ---- 排序（2026-10-08 川：拖动排序 / 右键移到最前·最后）--------------
+        # 「召唤兽是有序数组」⇒ 拖动＝**插到那一行**（跟背包格的「对调」不同）。
+        say("召唤兽：右键 / 拖动排序…")
+        check("召唤兽列表绑了右键菜单 + 拖动三个事件",
+              bool(app.tv_babies.bind("<Button-3>"))
+              and bool(app.tv_babies.bind("<ButtonPress-1>"))
+              and bool(app.tv_babies.bind("<B1-Motion>"))
+              and bool(app.tv_babies.bind("<ButtonRelease-1>")),
+              [bool(app.tv_babies.bind(s)) for s in
+               ("<Button-3>", "<ButtonPress-1>", "<B1-Motion>",
+                "<ButtonRelease-1>")])
+        _need = 3 - len(app.baby_rows)
+        if _need > 0:
+            _cid2 = save.M.value_of(save._deref(
+                save.ivar(app.baby_rows[0][1], "@actor_id")))
+            for _ in range(_need):
+                app.babies_ed().add(a0, _cid2)
+        app.var_baby_kw.set("")           # 别让搜索框把行滤掉（下面按行号选）
+        app.fill_baby_list()
+        root.update()
+        check("有 ≥3 只召唤兽（够测整组 / 拖动）", len(app.baby_rows) >= 3,
+              len(app.baby_rows))
+        # ⚠ 顺序只能用**节点身份**比：`baby_rows` 的下标永远是 0,1,2…（位置），
+        #   拿下标比会恒等（第一版就这么写的，两条断言假 NG）。
+        _n0 = [b for _k, b in app.baby_rows]
+        _pick = _n0[1]
+        app.tv_babies.selection_set("bb%d" % app.baby_rows[1][0])
+        app.baby_reorder("back")          # 右键菜单「移到最后」调的就是它
+        root.update()
+        _n1 = [b for _k, b in app.baby_rows]
+        check("「移到最后」把选中的挪到末行",
+              _n1[-1] is _pick and _n1[0] is _n0[0],
+              "%d 只，末行是选中的吗＝%s" % (len(_n1), _n1[-1] is _pick))
+        check("挪完选中跟着那一行（不跳回第一行）",
+              app.tv_babies.selection() == ("bb%d" % app.baby_rows[-1][0],),
+              app.tv_babies.selection())
+        app.baby_reorder("front")
+        root.update()
+        _n2 = [b for _k, b in app.baby_rows]
+        check("「移到最前」把选中的挪到第 1 行", _n2[0] is _pick,
+              "%d 只，第 1 行是选中的吗＝%s" % (len(_n2), _n2[0] is _pick))
+        _kids = app.tv_babies.get_children()
+        _ya = row_mid(app, app.tv_babies, _kids[0])
+        _yc = row_mid(app, app.tv_babies, _kids[2])
+        if _ya is None or _yc is None:
+            say("  [--] 那两行当前不可见（列表太短），跳过拖动用例")
+        else:
+            _b0 = app.baby_rows[0][1]
+            app.tv_babies.selection_set(_kids[0])
+            app._baby_drag_start(Ev(6, _ya))
+            app._baby_drag_motion(Ev(6, _yc))
+            check("拖动时状态行报目标行号", "第 3 行" in app.var_status.get(),
+                  app.var_status.get())
+            app._baby_drag_drop(Ev(6, _yc))
+            root.update()
+            check("拖到第 3 行 = 插到第 3 行（那只挪过去了）",
+                  app.baby_rows[2][1] is _b0,
+                  "、".join(app.g.baby_name(b)
+                            for _i, b in app.baby_rows[:3]))
+            check("拖完选中还在那只身上",
+                  app.tv_babies.selection() == ("bb%d" % app.baby_rows[2][0],),
+                  app.tv_babies.selection())
+            _keep_n = [b for _k, b in app.baby_rows]
+            app._baby_drag_drop(Ev(6, _yc))     # 没按下就松手：不该动
+            root.update()
+            check("没按下就松手不会乱动",
+                  all(x is y for x, y in
+                      zip([b for _k, b in app.baby_rows], _keep_n)))
+
         app.baby_add_dialog()          # 打开「新增召唤兽」窗口（不点确定，只建得起来）
         root.update()
         opened = [w for w in root.winfo_children()

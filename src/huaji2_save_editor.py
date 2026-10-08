@@ -3349,31 +3349,59 @@ class App(object):
         tk, ttk = self.tk, self.ttk
         f = ttk.Frame(self.nb, padding=8)
         self.tab_party = f
-        self.nb.add(f, text="背包 / 物品")
+        self.nb.add(f, text="物品")
 
         self.var_party = tk.StringVar()
         ttk.Label(f, textvariable=self.var_party, font=("Microsoft YaHei UI", 10)
                   ).pack(anchor="w", pady=(0, 6))
 
+        # ---- 位置 / 页 / 筛选：三只下拉（2026-10-08 川：「序号改成下拉切换的方式」）
+        # ⚠ 以前是「背包1~4」+「种类：道具/武器/防具」两排单选按钮，而**种类**
+        #   切的是 `@weapons`/`@armors` 两个**遗留空容器**（真档 0 对，游戏侧
+        #   `def weapons; @items.sort.select{is_a?(RPG::Weapon)}` 是从 @items 里筛的）
+        #   ⇒ 一点就空。现在「筛选」＝对同一个 `@items` 做**类过滤**。
         bar = ttk.Frame(f)
         bar.pack(fill="x")
-        ttk.Label(bar, text="背包页：").pack(side="left")
-        self.var_bag_page = tk.IntVar(value=0)
-        for p in range(game.MAX_PACK_PAGE):
-            ttk.Radiobutton(bar, text="背包%d" % (p + 1), value=p,
-                            variable=self.var_bag_page,
-                            command=self.fill_party).pack(side="left", padx=2)
-        ttk.Label(bar, text="　种类：").pack(side="left")
-        self.var_bag_kind = tk.StringVar(value="Items")
-        for key, _iv, cn, _db in game.KINDS:
-            ttk.Radiobutton(bar, text=cn, value=key,
-                            variable=self.var_bag_kind,
-                            command=self.fill_party).pack(side="left", padx=2)
-        fit_btn(bar, text="刷新", command=self.fill_party).pack(side="right")
+        ttk.Label(bar, text="位置：").pack(side="left")
+        self.var_bag_src = tk.StringVar(value=game.SRCS[0][1])
+        self.cb_bag_src = ttk.Combobox(bar, textvariable=self.var_bag_src,
+                                       state="readonly", width=6,
+                                       values=[cn for _k, cn in game.SRCS])
+        self.cb_bag_src.pack(side="left", padx=(0, 8))
+        self.cb_bag_src.bind("<<ComboboxSelected>>",
+                             lambda e: self.bag_src_changed())
+        self._bind_tip(self.cb_bag_src,
+                       "背包（4 页 × 20 格）⇄ 仓库（存档里已开的页数，最多 20）。\n"
+                       "两边形状完全一样，可以互相搬：右键 →「移动到 / 复制到」。")
+        ttk.Label(bar, text="页：").pack(side="left")
+        self.var_bag_page = tk.StringVar(value="1")
+        self.cb_bag_page = ttk.Combobox(bar, textvariable=self.var_bag_page,
+                                        state="readonly", width=5,
+                                        values=["1"])
+        self.cb_bag_page.pack(side="left", padx=(0, 8))
+        self.cb_bag_page.bind("<<ComboboxSelected>>",
+                              lambda e: self.fill_party())
+        ttk.Label(bar, text="筛选：").pack(side="left")
+        self.var_bag_only = tk.StringVar(value=game.CLASS_ONLY[0][1])
+        self.cb_bag_only = ttk.Combobox(bar, textvariable=self.var_bag_only,
+                                        state="readonly", width=6,
+                                        values=[cn for _k, cn in game.CLASS_ONLY])
+        self.cb_bag_only.pack(side="left", padx=(0, 8))
+        self.cb_bag_only.bind("<<ComboboxSelected>>",
+                              lambda e: self.fill_party())
+        self._bind_tip(self.cb_bag_only,
+                       "背包/仓库是**一个**容器，道具·武器·防具混在一起 ——\n"
+                       "这里按物件自己的类过滤，右边模板表也跟着换。")
+        fit_btn(bar, text="整理…", command=self.bag_arrange_dialog).pack(
+            side="right")
+        b_ref = fit_btn(bar, text="刷新", command=self.fill_party)
+        b_ref.pack(side="right", padx=(0, 6))
 
         ttk.Label(f, text="每页 20 格（槽号 = 页*20 + 格）；左键选格子"
                           "（Ctrl 点选 / Shift 连选＝一次改一批），"
-                          "右边模板里双击物品＝写进去"
+                          "右边模板里双击物品＝写进去。\n"
+                          "右键＝移动到 / 复制到 / 整理本页；"
+                          "按住拖动一行＝搬到那一格（目标有东西就交换）"
                   ).pack(anchor="w", pady=(6, 2))
 
         body = ttk.Panedwindow(f, orient="horizontal")
@@ -3413,6 +3441,11 @@ class App(object):
         self.tv_pack.bind("<Double-1>", lambda e: self.bag_edit())
         self.tv_pack.bind("<Motion>", self._bag_tip_motion, add="")
         self.tv_pack.bind("<Leave>", self._tip_hide, add="")
+        # 右键菜单（移动到 / 复制到 / 整理本页）+ 拖动换格（2026-10-08 川）
+        self.tv_pack.bind("<Button-3>", self.bag_menu)
+        self.tv_pack.bind("<ButtonPress-1>", self._pack_drag_start, add="+")
+        self.tv_pack.bind("<B1-Motion>", self._pack_drag_motion, add="+")
+        self.tv_pack.bind("<ButtonRelease-1>", self._pack_drag_drop, add="+")
         body.add(left, weight=3)
 
         # ---- 右：物品模板（从 Data 表读，画迹1 也有这一栏）
@@ -3601,6 +3634,11 @@ class App(object):
         self.tv_babies.pack(side="left", fill="x", expand=True)
         hs.pack(fill="x")
         self.tv_babies.bind("<<TreeviewSelect>>", lambda e: self.on_baby_select())
+        # 拖动排序（@babys 是有序数组）+ 右键「移到最前 / 最后」（2026-10-08 川）
+        self.tv_babies.bind("<Button-3>", self.baby_menu)
+        self.tv_babies.bind("<ButtonPress-1>", self._baby_drag_start, add="+")
+        self.tv_babies.bind("<B1-Motion>", self._baby_drag_motion, add="+")
+        self.tv_babies.bind("<ButtonRelease-1>", self._baby_drag_drop, add="+")
 
         edit = ttk.Frame(f)
         edit.pack(fill="x", pady=(6, 0))
@@ -3843,7 +3881,8 @@ class App(object):
         self.var_baby_note.set(
             ("匹配 %d / 共 %d 只" % (n_hit, len(self.baby_rows)) if kw
              else "共 %d 只" % len(self.baby_rows))
-            + "（★ = 当前出战）；「新增召唤兽」可加任意一种，含正常玩法"
+            + "（★ = 当前出战）；右键＝移到最前/最后；按住拖动一行＝插到那一行"
+              "（顺序就是游戏里宠物栏的顺序）；「新增召唤兽」可加任意一种，含正常玩法"
               "拿不到的小孩（小精灵～小丫丫，属「神兽资质3」池，"
               "只有「珍藏神兽蛋」能开出 179~186）。")
         kids = self.tv_babies.get_children()
@@ -4477,6 +4516,122 @@ class App(object):
         self.refresh_baby_list_keep(b)
         self.set_status("已设为出战：%s" % self.g.baby_name(b))
 
+    # ---- 右键菜单 / 拖动排序（2026-10-08 川）--------------------------------
+    def baby_menu(self, event):
+        """召唤兽列表右键：移到最前 / 移到最后 / 设为出战 / 改名 / 放生。"""
+        if self.g is None:
+            return
+        row = self.tv_babies.identify_row(event.y)
+        if row and row not in self.tv_babies.selection():
+            self.tv_babies.selection_set(row)
+            self.on_baby_select()
+        rows = self._baby_sel()
+        if not rows:
+            return
+        tag = "（%d 只）" % len(rows) if len(rows) > 1 else ""
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="移到最前" + tag,
+                      command=lambda: self.baby_reorder("front"))
+        m.add_command(label="移到最后" + tag,
+                      command=lambda: self.baby_reorder("back"))
+        m.add_separator()
+        m.add_command(label="设为出战（只认第一只）", command=self.baby_set_active)
+        m.add_command(label="改名…（只认第一只）", command=self.baby_rename)
+        m.add_separator()
+        m.add_command(label="放生（删除）" + (tag or "…"), command=self.baby_delete)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _baby_sel_idx(self, idx):
+        """按**下标**恢复召唤兽列表选中（重排/挪位之后用）。
+
+        ⚠ 不能走 `refresh_baby_list_keep(节点)`：那个是拿重排**前**的
+          `self.baby_rows` 反查下标，重排后下标已经变了，会选错行。
+        """
+        keep = [i for i in ("bb%d" % k for k in idx) if self.tv_babies.exists(i)]
+        if not keep:
+            return
+        try:
+            self.tv_babies.see(keep[0])
+            self.tv_babies.selection_set(keep)
+            self.on_baby_select()
+        except Exception:                               # noqa: BLE001
+            pass
+
+    def baby_reorder(self, where, dst=None):
+        """挪位：`where` = `"front"` / `"back"` / `"to"`（配合 `dst` 行号，0 起）。"""
+        rows = self._baby_sel()
+        if not rows:
+            messagebox.showinfo("提示", "先在列表里选一只召唤兽。",
+                                parent=self.root)
+            return
+        actor = self._baby_actor()
+        bd = self.babies_ed()
+        if actor is None or bd is None:
+            return
+        srcs = sorted(i for i, _b in rows)
+        names = "、".join(self.g.baby_name(b) for _i, b in rows[:4])
+        if len(rows) > 4:
+            names += "…"
+        try:
+            if where == "front":
+                new_idx = bd.to_front(actor, srcs)
+            elif where == "back":
+                new_idx = bd.to_back(actor, srcs)
+            else:
+                new_idx = bd.reorder(actor, srcs, dst)
+        except Exception as e:                          # noqa: BLE001
+            messagebox.showerror("挪不动", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_baby_list()
+        self._baby_sel_idx(new_idx)
+        act = {"front": "已移到最前：", "back": "已移到最后："}.get(
+            where, "已挪到第 %d 行：" % (dst + 1) if dst is not None else "已重排：")
+        self.set_status(act + names)
+
+    # ---- 拖动：召唤兽列表（插到松手那一行）
+    def _baby_drag_start(self, event):
+        self._bdrag_row = self.tv_babies.identify_row(event.y) or None
+        self._bdrag_xy = (event.x, event.y)
+        self._bdrag_armed = False
+
+    def _baby_drag_motion(self, event):
+        if not getattr(self, "_bdrag_row", None):
+            return
+        x0, y0 = getattr(self, "_bdrag_xy", (0, 0))
+        if not getattr(self, "_bdrag_armed", False):
+            if abs(event.y - y0) < 6 and abs(event.x - x0) < 6:
+                return
+            self._bdrag_armed = True
+        row = self.tv_babies.identify_row(event.y)
+        if not row or self.g is None:
+            return
+        try:
+            i = int(row[2:])
+        except ValueError:
+            return
+        self.set_status("松手就把这只挪到第 %d 行（插到那一行，其余顺移）"
+                        % (i + 1))
+
+    def _baby_drag_drop(self, event):
+        row0 = getattr(self, "_bdrag_row", None)
+        armed = getattr(self, "_bdrag_armed", False)
+        self._bdrag_row = None
+        self._bdrag_armed = False
+        if not armed or self.g is None:
+            return
+        row = self.tv_babies.identify_row(event.y)
+        if not row or row == row0:
+            return
+        try:
+            dst = int(row[2:])
+        except ValueError:
+            return
+        self.baby_reorder("to", dst=dst)
+
     def baby_rename(self):
         """改显示名（@attr.@name）。
 
@@ -4969,7 +5124,7 @@ class App(object):
             return
         desc = ""
         try:
-            node = self.g._item_node(self._bag_kind(), slot)
+            node = self.g._item_node(self._bag_src(), slot)
             if node is not None:
                 desc = self.g.item_description(node)
         except Exception:
@@ -6949,19 +7104,23 @@ class App(object):
         self.fill_party()
 
     def fill_party(self):
-        """刷背包页（当前页 20 格 + 物品计数校验状态）。"""
+        """刷物品页（当前位置/页/筛选 + 物品计数校验状态）。"""
         self._tip_hide()
+        self.bag_refresh_pages()
+        keep = self._bag_slots(quiet=True)
         self.tv_pack.delete(*self.tv_pack.get_children())
         if not self.sv or self.g is None:
             return
-        page = self.var_bag_page.get()
-        kind = self.var_bag_kind.get()
-        self.var_party.set("金钱 = %s　步数 = %s　出战成员 = %s　"
-                           "仓库页号 = %s"
-                           % (self.sv.gold(), self.sv.steps(),
-                              self.sv.party_member_ids(),
-                              self.g.warehouse_page()))
-        rows = dict((r[0], r) for r in self.g.bag(kind, page))
+        src = self._bag_src()
+        page = self._bag_page_no()
+        only = self._bag_only()
+        kind = self._bag_kind()
+        self.var_party.set(
+            "%s 第 %d / %d 页　金钱 = %s　步数 = %s　出战成员 = %s　仓库已开 %s 页"
+            % ("背包" if src == "pack" else "仓库", page + 1,
+               self.g.page_count(src), self.sv.gold(), self.sv.steps(),
+               self.sv.party_member_ids(), self.g.warehouse_page()))
+        rows = dict((r[0], r) for r in self.g.bag(src, page, only=only))
         kw = (self.var_pack_kw.get() if hasattr(self, "var_pack_kw")
               else "").strip()
         n_hit = 0
@@ -6971,7 +7130,7 @@ class App(object):
             if r:
                 try:
                     cnt_txt = self.g.payload_summary(
-                        self.g._item_node(kind, slot))
+                        self.g._item_node(src, slot))
                 except Exception:
                     cnt_txt = ""
                 if kw and not self._pack_hit(kw, slot, i, r[3], r[4], cnt_txt):
@@ -6981,12 +7140,15 @@ class App(object):
                                     values=(slot, i, r[3], r[4], r[5], cnt_txt))
             elif not kw:
                 # 搜索时不列空格子：找东西的时候空格子只是噪音。
-                # （⚠ 空关键词仍要列满 20 格 —— 「放进第一个空格子」要看着格子挑。）
+                # （⚠ 空关键词仍要列满 20 格 —— 「放进第一个空格子」要看着格子挑。
+                #   但**筛选**生效时不列空格：那是在"找我这类东西在哪"。）
+                if only != "all":
+                    continue
                 self.tv_pack.insert("", "end", iid="s%d" % slot,
                                     values=(slot, i, "（空）", "", "", ""))
         bad = [r for r in self.g.security_rows() if r[2] != r[3]]
         try:
-            self.bag_bad = self.g.pack_report(kinds=(kind,))
+            self.bag_bad = self.g.pack_report(kinds=(src,))
         except Exception:
             self.bag_bad = []
         note = ("物品计数校验（游戏自己的 $game_system.security）：%d 条记录%s"
@@ -7001,6 +7163,9 @@ class App(object):
                      "「一键修复」处理）" % len(self.bag_bad))
         self.var_bag_note.set(note)
         self.fill_templates()
+        # ⚠ Treeview 重建后按 key 恢复选中（通则）：拖动排序 / 整理 / 搬格之后
+        #   选中不能跳回第一行，否则"整批操作"看起来像只动了一个。
+        self.pack_select(keep)
 
     # ------------------------------------------------ 物品模板（从 Data 表读）
     def fill_templates(self):
@@ -7014,7 +7179,7 @@ class App(object):
         self.tv_tpl.delete(*self.tv_tpl.get_children())
         if not self.sv or self.g is None:
             return
-        kind = self.var_bag_kind.get()
+        kind = self._bag_kind()
         kw = self.var_tpl_kw.get()
         try:
             rows = self.g.templates(kind, keyword=kw, limit=400)
@@ -7114,7 +7279,7 @@ class App(object):
         slot = self._bag_slot(quiet=True)
         if slot is None or not self.g:
             return
-        kind = self._bag_kind()
+        kind = self._bag_src()
         info = None
         for r in self.g.bag(kind):
             if r[0] == slot:
@@ -7142,7 +7307,8 @@ class App(object):
                                 parent=self.root)
             return
         iid = int(sel[0][1:])
-        kind = self._bag_kind()
+        kind = self._bag_kind()          # Data 表键（模板列表 / 告警用）
+        src = self._bag_src()            # 容器键（真的往哪儿写）
         self._warn_payload(kind, iid)
         try:
             n = int(self.var_bag_cnt.get() or "1", 0)
@@ -7156,8 +7322,8 @@ class App(object):
             if not slots:
                 return
         else:
-            page = self.var_bag_page.get()
-            used = set(r[0] for r in self.g.bag(kind, page))
+            page = self._bag_page_no()
+            used = set(r[0] for r in self.g.bag(src, page))
             free = [self.g.slot_key(page, i)
                     for i in range(game.PACK_PAGE_SIZE)
                     if self.g.slot_key(page, i) not in used]
@@ -7170,7 +7336,7 @@ class App(object):
         done, bad = [], []
         for slot in slots:
             try:
-                self.g.set_item(kind, slot, iid, n, kid=kid)
+                self.g.set_item(src, slot, iid, n, kid=kid, db=kind)
                 done.append(slot)
             except Exception as e:
                 bad.append((slot, human(str(e))))
@@ -7201,12 +7367,12 @@ class App(object):
         slots = self._bag_slots()
         if not slots:
             return
-        kind = self._bag_kind()
+        src = self._bag_src()
         kid = self._bag_kid()
         done, bad = [], []
         for slot in slots:
             try:
-                self.g.set_payload(kind, slot, kid=kid, force=True)
+                self.g.set_payload(src, slot, kid=kid, force=True)
                 done.append(slot)
             except Exception as e:
                 bad.append((slot, zh_error(e)))
@@ -7220,7 +7386,7 @@ class App(object):
         self.mark_dirty()
         self.fill_party()
         self.pack_select(done)
-        it = self.g._item_node(kind, done[-1])
+        it = self.g._item_node(src, done[-1])
         msg = ("槽 %s 的内容已重新生成" % "、".join(str(s) for s in done)
                if len(done) > 1 else "槽 %d 的内容已重新生成" % done[0])
         if bad:
@@ -7245,19 +7411,21 @@ class App(object):
 
     def bag_all(self, count=99):
         """把本页已有格子的数量批量设成 count。"""
+        src = self._bag_src()
         slot = self._bag_slot(quiet=True)
         page = (slot // game.PACK_PAGE_SIZE if slot is not None
-                else self.var_bag_page.get())
+                else self._bag_page_no())
         try:
-            n = self.g.set_all_counts(self._bag_kind(), count, page)
+            n = self.g.set_all_counts(src, count, page)
         except Exception as e:
             messagebox.showerror("批量修改失败", human(str(e)), parent=self.root)
             return
         if n:
             self.mark_dirty()
             self.fill_party()
-        self.set_status("背包第 %d 页：已把 %d 个格子的数量改成 %d"
-                        % (page + 1, n, count))
+        self.set_status("%s第 %d 页：已把 %d 个格子的数量改成 %d"
+                        % ("背包" if src == "pack" else "仓库", page + 1, n,
+                           count))
 
     def bag_check(self):
         """背包体检：把不正常的格子（结构坏/id 无效/数量 0/超上限/重复）列出来。"""
@@ -7441,6 +7609,260 @@ class App(object):
         self.machine_log("清空了机器码记录（原来：%s）" % "、".join(ids))
 
     # ------------------------------------------------ 背包操作
+    # ================= 右键菜单 / 移动到·复制到 / 整理 / 拖动（2026-10-08 川）=======
+    def _bag_src_cn(self):
+        return "背包" if self._bag_src() == "pack" else "仓库"
+
+    def bag_menu(self, event):
+        """物品列表右键菜单：移动到 / 复制到 / 整理本页 / 改数量 / 清空。"""
+        if not self.g:
+            return
+        row = self.tv_pack.identify_row(event.y)
+        if row:
+            if row not in self.tv_pack.selection():
+                self.tv_pack.selection_set(row)
+            self.bag_pick()
+        if not self.tv_pack.selection():
+            return
+        n = len(self.tv_pack.selection())
+        tag = "（%d 格）" % n if n > 1 else ""
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="移动到…" + tag, command=self.bag_move_dialog)
+        m.add_command(label="复制到…" + tag,
+                      command=lambda: self.bag_move_dialog(copy=True))
+        m.add_separator()
+        m.add_command(label="整理本页…", command=self.bag_arrange_dialog)
+        m.add_separator()
+        m.add_command(label="改数量…" + tag, command=self.bag_set_count)
+        m.add_command(label="清空" + (tag or "这格"), command=self.bag_clear)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _bag_sel_names(self, slots, limit=3):
+        """选中格子的名字串（对话框里让人确认自己选的是啥）。"""
+        want = set(slots)
+        names = [r[4] for r in self.g.bag(self._bag_src()) if r[0] in want]
+        return "、".join(names[:limit]) + ("…" if len(names) > limit else "")
+
+    def bag_move_dialog(self, copy=False):
+        """「移动到 / 复制到」：选位置 + 页 + 起始格，整批搬（保持相对顺序）。
+
+        * 同容器（背包↔背包自己）＝**对调**：目标格有东西就换过来。
+        * 跨容器（背包 ↔ 仓库）＝从目标格起**找空格放**，放不下整批不动。
+        * 复制＝目标格必须是空的（覆盖会静默丢东西），复制出来的那份
+          连 `@attr` 运行时内容一起带过去。
+        """
+        slots = self._bag_slots()
+        if not slots or not self.g:
+            return
+        src = self._bag_src()
+        src_cn = self._bag_src_cn()
+        page = self._bag_page_no()
+        title = "复制到" if copy else "移动到"
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.transient(self.root)
+        f = ttk.Frame(win, padding=10)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="来源：%s 第 %d 页，共 %d 格 —— %s"
+                  % (src_cn, page + 1, len(slots),
+                     self._bag_sel_names(slots)),
+                  justify="left", wraplength=420).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+
+        ttk.Label(f, text="位置").grid(row=1, column=0, sticky="e", padx=(0, 6))
+        var_src2 = tk.StringVar(value=dict(game.SRCS)[src])
+        cb_src2 = ttk.Combobox(f, textvariable=var_src2, state="readonly",
+                               width=8, values=[cn for _k, cn in game.SRCS])
+        cb_src2.grid(row=1, column=1, sticky="w")
+        ttk.Label(f, text="页").grid(row=1, column=2, sticky="e", padx=(10, 6))
+        var_pg2 = tk.StringVar(value=str(page + 1))
+        cb_pg2 = ttk.Combobox(f, textvariable=var_pg2, state="readonly", width=6)
+        cb_pg2.grid(row=1, column=3, sticky="w")
+        ttk.Label(f, text="起始格").grid(row=2, column=0, sticky="e",
+                                     padx=(0, 6), pady=(6, 0))
+        var_ix2 = tk.StringVar(value="1")
+        cb_ix2 = ttk.Combobox(f, textvariable=var_ix2, state="readonly", width=6,
+                              values=[str(i + 1)
+                                      for i in range(game.PACK_PAGE_SIZE)])
+        cb_ix2.grid(row=2, column=1, sticky="w", pady=(6, 0))
+
+        tip = tk.StringVar(value="")
+        ttk.Label(f, textvariable=tip, foreground="#888", justify="left",
+                  wraplength=420).grid(row=3, column=0, columnspan=4,
+                                       sticky="w", pady=(10, 6))
+
+        def pick_dst():
+            k = next((k for k, cn in game.SRCS if cn == var_src2.get()), "pack")
+            try:
+                np = self.g.page_count(k)
+            except Exception:
+                np = game.MAX_PACK_PAGE
+            vals = [str(i + 1) for i in range(np)]
+            cb_pg2.configure(values=vals)
+            if var_pg2.get() not in vals:
+                var_pg2.set(vals[0])
+            same = (k == src)
+            tip.set("目标格里有东西时：同容器**对调**，跨容器只找空格放（放不下整批不动）。"
+                    if not copy else
+                    "复制只能进空格：目标那几格必须是空的（覆盖会丢东西）。\n"
+                    "复制出来的那份连运行时内容一起带过去，持有数 +1。")
+            return k
+
+        cb_src2.bind("<<ComboboxSelected>>", lambda e: pick_dst())
+        pick_dst()
+
+        row = ttk.Frame(f)
+        row.grid(row=4, column=0, columnspan=4, sticky="e")
+
+        def go():
+            k2 = next((k for k, cn in game.SRCS if cn == var_src2.get()), "pack")
+            try:
+                p2 = max(0, int(var_pg2.get()) - 1)
+                i2 = max(0, min(int(var_ix2.get()) - 1,
+                                game.PACK_PAGE_SIZE - 1))
+            except ValueError:
+                return
+            target = p2 * game.PACK_PAGE_SIZE + i2
+            try:
+                n, used = self.g.move_slots(src, slots, dst=k2, target=target,
+                                            copy=copy)
+            except Exception as e:                      # noqa: BLE001
+                messagebox.showerror(title + "失败", human(str(e)),
+                                     parent=win)
+                return
+            win.destroy()
+            self.mark_dirty()
+            self.fill_party()
+            self.pack_select(used)
+            self.set_status("%s：%d 格 → %s 第 %d 页起（槽号 %s）"
+                            % ("复制" if copy else "移动", n,
+                               dict(game.SRCS)[k2], p2 + 1,
+                               "、".join(str(s) for s in used[:6])))
+
+        fit_btn(row, text="确定", command=go).pack(side="right")
+        fit_btn(row, text="取消", command=win.destroy).pack(side="right",
+                                                        padx=(0, 6))
+        center_win(win, self.root)
+        esc_close(win)
+        cb_src2.focus_set()
+
+    def bag_arrange_dialog(self):
+        """整理对话框：紧凑排列 + 同类合并（只做勾上的事，不发明排序）。"""
+        if not self.g:
+            return
+        src = self._bag_src()
+        win = tk.Toplevel(self.root)
+        win.title("整理")
+        win.transient(self.root)
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="范围").grid(row=0, column=0, sticky="e", padx=(0, 6))
+        scope = ["本页（%s 第 %d 页）" % (self._bag_src_cn(),
+                                     self._bag_page_no() + 1),
+                 "整个背包", "整个仓库"]
+        var_sc = tk.StringVar(value=scope[0])
+        ttk.Combobox(f, textvariable=var_sc, state="readonly", width=18,
+                     values=scope).grid(row=0, column=1, sticky="w")
+        var_cp = tk.BooleanVar(value=True)
+        var_mg = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="紧凑排列（消掉中间的空格）",
+                        variable=var_cp).grid(row=1, column=0, columnspan=2,
+                                              sticky="w", pady=(10, 0))
+        ttk.Checkbutton(f, text="同类合并（同一种叠到每格上限，多数是 99）",
+                        variable=var_mg).grid(row=2, column=0, columnspan=2,
+                                              sticky="w", pady=(4, 0))
+        ttk.Label(f, text="只做勾上的事，不动你的排序习惯。\n"
+                          "游戏自带整理按你自己的 item_sort 规则排，这里不猜那套；\n"
+                          "带 [single]、武器防具、按内容堆叠的那类一律不合并。",
+                  foreground="#888", justify="left").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(10, 8))
+
+        def go():
+            s = var_sc.get()
+            try:
+                if s.startswith("本页"):
+                    mv, mg = self.g.arrange(src, self._bag_page_no(),
+                                            compact=var_cp.get(),
+                                            merge=var_mg.get())
+                elif s == "整个背包":
+                    mv, mg = self.g.arrange("pack", None,
+                                            compact=var_cp.get(),
+                                            merge=var_mg.get())
+                else:
+                    mv, mg = self.g.arrange("warehouse", None,
+                                            compact=var_cp.get(),
+                                            merge=var_mg.get())
+            except Exception as e:                      # noqa: BLE001
+                messagebox.showerror("整理失败", human(str(e)), parent=win)
+                return
+            win.destroy()
+            self.mark_dirty()
+            self.fill_party()
+            self.set_status("整理完成：挪了 %d 格、合并了 %d 格" % (mv, mg))
+
+        row = ttk.Frame(f)
+        row.grid(row=4, column=0, columnspan=2, sticky="e")
+        fit_btn(row, text="整理", command=go).pack(side="right")
+        fit_btn(row, text="取消", command=win.destroy).pack(side="right",
+                                                        padx=(0, 6))
+        center_win(win, self.root)
+        esc_close(win)
+
+    # ---- 拖动：物品列表（换格/对调）
+    def _pack_drag_start(self, event):
+        self._drag_row = self.tv_pack.identify_row(event.y) or None
+        self._drag_xy = (event.x, event.y)
+        self._drag_armed = False
+
+    def _pack_drag_motion(self, event):
+        if not getattr(self, "_drag_row", None):
+            return
+        x0, y0 = getattr(self, "_drag_xy", (0, 0))
+        if not getattr(self, "_drag_armed", False):
+            if abs(event.y - y0) < 6 and abs(event.x - x0) < 6:
+                return
+            self._drag_armed = True
+        row = self.tv_pack.identify_row(event.y)
+        if not row or not self.g:
+            return
+        try:
+            slot = int(row[1:])
+        except ValueError:
+            return
+        self.set_status("松手就把选中的格子搬到这一格（槽号 %d）——"
+                        "那一格有东西就对调" % slot)
+
+    def _pack_drag_drop(self, event):
+        row0 = getattr(self, "_drag_row", None)
+        armed = getattr(self, "_drag_armed", False)
+        self._drag_row = None
+        self._drag_armed = False
+        if not armed or not self.g:
+            return
+        row = self.tv_pack.identify_row(event.y)
+        if not row or row == row0:
+            return
+        slots = self._bag_slots(quiet=True)
+        if not slots:
+            return
+        try:
+            target = int(row[1:])
+        except ValueError:
+            return
+        try:
+            n, used = self.g.move_slots(self._bag_src(), slots, target=target)
+        except Exception as e:                          # noqa: BLE001
+            messagebox.showerror("搬不动", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_party()
+        self.pack_select(used)
+        self.set_status("把 %d 格搬到了槽号 %s（有东西的格子＝对调）"
+                        % (n, "、".join(str(s) for s in used[:6])))
+
     def _bag_sel(self):
         sel = self.tv_pack.selection()
         if not sel:
@@ -7448,16 +7870,65 @@ class App(object):
             return None
         return int(sel[0][1:])
 
+    def _bag_src(self):
+        """「位置」下拉 → 容器键（`"pack"`/`"warehouse"`）。"""
+        cn = self.var_bag_src.get()
+        for k, c in game.SRCS:
+            if c == cn:
+                return k
+        return "pack"
+
+    def _bag_only(self):
+        """「筛选」下拉 → 类过滤键（`"all"`/`"item"`/`"weapon"`/`"armor"`）。"""
+        cn = self.var_bag_only.get()
+        for k, c in game.CLASS_ONLY:
+            if c == cn:
+                return k
+        return "all"
+
+    def _bag_page_no(self):
+        """「页」下拉（1 起）→ 页号（0 起）。"""
+        try:
+            return max(0, int(self.var_bag_page.get()) - 1)
+        except (TypeError, ValueError):
+            return 0
+
     def _bag_kind(self):
-        return self.var_bag_kind.get()
+        """当前「筛选」对应的 **Data 表键**（右边模板表、背包体检用）。
+
+        ⚠ 这是**表键**不是容器键：背包与仓库是同一个 `@items` 容器
+        （道具/武器/防具混装），这里只决定「模板从哪张表取」。
+        """
+        return {"all": "Items", "item": "Items",
+                "weapon": "Weapons", "armor": "Armors"}[self._bag_only()]
+
+    def bag_refresh_pages(self):
+        """按当前位置重填「页」下拉的选项（背包 4 页 / 仓库看已开页数）。"""
+        try:
+            n = self.g.page_count(self._bag_src()) if self.g \
+                else game.MAX_PACK_PAGE
+        except Exception:
+            n = game.MAX_PACK_PAGE
+        vals = [str(i + 1) for i in range(max(1, n))]
+        if hasattr(self, "cb_bag_page"):
+            self.cb_bag_page.configure(values=vals)
+        if vals and self.var_bag_page.get() not in vals:
+            self.var_bag_page.set(vals[0])
+
+    def bag_src_changed(self):
+        """换「位置」：页下拉跟着换，然后重列。"""
+        self.var_bag_page.set("1")
+        self.bag_refresh_pages()
+        self.fill_party()
 
     def bag_edit(self):
         """双击：有东西就改数量，空的就按 id 框里的 id 加。"""
         slot = self._bag_sel()
         if slot is None:
             return
-        kind = self._bag_kind()
-        exist = dict((r[0], r) for r in self.g.bag(kind, slot // game.PACK_PAGE_SIZE))
+        src = self._bag_src()
+        exist = dict((r[0], r) for r in
+                     self.g.bag(src, slot // game.PACK_PAGE_SIZE))
         if slot in exist:
             self.bag_set_count()
         else:
@@ -7473,11 +7944,11 @@ class App(object):
         except ValueError:
             messagebox.showinfo("提示", "数量要填整数。", parent=self.root)
             return
-        kind = self._bag_kind()
+        src = self._bag_src()
         done, bad = [], []
         for slot in slots:
             try:
-                done.append((slot, self.g.set_count(kind, slot, n)))
+                done.append((slot, self.g.set_count(src, slot, n)))
             except Exception as e:
                 bad.append((slot, human(str(e))))
         if not done:
@@ -7501,11 +7972,11 @@ class App(object):
         slots = self._bag_slots()
         if not slots:
             return
-        kind = self._bag_kind()
+        src = self._bag_src()
         done, bad = [], []
         for slot in slots:
             try:
-                if self.g.clear_slot(kind, slot):
+                if self.g.clear_slot(src, slot):
                     done.append(slot)
             except Exception as e:
                 bad.append((slot, human(str(e))))
@@ -7528,14 +7999,15 @@ class App(object):
         slots = self._bag_slots()
         if not slots:
             return
-        kind = self._bag_kind()
+        kind = self._bag_kind()          # Data 表键（查名字 / 告警用）
+        src = self._bag_src()            # 容器键（往哪儿写）
         try:
             iid = int(self.var_bag_id.get() or "0", 0)
             n = int(self.var_bag_cnt.get() or "1", 0)
         except ValueError:
             messagebox.showinfo("提示", "物品 id / 数量要填整数。", parent=self.root)
             return
-        db_key = dict((k[0], k[3]) for k in game.KINDS)[kind]
+        db_key = kind
         try:
             name = self.g.item_name(db_key, iid)
         except Exception:
@@ -7543,7 +8015,7 @@ class App(object):
         if name == "?":
             try:
                 name = self.g.item_display_name(
-                    self.g.find_like(kind, iid)) or "?"
+                    self.g.find_like(db_key, iid)) or "?"
             except Exception:
                 pass
         if name == "?" and not messagebox.askyesno(
@@ -7555,7 +8027,7 @@ class App(object):
         done, bad = [], []
         for slot in slots:
             try:
-                self.g.add_item(kind, slot, iid, n, kid=kid)
+                self.g.add_item(src, slot, iid, n, kid=kid, db=kind)
                 done.append(slot)
             except Exception as e:
                 bad.append((slot, human(str(e))))
