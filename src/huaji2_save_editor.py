@@ -3037,12 +3037,12 @@ class App(object):
         fit_btn(bar, "属性全 +10",
                    lambda: self.actor_preset("attr")).pack(side="left",
                                                             padx=6)
-        # 「重置潜力/属性」= 洗点，复刻游戏里「拜师」那一下（语义层
+        # 「重置加点」= 洗点，复刻游戏里「拜师」那一下（语义层
         # game.actor_reset_attr → 脚本 `Game_Actor_Attr#reset_point`）：
         # 五维回到 20+等级-1、潜能回到 等级*5，已分配的点全部退回潜能。
         # ⚠ 和上面几个一样**并进这一行**（不新起一行）—— 左栏是竖向 pack，
         #   多一行就多一分被裁的风险（参考「一键学习」被裁那次）。
-        btn_reset = fit_btn(bar, "重置潜力/属性",
+        btn_reset = fit_btn(bar, "重置加点",
                                lambda: self.actor_preset("reset_attr"))
         self._bind_tip(btn_reset,
                        "洗点：五维→20+等级-1，潜能→等级*5。\n"
@@ -3375,16 +3375,16 @@ class App(object):
         b_del.pack(side="left", padx=4)
         self._bind_tip(b_del, "把列表里选中的召唤兽从这只角色身上删掉。\n"
                               "Ctrl 点选 / Shift 连选 → 一次删一批；\n"
-                              "预设 / 恢复模板名 / 重置潜力 / 改字段 也作用于\n"
+                              "预设 / 恢复模板名 / 重置加点 / 改字段 也作用于\n"
                               "全部选中项（改名、设为出战、克隆只认第一个）。\n"
                               "不可撤销：删了只能重新加一只。")
         fit_btn(top, text="恢复模板名",
                    command=self.baby_restore_name).pack(side="left")
-        # 宠物「重置潜力/属性」= 洗点（游戏里没有这个功能，语义见
+        # 宠物「重置加点」= 洗点（游戏里没有这个功能，语义见
         # game.baby_reset_attr：自己加的属性点全部退回潜能，五维回到自然成长量）。
         # ⚠ 放这一行、不放下面那排预设 —— 预设行已经有 8 个按钮，再加一个会被
         #   pack 切掉（Tk 的 pack 先来先分，空间不够切的是最后 pack 的）。
-        btn_breset = fit_btn(top, text="重置潜力/属性",
+        btn_breset = fit_btn(top, text="重置加点",
                                 command=lambda: self.baby_preset("reset_attr"))
         btn_breset.pack(side="left", padx=(8, 0))
         self._bind_tip(btn_breset, "洗点：自己加的属性点全部退回潜能，\n"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""一次性探针：验证「重置潜力/属性」按钮的语义 + 布局（**只碰副本存档**）。
+"""一次性探针：验证「重置加点」按钮的语义 + 布局（**只碰副本存档**）。
 
 用系统 Python 3.12（有 tkinter）。窗口全程 withdraw / 屏外 —— 不抢前台、不动鼠标。
 
@@ -74,7 +74,7 @@ def main():
     texts = []
     find_buttons(app.tab_actor, texts)
     print("\n角色页按钮 =", "、".join(texts))
-    assert "重置潜力/属性" in texts, "按钮没加上！"
+    assert "重置加点" in texts, "按钮没加上！"
 
     # ---- 语义：逐个角色洗点，看五维/潜能有没有按公式回来
     print("\n%-10s %-28s %-6s %-6s   ->  %-28s %-6s %-6s"

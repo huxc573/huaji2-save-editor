@@ -135,6 +135,37 @@ else:
         else "放得下（余 %d）" % (f.winfo_width() - 16 - row.winfo_reqwidth())))
     print("  映射可见: %s / %s" % (_bp.winfo_ismapped(), _bf.winfo_ismapped()))
 
+# ---- 角色行（角色下拉 + 新增/出战/放生/恢复模板名/重置加点）----
+def _dump_actor_row(tag):
+    _br = _find_btn(f, "重置加点")
+    print("\n--- 「重置加点」按钮（在角色行）· %s ---" % tag)
+    if _br is None:
+        print("  ❌ 没找到")
+        return
+    _row = _br.master
+    _page_w = f.winfo_width()
+    print("  在「%s」那一行；自身 x=%d w=%d (右边缘 %d) ；页可用宽=%d ⇒ %s"
+          % (_row.winfo_name(), _br.winfo_x(), _br.winfo_width(),
+             _br.winfo_x() + _br.winfo_width(), _page_w - 16,
+             "露出来了" if _br.winfo_x() + _br.winfo_width() <= _page_w - 16
+             else "被挤出可视区、看不见！"))
+    print("  该行 req=%d ；实际 %d ；映射可见=%s"
+          % (_row.winfo_reqwidth(), _row.winfo_width(), _br.winfo_ismapped()))
+    _sib = []
+    for _c in _row.winfo_children():
+        _t = ""
+        try:
+            _t = _c.cget("text")
+        except Exception:
+            pass
+        _sib.append((_c.winfo_class(), _c.winfo_x(), _c.winfo_width(), _t))
+    print("  行内按 x 排（找被挤到页外/叠在一起的）：")
+    for _s in sorted(_sib, key=lambda z: z[1]):
+        print("      x=%-4d w=%-4d %-10s %s" % (_s[1], _s[2], _s[0], _s[3]))
+
+
+_dump_actor_row("默认")
+
 mid = tb.master.master
 print("\n--- mid（字段表 | 常用 + 详细信息）---")
 for ch in mid.winfo_children():
@@ -184,6 +215,7 @@ for _s in _spill2(f):
 root.geometry("1080x733")
 root.update()
 print("\n--- 1080x733（川截图那个尺寸）---")
+_dump_actor_row("1080")
 print("  页 %dx%d ；一览表容器 w=%d（列需求 %d）" % (
     f.winfo_width(), f.winfo_height(), bw.winfo_width(),
     sum(tv.column(c, "width") for c in tv["columns"])))

@@ -2519,7 +2519,7 @@ class GameEditor(object):
         return [(M.value_of(_deref(x)), nm.get(M.value_of(_deref(x)), "?"))
                 for x in arr.items]
 
-    # ---- 重置潜力/属性 ＝ 游戏里「拜师」那一下的洗点
+    # ---- 重置加点 ＝ 游戏里「拜师」那一下的洗点
     # 照抄游戏脚本 `Game_Actor_Attr#reset_point`（0000_000015.rb:5331）：
     #     @体质..@敏捷 = 20 + @master.level - 1
     #     @潜能        = @master.level * 5
@@ -2564,7 +2564,7 @@ class GameEditor(object):
                 self.doc.set_value(node, 0)
         return base, pot
 
-    # ---- 重置潜力/属性（召唤兽版）＝ 洗点：把加点全搬回潜能
+    # ---- 重置加点（召唤兽版）＝ 洗点：把加点全搬回潜能
     # ⚠ 游戏里**没有**宠物洗点：`Game_Baby_Attr` 只有 add_point / dec_point /
     #   clear_point / apply_point（加点界面的「＋/－/取消/确定」），宠物面板 17 个
     #   按钮里没有「重置」；`reset_point` 是**角色**独有的（`Game_Actor_Attr`，

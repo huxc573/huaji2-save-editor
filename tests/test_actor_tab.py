@@ -714,8 +714,8 @@ def main():
               app._learn_sids == [] and "门派" in app.var_learn_note.get(),
               app.var_learn_note.get())
 
-    # ---- 9) 「重置潜力/属性」（2026-09-20 新增 = 游戏里「拜师」那一下的洗点）
-    print("\n--- 9) 重置潜力/属性（洗点）---")
+    # ---- 9) 「重置加点」（2026-09-20 新增 = 游戏里「拜师」那一下的洗点）
+    print("\n--- 9) 重置加点（洗点）---")
     _guard_real_save(app, paths.save_path())
     WARNS.clear()
     _btnw = {}
@@ -727,13 +727,13 @@ def main():
             _collect_btn(c)
 
     _collect_btn(app.tab_actor)
-    check("角色页有「重置潜力/属性」按钮", "重置潜力/属性" in _btnw,
+    check("角色页有「重置加点」按钮", "重置加点" in _btnw,
           "、".join(_btnw))
     # ⚠ 必须和「应用修改」**同一行**：左栏是竖向 pack，多一行就多一分被裁的风险
     #   （2026-09-20「一键学习」就是这么被裁掉的）。
     check("它和「应用修改」在同一行（不新起一行 → 不会被裁）",
-          "重置潜力/属性" in _btnw and "应用修改" in _btnw
-          and _btnw["重置潜力/属性"].master is _btnw["应用修改"].master)
+          "重置加点" in _btnw and "应用修改" in _btnw
+          and _btnw["重置加点"].master is _btnw["应用修改"].master)
 
     ATTR5 = ("@体质", "@法力", "@力量", "@耐力", "@敏捷")
     OTHERS = ("@人气", "@贡献", "@体力", "@活力")

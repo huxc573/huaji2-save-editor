@@ -305,9 +305,9 @@ def main():
                   dict(app.sv.attr_items(a)).get(k0) == av0 + 20,
                   "%s = %s" % (k0, dict(app.sv.attr_items(a)).get(k0)))
 
-            # 2026-09-20：新增「重置潜力/属性」= 洗点（游戏里「拜师」那一下，
+            # 2026-09-20：新增「重置加点」= 洗点（游戏里「拜师」那一下，
             # 脚本 Game_Actor_Attr#reset_point：五维=20+等级-1、潜能=等级*5）
-            say("用「重置潜力/属性」预设（洗点）…")
+            say("用「重置加点」预设（洗点）…")
             lv_a = app.g.actor_level(a)
             app.actor_preset("reset_attr")
             root.update()
@@ -1220,8 +1220,8 @@ def main():
         check("点一下 → 一览表选中没被跳回第一行",
               app.tv_babies.selection() == _sel_before,
               "%r -> %r" % (_sel_before, app.tv_babies.selection()))
-        # ---- 宠物「重置潜力/属性」（洗点，2026-09-20 新增；语义见 game.baby_reset_attr）
-        say("宠物「重置潜力/属性」（洗点）…")
+        # ---- 宠物「重置加点」（洗点，2026-09-20 新增；语义见 game.baby_reset_attr）
+        say("宠物「重置加点」（洗点）…")
         _lv_b = app.g.baby_value(app._baby(), "level")
         _T_b = (sum(app.g.baby_value(app._baby(), k)
                     for k in ("体质", "法力", "力量", "耐力", "敏捷"))
