@@ -3500,10 +3500,42 @@ class App(object):
                              game.BABY_ALLOW_LOYALTY,
                              game.MAX_BABY_LOYALTY)),
         }
+        # ---------------- 进阶（2026-10-08 川报「用了圣兽之心资质/成长没突破」）
+        # 游戏侧「进阶」只做一件事：`Game_Baby_Attr#promote=(v)` → `@promote = v`
+        # —— **一个资质数字都不动**，抬的是**上限**（`$baby[:_max]`，见
+        # tables/baby_aptitude.MAX_ATTR）：神兽 1900/1900/7000/4000/1.6 →
+        # 神兽_p 2000/2000/7200/4200/1.8。所以光进阶，面板数字纹丝不动
+        # （面板画的是 `min(存档值, 上限)`，blob:78735）—— 川的「进阶前/后
+        # 两张图数值一模一样」就是这个，不是 bug。于是并排两个：
+        #   「进阶」    = 游戏那一步（进游戏后还能再吃元宵长上去）
+        #   「进阶并拉满」= 进阶 + 六项资质/成长直接写到进阶后的上限
+        #                （游戏里没有一步到位的道具，得回头把元宵吃满）
+        # ⚠ 放在**这一行**（不另起一行）：默认 1220x800 下面板右侧的
+        #   「常用 / 详细信息」本来就被切 20px，再加一行会到 51px
+        #   （`备注` 那个 2 行 Text 会被切）—— 实测见 probe_baby_layout。
+        #   本行在 1080 窗宽下还有 149px 余量，塞得下。
+        tips.update({
+            "promote": ("进阶（= 游戏里用进阶道具 / 勾召唤兽面板那个「进阶」框）。\n"
+                        "⚠ 进阶**只抬资质上限**，一个数字都不动：\n"
+                        "神兽 1900/1900/7000/4000/2100/2100/1.6\n"
+                        "→ 神兽_p 2000/2000/7200/4200/2200/2200/1.8\n"
+                        "面板显示的一直是 min(存档值, 上限)，所以光进阶\n"
+                        "看不出变化 —— 数字得自己长（吃元宵），\n"
+                        "或者直接用旁边的「进阶并拉满」。\n"
+                        "顺带：立绘换成进阶形态、可食元宵次数上限也涨。"),
+            "promote_fill": ("进阶 + 把六项资质和成长**直接写到进阶后的上限**：\n"
+                             "神兽 → 2000/2000/7200/4200/2200/2200、成长 1.8\n"
+                             "普通 → 1700/1700/6650/3750/1900/1900、成长 1.5\n"
+                             "（泡泡灵仙进阶前后上限相同，只有立绘变）\n"
+                             "⚠ 只能到上限为止：写更高游戏里也显示不出来\n"
+                             "（读值一律 min(存档值, 上限)）。\n"
+                             "⚠ 图鉴里没有进阶形象的（如恶魔泡泡 215）会跳过。"),
+        })
         for txt, what in (("一键满级", "expfull"), ("经验拉满", "expfill"),
                           ("全员状态拉满", "state_all"), ("寿命满", "life"),
                           ("六项资质+100", "qual"), ("六项资质+500", "qual500"),
-                          ("成长+0.1", "grow"), ("五维+10", "five10")):
+                          ("成长+0.1", "grow"), ("五维+10", "five10"),
+                          ("进阶", "promote"), ("进阶并拉满", "promote_fill")):
             b = fit_btn(edit, txt, lambda w=what: self.baby_preset(w))
             b.pack(side="left", padx=2)
             if tips.get(what):
@@ -4141,8 +4173,15 @@ class App(object):
                                                          c["mp"], c["agi"], c["eva"]),
                                   c["grow"], life))
             n_est = sum(1 for c in rows if c.get("inferred"))
+            # ⚠ 2026-10-08 川报「用这里新加的召唤兽，进游戏用圣兽之心后资质/成长
+            #   都没突破，原本里面进阶过的就突破了」—— 因为加出来的是**未进阶**
+            #   状态（资质 = 该档初始值），而游戏里进阶**只抬上限、不动数字**。
+            #   所以加完要再去召唤兽页点「进阶并拉满」才看得到突破。这儿先说清。
             info.set("共 %d 种可选。神兽 / 小孩 / 泡泡灵仙资质取定值；"
-                     "普通召唤兽资质带随机（勾了“变异”则区间 ×0.66）。"
+                     "普通召唤兽资质带随机（勾了“变异”则区间 ×0.66）。\n"
+                     "⚠ 加出来的都是**未进阶**（资质＝该档初始值）。"
+                     "游戏里「进阶」只抬上限、不动数字 —— 想直接突破，"
+                     "加完后在召唤兽页点「进阶并拉满」。"
                      "%s" % (len(rows),
                              ("\n⚠ 其中 %d 种的资质不在表里（按 id 区间估了个量级），"
                               "加出来后可到召唤兽页手动修正。"
@@ -4371,9 +4410,15 @@ class App(object):
             except ValueError:
                 messagebox.showinfo("提示", "这个字段要填数字。", parent=self.root)
                 return
+        clipped = None
         try:
             for _i, b in rows:
-                self.g.set_baby(b, key, val)
+                got = self.g.set_baby(b, key, val)
+                # ⚠ 资质有游戏硬上限（`$baby[:_max]`，未进阶 / 已进阶两档）：
+                #   `set_baby` 写到一半就夹住了 → 这里如实告诉川，别让他以为改上了
+                #   （2026-10-08 川报「改了资质进游戏没变化」就是这个）。
+                if got != val:
+                    clipped = got
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
@@ -4382,11 +4427,13 @@ class App(object):
         label = dict((k, lb) for k, lb, _p, _t
                      in game.GameEditor.BABY_FIELDS).get(key, key)
         if len(rows) == 1:
-            self.set_status("召唤兽「%s」的 %s 已改"
-                            % (self.g.baby_name(rows[0][1]), label))
+            msg = "召唤兽「%s」的 %s 已改" % (self.g.baby_name(rows[0][1]), label)
         else:
-            self.set_status("已把 %d 只召唤兽的 %s 改成 %s"
-                            % (len(rows), label, raw))
+            msg = "已把 %d 只召唤兽的 %s 改成 %s" % (len(rows), label, raw)
+        if clipped is not None:
+            msg += ("；⚠ 超过本档资质上限，实际写入 %s"
+                    "（想更高先用「进阶」抬高上限）" % clipped)
+        self.set_status(msg)
 
     def baby_preset(self, what):
         if what == "state_all":
@@ -4395,6 +4442,9 @@ class App(object):
         if what == "loyalty_all":
             # 老按钮「全员忠诚满」已并入「全员状态拉满」；留这条只为兼容旧调用
             return self.baby_loyalty_all()
+        if what in ("promote", "promote_fill"):
+            # 进阶走 babies.promote_many（不是 game.baby_preset 那一套）
+            return self.baby_promote(fill=(what == "promote_fill"))
         rows = self._baby_sel()
         if not rows or self.g is None:
             return
@@ -4410,6 +4460,52 @@ class App(object):
             self.refresh_baby_list_keep([b for _i, b in rows])
             self.set_status("召唤兽预设：%s" % "、".join(did[:8])
                             + ("…" if len(did) > 8 else ""))
+
+    def baby_promote(self, fill=False):
+        """把选中的召唤兽**进阶**（= 游戏里 `attr.promote = true` 那一步）。
+
+        2026-10-08 川报「用工具新增的召唤兽，进游戏用圣兽之心后成长/资质都没突破
+        （原本里面的进阶就突破了）」—— 根因是**游戏侧进阶压根不动数字**：
+
+            Game_Baby_Attr#promote=(v) -> @promote = v
+            Game_Baby_Attr#get_max_*   -> $baby[:_max][promote ? :"类型_p" : 类型]
+            Game_Baby_Attr#get_atk     -> [@atk, get_max_atk].min
+            面板绘制（blob:78735）      -> "#{value} / #{max_value}"，value 已 min 过
+
+        所以「进阶前 / 进阶后」两张面板图数值一模一样（1900/1900/7000/4000/
+        2100/2100、成长 1.6）—— 进阶只把**天花板**从 `神兽 1900…1.6` 抬到
+        `神兽_p 2000/2000/7200/4200/2200/2200/1.8`，数字得自己长（吃元宵）。
+
+        `fill=True` 就补上这一步：六项资质 + 成长直接写到进阶后的上限
+        （等价游戏 `set_max_zizhi`，游戏里没有一步到位的道具）。
+
+        ⚠ 图鉴里没有进阶形象的（`Data\\Actors` 的 @note 没有 `promote =`，
+          如恶魔泡泡 215）**跳过不写** —— 游戏画进阶形象时拿 nil 当立绘名会崩。
+        """
+        rows = self._baby_sel()
+        if not rows or self.g is None:
+            self.set_status("先在召唤兽列表里选一只（Ctrl / Shift 可多选）")
+            return
+        try:
+            r = self.babies_ed().promote_many(rows, fill=fill)
+        except Exception as e:
+            messagebox.showerror("进阶失败", human(str(e)), parent=self.root)
+            return
+        if r["promoted"] or r["filled"]:
+            self.mark_dirty()
+        self.refresh_baby_list_keep([b for _i, b in rows])
+        parts = []
+        if r["promoted"]:
+            parts.append("进阶 %d 只" % r["promoted"])
+        if r["already"]:
+            parts.append("%d 只本来就进阶过" % r["already"])
+        if fill and r["filled"]:
+            parts.append("资质/成长拉满 %d 项" % r["filled"])
+        if r["skipped"]:
+            parts.append("跳过 %d 只（%s）"
+                         % (len(r["skipped"]),
+                            "、".join(n for n, _w in r["skipped"][:3])))
+        self.set_status("召唤兽进阶：" + ("；".join(parts) if parts else "无需改动"))
 
     def baby_loyalty_all(self):
         """「全员忠诚满」：一次把**所有角色**的**所有召唤兽**忠诚拉满。

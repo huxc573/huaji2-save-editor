@@ -505,6 +505,137 @@ def main():
                for k in ("体质", "潜能", "level", "grow", "five")]
               == _snap2.get(id(_x)) for _aid, _x in rows_now()))
 
+    # ---------------- 进阶（2026-10-08 川报「用了圣兽之心成长/资质没突破」）
+    # 游戏侧（zz_offline_blob.rb）：
+    #   promote=(v)   -> `@promote = v`（**一个资质数字都不动**）
+    #   get_max_*     -> `$baby[:_max][promote ? :"类型_p" : 类型]`
+    #   get_atk       -> `[@atk, get_max_atk].min`
+    # 面板（blob:78735）画的是 "#{value} / #{max_value}"，value 已 min 过 ⇒
+    # 川的「进阶前 / 进阶后」两张面板图数值一模一样（1900/1900/7000/4000/
+    # 2100/2100、成长 1.6）不是 bug，是设计。上限才从 神兽 → 神兽_p。
+    print("\n-- 进阶 / 资质上限 --")
+    caps = BA.MAX_ATTR
+    check("上限表 6 档齐（普通/普通_p/神兽/神兽_p/泡泡灵仙/泡泡灵仙_p）",
+          all(k in caps for k in ("普通", "普通_p", "神兽", "神兽_p",
+                                  "泡泡灵仙", "泡泡灵仙_p")),
+          "、".join(sorted(caps)))
+    check("神兽 1900/1900/7000/4000/2100/2100/1.6",
+          [caps["神兽"][k] for k in ("atk", "def", "hp", "mp", "agi", "eva",
+                                     "grow")]
+          == [1900, 1900, 7000, 4000, 2100, 2100, 1.6], "%r" % (caps["神兽"],))
+    check("神兽_p 2000/2000/7200/4200/2200/2200/1.8",
+          [caps["神兽_p"][k] for k in ("atk", "def", "hp", "mp", "agi", "eva",
+                                       "grow")]
+          == [2000, 2000, 7200, 4200, 2200, 2200, 1.8], "%r" % (caps["神兽_p"],))
+    check("泡泡灵仙进阶前后同档（进阶只换立绘）",
+          caps["泡泡灵仙"] == caps["泡泡灵仙_p"], "%r" % (caps["泡泡灵仙"],))
+    check("max_attr 按 promote 选档",
+          BA.max_attr("神兽", False) is caps["神兽"]
+          and BA.max_attr("神兽", True) is caps["神兽_p"]
+          and BA.max_attr("查不到", True) is None, "")
+
+    print("\n-- babies：读档里的进阶状态 --")
+    _all = rows_now()
+    check("attr_type 返回 str（不是 bytes / 节点）",
+          all(isinstance(B4.attr_type(_x), str) for _aid, _x in _all),
+          "%r" % (B4.attr_type(_all[0][1]),))
+    _god = [(_aid, _x) for _aid, _x in _all
+            if B4.attr_type(_x) == "神兽"]
+    check("真档里有神兽档的宠物（拿来做样本）", bool(_god), "%d 只" % len(_god))
+    _can = [(_aid, _x) for _aid, _x in _all if B4.can_promote(_x)]
+    # ⚠ 别指望「存档里正好有一只不可进阶的」：真档可能全可进阶（2026-10-08
+    #   实测就是 10/10 全有备注）。判据的覆盖面去**候选池**上求证。
+    _nc_ids = [_c["id"] for _c in B4.candidates()
+               if not B4.can_promote_id(_c["id"])]
+    check("can_promote 认得出档里的可进阶宠物", bool(_can), "%d 只" % len(_can))
+    check("图鉴里确实有一批没有进阶立绘的（不能硬写 @promote）",
+          bool(_nc_ids), "%d 种（如 %r）"
+          % (len(_nc_ids), [_c["name"] for _c in B4.candidates()
+                            if _c["id"] in _nc_ids[:3]][:3]))
+
+    print("\n-- 核心回归：只进阶**不动任何资质数字** --")
+    _t = None
+    for _aid, _x in _god:
+        if B4.can_promote(_x) and not B4.promote_of(_x):
+            _t = _x
+            break
+    if _t is None:                     # 全进阶过了 → 先退回来
+        _t = _god[0][1]
+        B4.set_promote(_t, False)
+    _before = [B4.g.baby_value(_t, k)
+               for k in ("atk", "def", "hpq", "mpq", "agi", "eva", "grow")]
+    _cap_before = B4.max_attr(_t)
+    _r1 = B4.promote_many([(0, _t)], fill=False)
+    _after = [B4.g.baby_value(_t, k)
+              for k in ("atk", "def", "hpq", "mpq", "agi", "eva", "grow")]
+    check("只进阶：六项资质 + 成长**一个都没变**", _after == _before,
+          "%r → %r" % (_before, _after))
+    check("只进阶：promote 置上了", B4.promote_of(_t) and _r1["promoted"] == 1,
+          "%r" % (_r1,))
+    check("只进阶：上限换到 *_p（1900/1.6 → 2000/1.8）",
+          _cap_before is caps["神兽"] and B4.max_attr(_t) is caps["神兽_p"],
+          "%s → %s" % (_cap_before and _cap_before["atk"],
+                       B4.max_attr(_t)["atk"]))
+    check("重复进阶：promoted=0 / already=1（幂等）",
+          (lambda _r: _r["promoted"] == 0 and _r["already"] == 1)
+          (B4.promote_many([(0, _t)], fill=False)), "")
+
+    print("\n-- 进阶并拉满：写到进阶后的上限 --")
+    _r2 = B4.promote_many([(0, _t)], fill=True)
+    _cap = B4.max_attr(_t)
+    _got = dict((k, B4.g.baby_value(_t, k)) for k in
+                ("atk", "def", "hpq", "mpq", "agi", "eva", "grow"))
+    check("拉满 7 项都到位", _r2["filled"] == 7 and all(
+        abs(float(_got[k]) - float(_cap[{"hpq": "hp", "mpq": "mp"}.get(k, k)]))
+        < 1e-6 for k in _got), "%r / %r" % (_r2["filled"], _got))
+    check("拉满后至少一项超过未进阶上限（真·突破）",
+          _got["atk"] > caps["神兽"]["atk"]
+          and _got["grow"] > caps["神兽"]["grow"], "%s / %s"
+          % (_got["atk"], _got["grow"]))
+
+    print("\n-- 图鉴没有进阶立绘的不硬写 --")
+    _nc = None
+    for _cid in _nc_ids:                       # 真造一只出来验：跳过 + 不写 @promote
+        try:
+            _nc = B4.add(a4, _cid)
+            break
+        except Exception:
+            _nc = None
+    check("造出了「不可进阶」的样本（%s）" % (B4.display_name(_nc) if _nc else "—"),
+          _nc is not None, "id=%r" % (_nc_ids[:3],))
+    if _nc is not None:
+        _r3 = B4.promote_many([(0, _nc)], fill=True)
+        check("跳过 + 报原因 + 没写进 @promote",
+              _r3["promoted"] == 0 and _r3["filled"] == 0
+              and len(_r3["skipped"]) == 1 and not B4.promote_of(_nc),
+              "%s：%r" % (B4.display_name(_nc), _r3["skipped"]))
+
+    print("\n-- set_baby 写超过上限会被夹住 --")
+    _c = B4.max_attr(_t)
+    check("atk 写 9999 → 落到上限 %d" % _c["atk"],
+          B4.g.set_baby(_t, "atk", 9999) == _c["atk"]
+          and B4.g.baby_value(_t, "atk") == _c["atk"], "")
+    check("grow 写 9.9 → 落到上限 %s" % _c["grow"],
+          abs(B4.g.set_baby(_t, "grow", 9.9) - _c["grow"]) < 1e-9, "")
+    check("非资质字段不受影响（level 照写）",
+          B4.g.set_baby(_t, "level", 65) == 65, "")
+
+    print("\n-- 进阶落盘 + 重开还在 --")
+    B4.doc.save()
+    sv5 = save.SaveDoc(path)
+    B5 = babies.Babies(game.GameEditor(sv5))
+    a5 = sv5.actors()[0][1]
+    _rows5 = B5.g.babies(a5)
+    _same = [x for _i, x in _rows5
+             if B5.display_name(x) == B5.display_name(_t)]
+    check("重开后 promote 还在",
+          bool(_same) and all(B5.promote_of(x) for x in _same),
+          "%d 只同名" % len(_same))
+    check("重开后资质还是拉满值",
+          bool(_same) and max(B5.g.baby_value(x, "atk") for x in _same)
+          == caps["神兽_p"]["atk"],
+          "%r" % ([B5.g.baby_value(x, "atk") for x in _same],))
+
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))
     return 1 if OK[1] else 0

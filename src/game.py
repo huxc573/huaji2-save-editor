@@ -54,6 +54,7 @@ import itemattr  # noqa: E402
 from tables import sect  # noqa: E402   # 门派表（游戏脚本里的 $sects，tools/gen_sect_table.py 生成）
 from tables import sect_appellation  # noqa: E402   # 门派称谓表（拜师事件里抠的，tools/gen_sect_appellation.py 生成）
 from save import _deref, _as_str, ivar, hash_get, hash_put_pairs  # noqa: E402
+from tables import baby_aptitude  # noqa: E402   # $baby 表：各池生成值 + 资质硬上限
 
 # 游戏里的上限（**V2.201 实测值**，全部来自脚本 `Config::Game`，见 fieldnames 里的对照表）
 MAX_LEVEL_ACTOR = fieldnames.MAX_LEVEL_ACTOR
@@ -214,6 +215,28 @@ def set_ivar(obj, name, node):
             obj.ivars[i] = (k, node)
             return True
     return False
+
+
+def ensure_ivar(obj, name, node):
+    """替换**或追加**对象的 ivar（追加到末尾），返回是否成功。
+
+    `set_ivar` 只认已有的键 —— 老档里的召唤兽**普遍没有** `@attr.@promote`
+    （`Game_Baby_Attr#initialize` 压根不写它，只有用进阶道具时才 `attr.promote = true`
+    追加到末尾）。要让「进阶」按钮真的写进去，就得能追加。
+
+    追加的是**符号名 + 标量值**（不新增对象），所以 `@N` 的对象编号不会挪位。
+    顺序也跟游戏一致：落在 `@attr` 的最后一个 ivar。
+    """
+    obj = _deref(obj)
+    if obj is None:
+        return False
+    iv = getattr(obj, "ivars", None)
+    if iv is None:
+        return False
+    if set_ivar(obj, name, node):
+        return True
+    iv.append((name, node))
+    return True
 
 
 class GameEditor(object):
@@ -2071,6 +2094,27 @@ class GameEditor(object):
         a = _deref(ivar(baby, "@attr"))
         return a if isinstance(a, M.ObjNode) else None
 
+    def baby_max_attr(self, baby):
+        """这只召唤兽**当前**的资质硬上限 `{atk: …, grow: …}`；读不到返回 None。
+
+        上限跟着 `@attr.@promote` 走（未进阶 `类型` / 已进阶 `类型_p`），
+        照游戏 `BabyManager.get_attr_max` 的口径。
+        """
+        a = self.baby_attr(baby)
+        if a is None:
+            return None
+        t = _as_str(ivar(a, "@type")) or ""
+        p = _deref(ivar(a, "@promote"))
+        return baby_aptitude.max_attr(t, bool(M.value_of(p)) if p is not None else False)
+
+    def baby_promote(self, baby):
+        """这只召唤兽是否已进阶（`@attr.@promote`）。"""
+        a = self.baby_attr(baby)
+        if a is None:
+            return False
+        p = _deref(ivar(a, "@promote"))
+        return bool(M.value_of(p)) if p is not None else False
+
     #: (键, 说明, ivar 路径, 类型)
     BABY_FIELDS = (
         ("level", "等级（上限 65）", "@level", "int"),
@@ -2110,6 +2154,12 @@ class GameEditor(object):
             if k == key:
                 return typ
         return None
+
+    #: 上面字段里**属于「资质」**的那几个（键 → `baby_aptitude.ATTR_KEYS` 的名字）。
+    #: 游戏里它们有硬上限，写超了 `Game_Baby_Attr#get_* = min(@值, 上限)` 直接夹住
+    #: ⇒ 存档里存 2100、游戏里显示 2000，看着像"改了没效果"。
+    BABY_ZIZHI = {"atk": "atk", "def": "def", "hpq": "hp", "mpq": "mp",
+                  "agi": "agi", "eva": "eva", "grow": "grow"}
 
     def _resolve(self, baby, path):
         if path == "@exp#":
@@ -2257,6 +2307,15 @@ class GameEditor(object):
                     raise KeyError("改不了 %s（%s）" % (k, path))
                 self.doc.mark_structural()
                 return value
+            # ⚠ 资质有**游戏硬上限**（`$baby[:_max]`，未进阶 / 已进阶两档）：写超了
+            #   游戏读的时候照样 `min(@值, 上限)` 夹回去，存档里那个大数只会骗自己
+            #   （2026-10-08 川报「改了资质进游戏没变化」就是这个）。这儿先夹住。
+            if key in self.BABY_ZIZHI:
+                cap = (self.baby_max_attr(baby) or {}).get(self.BABY_ZIZHI[key])
+                if cap is not None:
+                    hi = float(cap) if typ == "float" else int(cap)
+                    if (float(value) if typ == "float" else int(value)) > hi:
+                        value = hi
             if typ == "float":
                 self.doc.set_value(node, float(value))
             else:
@@ -2397,23 +2456,26 @@ class GameEditor(object):
         elif what == "life":
             self.set_baby(baby, "life", MAX_BABY_LIFE)
             did.append("寿命→%d" % MAX_BABY_LIFE)
-        elif what == "qual":
+        elif what in ("qual", "qual500"):
+            # ⚠ 资质有游戏硬上限（`$baby[:_max]`）：`set_baby` 会在写之前夹住，
+            #   所以「+100 / +500」在这几项到顶以后是**加不动**的 —— 如实报出来
+            #   （2026-10-08 川报「改了资质进游戏没变化」就是这个上限）。
+            step = 100 if what == "qual" else 500
+            hit = 0
             for k in ("atk", "def", "hpq", "mpq", "agi", "eva"):
                 v = self.baby_value(baby, k)
-                if v is not None:
-                    self.set_baby(baby, k, v + 100)
-            did.append("六项资质 +100")
-        elif what == "qual500":
-            for k in ("atk", "def", "hpq", "mpq", "agi", "eva"):
-                v = self.baby_value(baby, k)
-                if v is not None:
-                    self.set_baby(baby, k, v + 500)
-            did.append("六项资质 +500")
+                if v is None:
+                    continue
+                if self.set_baby(baby, k, v + step) != v + step:
+                    hit += 1
+            did.append("六项资质 +%d%s"
+                       % (step, "（%d 项已到上限）" % hit if hit else ""))
         elif what == "grow":
             v = self.baby_value(baby, "grow")
             if v is not None:
-                self.set_baby(baby, "grow", round(v + 0.1, 2))
-                did.append("成长 +0.1")
+                want = round(v + 0.1, 2)
+                got = self.set_baby(baby, "grow", want)
+                did.append("成长 +0.1" if got == want else "成长已到上限 %s" % got)
         # ⚠ 键名是 `five10` 不是 `five`（2026-09-27 改）：`five` 现在是
         #   BABY_FIELDS 里的**字段键**（五行 `@attr.@five`）。两者虽不同命名空间
         #   （一个是预设名、一个是字段名）不冲突，但同一个 `"five"` 两种含义

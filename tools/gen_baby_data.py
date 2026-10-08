@@ -50,6 +50,8 @@ sys.stdout.reconfigure(errors="replace")
 _ENTRY = re.compile(r"(?m)^(?P<key>\d+|:\w+)[ \t]*=>")
 #: 一对 `:key => 值`（值是数字或 :符号；`=> {` / `=> [` 都不匹配）
 _NUM = re.compile(r":(?P<k>\w+)\s*=>\s*(?P<v>-?\d+(?:\.\d+)?|:\w+)")
+#: `_max` 里 `:档位 => {` 的键（值本身是大括号，用 _brace_body 另取）
+_MAX_KEY = re.compile(r":(?P<k>\w+)\s*=>\s*(?=\{)")
 _BABY_HEAD = re.compile(r"(?m)^\$baby\s*=\s*\{")
 _ARR_POOL = re.compile(r"\[\s*:(\w+)")
 
@@ -86,6 +88,21 @@ def _parse_pairs(body):
     return out
 
 
+def _parse_max(body):
+    """解析 `:_max => { :神兽 => {...}, :神兽_p => {...} }`（6 档）。
+
+    ⚠ 这是**资质的硬上限**（`BabyManager.get_attr_max = $baby[:_max][promote ?
+      :"#{type}_p" : type]`），跟各池的"生成值"不是一回事：
+      池值只是抽出来时的初始值，上限管的是**游戏里能涨到多少**。
+      少抽它 ⇒ 工具会允许把资质改到超出游戏上限的数，游戏读的时候
+      `min(@值, 上限)` 又给你夹回去 —— 看似"改了没效果"。
+    """
+    out = {}
+    for m in _MAX_KEY.finditer(body or ""):
+        out[m.group("k")] = _parse_pairs(_brace_body(body[m.end():]))
+    return out
+
+
 def _brace_body(s):
     """取第一个 `{` 的**内容**（大括号配平，能容忍 select_type 那样的嵌套）。"""
     i = (s or "").find("{")
@@ -103,18 +120,19 @@ def _brace_body(s):
 
 
 def parse(text):
-    """解析 `$baby`：返回 (species, pools)。species[i] = {shape, pool, over, data}。"""
+    """解析 `$baby`：返回 (species, pools, max_attr)。"""
     m = _BABY_HEAD.search(text)
     if not m:
-        return None, None
+        return None, None, None
     starts = [x for x in _ENTRY.finditer(text, m.end())]
-    species, pools = {}, {}
+    species, pools, mx = {}, {}, {}
     for n, it in enumerate(starts):
         key = it.group("key")
-        if key == ":_max":                    # `_max` 之后的都不是召唤兽
-            break
         end = starts[n + 1].start() if n + 1 < len(starts) else len(text)
         body = text[it.end():end].strip().rstrip(",").strip()
+        if key == ":_max":                    # `_max` 之后没有别的了，但它本身要收
+            mx = _parse_max(_brace_body(body))
+            break
         if key.startswith(":"):               # 池定义 `:_神兽资质 => {...}`
             pools[key[1:]] = _parse_pairs(_brace_body(body))
             continue
@@ -128,7 +146,7 @@ def parse(text):
             pm = _ARR_POOL.match(body)
             species[bid] = {"shape": "arr", "pool": pm.group(1),
                             "over": _parse_pairs(_brace_body(body))}
-    return species, pools
+    return species, pools, mx
 
 
 def expand(species, pools):
@@ -216,10 +234,25 @@ def config_of(baby_id, data_key=None):
     if got:
         return got
     return _v201_fallback(baby_id)
+
+
+#: 六项资质（+成长）的内部键，顺序与 `Game_Baby_Attr#set_max_zizhi` 一致
+ATTR_KEYS = ("atk", "def", "hp", "mp", "agi", "eva", "grow")
+
+
+def max_attr(type_name, promote=False):
+    """该档位在游戏里的**资质硬上限**（`{atk: …, grow: …}`）；查不到返回 None。
+
+    `type_name` = `$baby` 的 `:type`（普通 / 神兽 / 泡泡灵仙）；
+    `promote` = 是否已进阶（存档里 `@attr.@promote`）。
+    游戏侧同一个函数：`BabyManager.get_attr_max(type, promote)`。
+    """
+    key = "%s_p" % (type_name,) if promote else str(type_name)
+    return MAX_ATTR.get(key)
 '''
 
 
-def render(species, pools, src_name):
+def render(species, pools, max_attr, src_name):
     L = []
     L.append("# -*- coding: utf-8 -*-")
     L.append('"""游戏 `$baby` 资质配置表（**自动生成**，别手改）。')
@@ -229,6 +262,9 @@ def render(species, pools, src_name):
     L.append("")
     L.append("字段：type(普通/神兽/泡泡灵仙) type2(来自哪个池) allow_lv")
     L.append("      atk def hp mp agi eva grow life(pool 里是 \"infinite\") vip")
+    L.append("")
+    L.append("另外抽出 `$baby[:_max]` → `MAX_ATTR`：那是**资质的硬上限**，")
+    L.append("未进阶取 `类型`、已进阶取 `类型_p`（`BabyManager.get_attr_max`）。")
     L.append('"""')
     L.append("")
     L.append("#: 按召唤兽 id（= Data\\Actors 的 id）；池引用已展开成实际数值")
@@ -242,6 +278,13 @@ def render(species, pools, src_name):
     for k in sorted(pools):
         name = k[1:] if k.startswith("_") else k
         L.append("    %r: %s," % (name, _fmt(pools[k])))
+    L.append("}")
+    L.append("")
+    L.append("#: **资质硬上限**（`$baby[:_max]`，六项 + grow；`_p` = 已进阶档）")
+    L.append("#: ⚠ 游戏读资质是 `min(@值, 上限)` ⇒ 写超上限的数游戏里看不出来。")
+    L.append("MAX_ATTR = {")
+    for k in sorted(max_attr):
+        L.append("    %r: %s," % (k, _fmt(max_attr[k])))
     L.append("}")
     L.append(TAIL)
     return "\n".join(L) + "\n"
@@ -263,35 +306,41 @@ def main(argv):
         return 1
 
     text = io.open(src, "r", encoding="utf-8", errors="replace").read()
-    species, pools = parse(text)
+    species, pools, mx = parse(text)
     if species is None:
         print("在 %s 里找不到 `$baby = {`" % src)
         return 1
     if not species:
         print("抠到 0 条召唤兽 —— 不写文件（怕是解析炸了）")
         return 1
+    if not mx:
+        print("⚠ 没抠到 `$baby[:_max]`（资质上限表）—— 界面就没法夹上限了")
     real = expand(species, pools)
 
-    body = render(real, pools, os.path.basename(src))
+    body = render(real, pools, mx, os.path.basename(src))
     if check:
         cur = io.open(OUT, "r", encoding="utf-8").read() if os.path.exists(OUT) else ""
         ok = cur == body
-        print("%s（表里 %d 条 / 池 %d 个）"
+        print("%s（表里 %d 条 / 池 %d 个 / 上限 %d 档）"
               % ("一致" if ok else "**不一致**，要重跑不带 --check 的",
-                 len(real), len(pools)))
+                 len(real), len(pools), len(mx)))
         return 0 if ok else 2
 
     with io.open(OUT, "w", encoding="utf-8", newline="") as f:
         f.write(body)
     n_num = sum(1 for r in species.values() if r["shape"] == "num")
     print("已写 %s" % OUT)
-    print("  来源 %s：%d 条（直接数值 %d + 展开引用 %d）/ 池 %d 个"
-          % (src, len(real), n_num, len(real) - n_num, len(pools)))
+    print("  来源 %s：%d 条（直接数值 %d + 展开引用 %d）/ 池 %d 个 / 上限 %d 档"
+          % (src, len(real), n_num, len(real) - n_num, len(pools), len(mx)))
     for k in sorted(pools):
         p = pools[k]
         print("   池 %-8s type=%-6s atk=%-5s hp=%-5s grow=%-4s life=%s"
               % (k, p.get("type"), p.get("atk"), p.get("hp"),
                  p.get("grow"), p.get("life")))
+    for k in sorted(mx):
+        m = mx[k]
+        print("   上限 %-10s atk=%-5s hp=%-5s agi=%-5s grow=%s"
+              % (k, m.get("atk"), m.get("hp"), m.get("agi"), m.get("grow")))
     return 0
 
 

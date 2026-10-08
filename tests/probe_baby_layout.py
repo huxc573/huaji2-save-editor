@@ -105,6 +105,36 @@ if pick is not None:
         else "放得下"))
     print("  行内控件: %s" % [c.winfo_class() for c in pick.winfo_children()])
 
+# ---- 「进阶」两个按钮（2026-10-08 新加，并入预设按钮那行）
+def _find_btn(w, want):
+    for ch in w.winfo_children():
+        try:
+            if ch.winfo_class() == "TButton" and ch.cget("text") == want:
+                return ch
+        except Exception:
+            pass
+        hit = _find_btn(ch, want)
+        if hit is not None:
+            return hit
+    return None
+
+
+_bp = _find_btn(f, "进阶")
+_bf = _find_btn(f, "进阶并拉满")
+print("\n--- 「进阶」按钮 ---")
+if _bp is None or _bf is None:
+    print("  ❌ 没找到（进阶=%r 进阶并拉满=%r）" % (_bp, _bf))
+else:
+    row = _bp.master
+    print("  在「%s」那一行；进阶 w=%d、进阶并拉满 w=%d（合计 %d）"
+          % (row.winfo_name(), _bp.winfo_width(), _bf.winfo_width(),
+             _bp.winfo_reqwidth() + _bf.winfo_reqwidth()))
+    print("  该行 req=%d ；页内容宽=%d ⇒ %s" % (
+        row.winfo_reqwidth(), f.winfo_width() - 16,
+        "放不下、会被裁" if row.winfo_reqwidth() > f.winfo_width() - 16
+        else "放得下（余 %d）" % (f.winfo_width() - 16 - row.winfo_reqwidth())))
+    print("  映射可见: %s / %s" % (_bp.winfo_ismapped(), _bf.winfo_ismapped()))
+
 mid = tb.master.master
 print("\n--- mid（字段表 | 常用 + 详细信息）---")
 for ch in mid.winfo_children():
@@ -130,6 +160,26 @@ print("  ✅ 一览表贴左（不是被挤到右栏）: %s" % (tv.winfo_rootx()
 print("  ✅ 竖滚动条与表格同 frame: %s" % any(
     c is not tv for c in bw.winfo_children()))
 
+def _spill2(w):
+    bad = []
+    for ch in w.winfo_children():
+        if not ch.winfo_ismapped():
+            continue
+        if (ch.winfo_y() + ch.winfo_height() > w.winfo_height() + 2
+                or ch.winfo_x() + ch.winfo_width() > w.winfo_width() + 2):
+            bad.append((ch.winfo_class(), ch.winfo_name(),
+                        ch.winfo_width(), ch.winfo_height(),
+                        w.winfo_width(), w.winfo_height(),
+                        w.winfo_height() - (ch.winfo_y() + ch.winfo_height())))
+        bad.extend(_spill2(ch))
+    return bad
+
+
+# ---- 默认尺寸（1220x800）先量一遍：川开起来看到的就是这个 ----
+print("\n--- 默认 1220x800 ---")
+for _s in _spill2(f):
+    print("      溢出 %-12s %-12s %dx%d > parent %dx%d（差 %d）" % _s)
+
 # ---- 川的窗口比默认窄（截图那把约 1080x733）：再复核一遍关键行 ----
 root.geometry("1080x733")
 root.update()
@@ -141,7 +191,39 @@ print("  改字段行 req=%d（可用 %d）" % (
     pick.winfo_reqwidth() if pick else -1, f.winfo_width() - 16))
 _over = [(c.winfo_name(), c.winfo_reqwidth(), c.winfo_width())
          for c in f.winfo_children() if c.winfo_reqwidth() > c.winfo_width() + 2]
-print("  请求宽 > 实际宽的控件（会被裁）: %r" % (_over,))
+print("  请求宽 > 实际宽的控件（横向会被裁）: %r" % (_over,))
+# 纵向：pack 先来先分地盘，超出页高的那些（最后 pack 的）会被挤出去/压成 0 高
+_bot = f.winfo_height()
+_vover = [(c.winfo_name(), c.winfo_y() + c.winfo_height(), _bot)
+          for c in f.winfo_children()
+          if c.winfo_y() + c.winfo_height() > _bot + 2 or c.winfo_height() <= 1]
+print("  内容底边 > 页高 的控件（纵向会被裁）: %r" % (_vover,))
+print("  页内容总高 %d ；页高 %d ⇒ %s" % (
+    sum(c.winfo_reqheight() for c in f.winfo_children()), _bot,
+    "够" if sum(c.winfo_reqheight() for c in f.winfo_children()) <= _bot
+    else "不够（最后 pack 的会被切，看下面递归结果）"))
+
+
+def _spill(w, top=None):
+    """递归找「底边/右边超出自己 parent」的控件 —— 那才是真被切的。"""
+    bad = []
+    for ch in w.winfo_children():
+        if not ch.winfo_ismapped():
+            continue
+        if (ch.winfo_y() + ch.winfo_height() > w.winfo_height() + 2
+                or ch.winfo_x() + ch.winfo_width() > w.winfo_width() + 2):
+            bad.append((ch.winfo_class(), ch.winfo_name(),
+                        ch.winfo_x(), ch.winfo_y(),
+                        ch.winfo_width(), ch.winfo_height(),
+                        "parent %dx%d" % (w.winfo_width(), w.winfo_height())))
+        bad.extend(_spill(ch))
+    return bad
+
+
+_sp = _spill(f)
+print("  递归溢出（真被切）共 %d 个：" % len(_sp))
+for _s in _sp[:12]:
+    print("      %-12s %-10s x=%-4d y=%-4d %dx%d  >  %s" % _s)
 
 sys.stdout.flush()
 root.destroy()

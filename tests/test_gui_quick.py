@@ -1059,6 +1059,119 @@ def main():
         if _keep_b is not None:            # 把选中还原回去，别影响后面几段
             app.refresh_baby_list_keep(_keep_b)
             root.update()
+        # ---- 进阶 / 资质上限（2026-10-08 川报「用圣兽之心后资质/成长没突破」）--
+        # 游戏侧（blob:10251 / 10277 / 78735）：
+        #   promote=(v) -> `@promote = v`（**一个资质数字都不动**）
+        #   get_max_*   -> `$baby[:_max][promote ? :"类型_p" : 类型]`
+        #   get_atk     -> `[@atk, get_max_atk].min`；面板画 "value / max_value"
+        # ⇒ 川的「进阶前 / 进阶后」两张图数值一模一样不是 bug，是设计；
+        #   上限才从 神兽 1900/…/1.6 抬到 神兽_p 2000/…/1.8。工具加了两个按钮。
+        say("进阶 / 资质上限…")
+        _btns2 = [w.cget("text") for w in walk(app.tab_baby)
+                  if w.winfo_class() == "TButton"]
+        check("召唤兽页有「进阶」和「进阶并拉满」",
+              "进阶" in _btns2 and "进阶并拉满" in _btns2, "%r" % (_btns2,))
+        _bp = [w for w in walk(app.tab_baby)
+               if w.winfo_class() == "TButton" and w.cget("text") == "进阶"]
+        _bf = [w for w in walk(app.tab_baby)
+               if w.winfo_class() == "TButton" and w.cget("text") == "进阶并拉满"]
+        _nc = _nn = None      # 本段临时加的样本，收尾要放掉（见下）
+        _n_rows0 = len(app.baby_rows)
+        _bd = app.babies_ed()
+        if _bp and _bf:
+            _nc = None       # 现造一只「可进阶且未进阶」的，真档可能全进阶过了
+            for _c in _bd.candidates():
+                if _c["type"] == "神兽" and _bd.can_promote_id(_c["id"]):
+                    try:
+                        _nc = _bd.add(app._baby_actor(), _c["id"])
+                        break
+                    except Exception:
+                        _nc = None
+            app.refresh_panels()
+            root.update()
+            _zi = ("atk", "def", "hpq", "mpq", "agi", "eva", "grow")
+            _kk = [k for k, b in app.baby_rows if b is _nc]
+            check("造出了可进阶未进阶的样本", bool(_kk), str(_nc is not None))
+            if _kk:
+                app.tv_babies.selection_set("bb%d" % _kk[0])
+                app.on_baby_select()
+                root.update()
+                _v0 = [app.g.baby_value(_nc, k) for k in _zi]
+                _cap0 = _bd.max_attr(_nc)
+                _bp[0].invoke()
+                root.update()
+                check("「进阶」置上 @promote，且**数字一个没动**",
+                      _bd.promote_of(_nc)
+                      and [app.g.baby_value(_nc, k) for k in _zi] == _v0,
+                      "%r" % ([app.g.baby_value(_nc, k) for k in _zi],))
+                check("「进阶」把上限换到 *_p",
+                      _bd.max_attr(_nc) is not _cap0
+                      and _bd.max_attr(_nc)["grow"] > _cap0["grow"],
+                      "grow %s -> %s" % (_cap0["grow"], _bd.max_attr(_nc)["grow"]))
+                _bf[0].invoke()
+                root.update()
+                _cap1 = _bd.max_attr(_nc)
+                _v1 = [app.g.baby_value(_nc, k) for k in _zi]
+                check("「进阶并拉满」把 7 项写到进阶后上限",
+                      [float(x) for x in _v1] == [
+                          float(_cap1[x]) for x in
+                          ("atk", "def", "hp", "mp", "agi", "eva", "grow")],
+                      "%r" % (_v1,))
+                check("拉满后确实超过未进阶上限（真·突破）",
+                      _v1[0] > _cap0["atk"] and _v1[6] > _cap0["grow"],
+                      "atk %s>%s grow %s>%s"
+                      % (_v1[0], _cap0["atk"], _v1[6], _cap0["grow"]))
+                # 改字段写超上限 → 夹住 + 如实提示（别让川以为改上了）
+                app.tv_baby.selection_set("b_atk")
+                app.baby_pick()
+                app.var_baby_val.set("9999")
+                app.apply_baby()
+                root.update()
+                check("改字段写超上限：夹住并提示",
+                      app.g.baby_value(_nc, "atk") == _cap1["atk"]
+                      and "超过本档资质上限" in app.var_status.get(),
+                      "%s / %s" % (app.g.baby_value(_nc, "atk"),
+                                   app.var_status.get()))
+                # 图鉴里没有进阶形象的不能硬写（游戏取 nil 当立绘名会崩）
+                for _c in _bd.candidates():
+                    if not _bd.can_promote_id(_c["id"]):
+                        try:
+                            _nn = _bd.add(app._baby_actor(), _c["id"])
+                            break
+                        except Exception:
+                            _nn = None
+                if _nn is not None:
+                    app.refresh_panels()
+                    root.update()
+                    _kk2 = [k for k, b in app.baby_rows if b is _nn]
+                    app.tv_babies.selection_set("bb%d" % _kk2[0])
+                    app.on_baby_select()
+                    root.update()
+                    _bp[0].invoke()
+                    root.update()
+                    check("图鉴无进阶形象的：跳过不写",
+                          not _bd.promote_of(_nn) and "跳过" in app.var_status.get(),
+                          "%s / %s" % (_bd.display_name(_nn), app.var_status.get()))
+        # ⚠ 收尾：把本段临时加的样本**放掉**。它们落在列表末尾，留着会让后面
+        #   「设为出战」那条 `active_index(a0) == app.baby_rows[-1][0]` 指错行
+        #   （2026-10-08 实测：加完就 NG 了）。倒序删 —— `remove` 是
+        #   `items.pop(index)`，正序删会让后面所有索引前移、删错对象。
+        _tmp_ix = sorted([k for k, b in app.baby_rows if b is _nc or b is _nn],
+                         reverse=True)
+        for _ix in _tmp_ix:
+            _bd.remove(app._baby_actor(), _ix)
+        if _tmp_ix:
+            app.refresh_panels()
+            root.update()
+        check("临时样本已放掉（列表只数回到原样）",
+              len(app.baby_rows) == _n_rows0,
+              "原 %d 只、加 %d 只、删 %d 只、现在 %d 行"
+              % (_n_rows0, (1 if _nc else 0) + (1 if _nn else 0),
+                 len(_tmp_ix), len(app.baby_rows)))
+        if _keep_b is not None:
+            app.refresh_baby_list_keep(_keep_b)
+            root.update()
+
         # ---- 全员状态拉满（2026-10-03：合并「回满气血/魔法」+「全员忠诚满」）
         say("全员状态拉满…")
         _btns = [w.cget("text") for w in walk(app.tab_baby)

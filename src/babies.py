@@ -52,13 +52,18 @@
 所以 mhp 就等于 real_mhp，没有职业基础值。）
 """
 import random
+import re
 
 from tables import baby_aptitude
 import datatables
 import fieldnames
 import marshal_ruby as M
-from game import (get_int, int_node, nil_node, set_ivar, str_node)
+from game import (ensure_ivar, get_int, int_node, nil_node, set_ivar, str_node)
 from save import _deref, ivar
+
+#: `Data\Actors[id]` 的 @note 里「进阶形象」的写法（`promote = "进阶XX"`）。
+#: 有它才 `can_promote?`，也才有进阶立绘可切。
+_PROMOTE_NOTE = re.compile(r"promote\s*=\s*([^\s|\r\n]+)")
 
 #: 五行的合法值。唯一来源在 `fieldnames.BABY_FIVE`（`game.py` 校验也要用）。
 FIVE = fieldnames.BABY_FIVE
@@ -267,7 +272,8 @@ class Babies(object):
         return out
 
     # ------------------------------------------------------------------ 造一只
-    def build(self, actor, baby_id, mutation=False, rnd=None, five=None):
+    def build(self, actor, baby_id, mutation=False, rnd=None, five=None,
+              promote=False):
         """按游戏规则造一只召唤兽（**不**挂到角色上），返回节点。
 
         `actor` 是主人（Game_Actor 节点）—— 5 维/潜能用的等级是**召唤兽自己**
@@ -276,6 +282,11 @@ class Babies(object):
 
         `five` = 指定五行（金木水火土）；`None` 时按游戏原样**随机抽**
         （`$baby` 表里 `five = proc{ ['金','木','水','火','土'].sample }`）。
+
+        `promote` = 落盘就带「已进阶」标记（`@attr.@promote`）。默认 False ——
+        ⚠ 别默认 True：进阶只抬**资质上限**（`神兽` 1900/1900/7000/4000 →
+        `神兽_p` 2000/2000/7200/4200），落到游戏里就用不了「圣兽之心 / 圣兽灵耀」
+        这类进阶道具了（`attr.promote = v` 只置标记，已进阶的不再给进阶）。
         """
         baby_id = int(baby_id)
         if five is not None:
@@ -417,7 +428,21 @@ class Babies(object):
             ("@力量_temp", int_node(0)),
             ("@法力_temp", int_node(0)),
             ("@体质_temp", int_node(0)),
-            ("@items", _hash([(M.SymbolNode("yuanxiao_eat_count"), int_node(0))])),
+            # ⚠ `@items` 有两个键（照 `Game_Baby_Attr#initialize` 的原文）：
+            #   `:yuanxiao_eat_count`（已吃元宵数）/ `:add_yuanxiao_max`
+            #   （「激进元宵丹」额外加的上限，`get_max_yuanxiao` 里 `|| 0` 兜底）。
+            #   `get_max_yuanxiao` = 30 + (进阶 ? god?50:20 : 0) + 这个值 ——
+            #   这也是「进阶」的副作用之一（顺带抬可食元宵次数上限）。
+            ("@items", _hash([(M.SymbolNode("yuanxiao_eat_count"), int_node(0)),
+                              (M.SymbolNode("add_yuanxiao_max"), int_node(0))])),
+            # `@count = {}`（`inc_count(:die/:rebirth)` 会往里加；读端 `||=` 兜底）
+            ("@count", _hash([])),
+            # ⚠ `@promote` = 「已进阶」。**游戏侧它一开始并不存在**
+            #   （`Game_Baby_Attr#initialize` 不写它），只有用进阶道具
+            #   （圣兽之心 / 圣兽灵耀）时 `attr.promote = true` 才追加到末尾。
+            #   这里显式写 False 有两个好处：① 顺序跟游戏一致（末尾）；
+            #   ② 存档里一眼能看出"没进阶"，不会被误当成老档的残缺字段。
+            ("@promote", M.BoolNode(bool(promote))),
         ]
 
         def base_item(item_id=0):
@@ -541,9 +566,11 @@ class Babies(object):
         ]
         return baby
 
-    def add(self, actor, baby_id, mutation=False, active=False, rnd=None, five=None):
-        """给角色加一只召唤兽。返回新节点。`five` 见 `build`。"""
-        node = self.build(actor, baby_id, mutation=mutation, rnd=rnd, five=five)
+    def add(self, actor, baby_id, mutation=False, active=False, rnd=None,
+            five=None, promote=False):
+        """给角色加一只召唤兽。返回新节点。`five` / `promote` 见 `build`。"""
+        node = self.build(actor, baby_id, mutation=mutation, rnd=rnd, five=five,
+                          promote=promote)
         arr = _deref(ivar(actor, "@babys"))
         if not isinstance(arr, M.ArrayNode):
             raise KeyError("这个角色没有 @babys（不是可编辑的角色？）")
@@ -552,6 +579,135 @@ class Babies(object):
             set_ivar(actor, "@baby", node)
         self.doc.mark_structural()
         return node
+
+    # ------------------------------------------------------------------ 进阶
+    # 游戏侧（`zz_offline_blob.rb`）：
+    #   Game_Baby_Attr#can_promote?  = `!@master.read_note('promote').nil?`
+    #       —— 「能不能进阶」看 **Data\Actors[actor_id] 的 @note 里有没有
+    #          `promote` 备注**（= 有没有进阶形态），跟存档字段无关。
+    #   Game_Baby_Attr#promote=(v)   = `@promote = v; @master.refresh`
+    #       —— 进阶道具（圣兽之心 id 106 / 圣兽灵耀）只置这个标记，
+    #          **一个资质数字都不动**（2026-10-08 用真档两版对拍实证：
+    #          33 只 None→True，六项资质 + 成长逐个比对，0 处变化）。
+    #   Game_Baby_Attr#get_max_data = `BabyManager.get_attr_max(@type, @promote)`
+    #       = `$baby[:_max][promote ? :"#{type}_p" : type]`
+    #       —— 资质**上限**才由它决定；游戏读值是 `min(@值, 上限)`。
+    #   Game_Baby_Attr#set_max_zizhi —— 把六项资质**写成上限**（游戏里没有
+    #       直接调它的道具，等于"进阶后再把元宵吃满"的结果）。
+    def actor_note(self, baby_id):
+        """`Data\\Actors[id]` 的 @note（读不到返回 ""，绝不抛）。"""
+        n = self.actor_node(baby_id)
+        return (datatables.s(n, "@note") or "") if n is not None else ""
+
+    def can_promote_id(self, baby_id):
+        """这个图鉴 id 有没有进阶形象（V2.201：283 个有条目的角色里 171 个有）。
+
+        ⚠ 没有备注的**不要硬写 `@promote`**：游戏画「进阶形象」时直接把
+        `read_note('promote')` 当立绘名塞进模型列表（blob:64955），取到 nil
+        会让 Ctrl+预览 那条路径崩。所以 `promote_many` 会跳过它们。
+        """
+        return bool(_PROMOTE_NOTE.search(self.actor_note(baby_id)))
+
+    def can_promote(self, baby):
+        """游戏里这只**能不能**进阶 —— 照 `Game_Baby_Attr#can_promote?`：
+        `!@master.read_note('promote').nil?`。"""
+        return self.can_promote_id(get_int(ivar(baby, "@actor_id"), 0))
+
+    def attr_node(self, baby):
+        a = _deref(ivar(baby, "@attr"))
+        return a if isinstance(a, M.ObjNode) else None
+
+    def attr_type(self, baby):
+        """`$baby` 的 `:type`（普通 / 神兽 / 泡泡灵仙）；读不到返回 ""。
+
+        ⚠ 必须走 `datatables.s`（= `_as_str`）而不是 `M.value_of`：老档里
+          `@type` 可能是 `I "…" {:E => true}` 那层 Ruby 1.9 编码包装，
+          `_as_str` 会顺手拆掉，直接 `value_of` 拿到的是包装节点本身。
+        """
+        a = self.attr_node(baby)
+        if a is None:
+            return ""
+        return datatables.s(a, "@type") or ""
+
+    def promote_of(self, baby):
+        """是否已进阶（`@attr.@promote`；没这个 ivar 就是没进阶）。"""
+        a = self.attr_node(baby)
+        if a is None:
+            return False
+        n = _deref(ivar(a, "@promote"))
+        return bool(M.value_of(n)) if n is not None else False
+
+    def max_attr(self, baby):
+        """这只召唤兽当前的**资质硬上限** `{atk: …, grow: …}`；查不到返回 None。
+
+        ⚠ 上限跟着 `@promote` 走：未进阶 = `类型`、已进阶 = `类型_p`。
+          写超过上限的资质游戏里看不见（`min(@值, 上限)`），别白填。
+        """
+        return baby_aptitude.max_attr(self.attr_type(baby), self.promote_of(baby))
+
+    def set_promote(self, baby, on=True):
+        """写 `@attr.@promote`（= 游戏里用「圣兽之心」进阶的那一步）。
+
+        ⚠ 老档里**绝大多数宠物没有这个 ivar**（`Game_Baby_Attr#initialize`
+        不写它），所以这里必须能**追加** —— `set_ivar` 只改已有的键，
+        直接用它会 `KeyError`（2026-10-08 实测：32 只里只有涂山雪/花铃有）。
+        """
+        a = self.attr_node(baby)
+        if a is None:
+            raise KeyError("这只召唤兽没有 @attr")
+        on = bool(on)
+        if not ensure_ivar(a, "@promote", M.BoolNode(on)):
+            raise KeyError("写不了 @attr.@promote")
+        self.doc.mark_structural()
+        return on
+
+    def set_max_zizhi(self, baby):
+        """把六项资质 + 成长**拉到这个档位的上限**，返回动过的键。
+
+        等价于游戏 `Game_Baby_Attr#set_max_zizhi`（把 `@atk…@grow` 设成
+        `get_max_*`）。游戏里没有一步到位的道具（得进阶 + 把元宵吃满），
+        所以这个只在工具里给。
+        """
+        a = self.attr_node(baby)
+        cap = self.max_attr(baby)
+        if a is None or not cap:
+            return []
+        did = []
+        for k in baby_aptitude.ATTR_KEYS:
+            if k not in cap:
+                continue
+            node = _deref(ivar(a, "@" + k))
+            if node is None:
+                continue
+            self.doc.set_value(node, float(cap[k]) if k == "grow" else int(cap[k]))
+            did.append(k)
+        return did
+
+    def promote_many(self, rows, fill=False):
+        """把一批 `(index, baby)` 进阶；`fill=True` 顺手把资质拉到进阶后的上限。
+
+        返回 `{'promoted': n, 'already': n, 'filled': n, 'skipped': [(名, 原因)]}`。
+
+        ⚠ 「能不能进阶」的判据是**图鉴（`Data\\Actors` 的 @note）里有没有
+        进阶形象**，不是存档字段 —— 照游戏 `can_promote?`。没有的（V2.201 实测
+        283 个有条目的角色里 112 个没有，如 恶魔泡泡 215）跳过不写。
+        """
+        out = {"promoted": 0, "already": 0, "filled": 0, "skipped": []}
+        for _i, b in rows or []:
+            if b is None:
+                continue
+            if not self.can_promote(b):
+                out["skipped"].append((self.display_name(b),
+                                       "图鉴里没有进阶形象（游戏里也不能进阶）"))
+                continue
+            if self.promote_of(b):
+                out["already"] += 1
+            else:
+                self.set_promote(b, True)
+                out["promoted"] += 1
+            if fill:
+                out["filled"] += len(self.set_max_zizhi(b))
+        return out
 
     # ------------------------------------------------------------------ 删 / 出战
     def remove(self, actor, index):

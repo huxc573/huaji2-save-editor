@@ -6,6 +6,9 @@
 
 字段：type(普通/神兽/泡泡灵仙) type2(来自哪个池) allow_lv
       atk def hp mp agi eva grow life(pool 里是 "infinite") vip
+
+另外抽出 `$baby[:_max]` → `MAX_ATTR`：那是**资质的硬上限**，
+未进阶取 `类型`、已进阶取 `类型_p`（`BabyManager.get_attr_max`）。
 """
 
 #: 按召唤兽 id（= Data\Actors 的 id）；池引用已展开成实际数值
@@ -278,6 +281,17 @@ POOLS = {
     '神兽资质4': {'type': '神兽', 'allow_lv': 0, 'atk': 1900, 'def': 1900, 'hp': 7000, 'mp': 4000, 'agi': 2100, 'eva': 2100, 'grow': 1.6, 'life': 'infinite'},
 }
 
+#: **资质硬上限**（`$baby[:_max]`，六项 + grow；`_p` = 已进阶档）
+#: ⚠ 游戏读资质是 `min(@值, 上限)` ⇒ 写超上限的数游戏里看不出来。
+MAX_ATTR = {
+    '普通': {'atk': 1600, 'def': 1600, 'hp': 6500, 'mp': 3500, 'agi': 1800, 'eva': 1800, 'grow': 1.3},
+    '普通_p': {'atk': 1700, 'def': 1700, 'hp': 6650, 'mp': 3750, 'agi': 1900, 'eva': 1900, 'grow': 1.5},
+    '泡泡灵仙': {'atk': 1600, 'def': 1600, 'hp': 5500, 'mp': 3500, 'agi': 1400, 'eva': 1400, 'grow': 1.3},
+    '泡泡灵仙_p': {'atk': 1600, 'def': 1600, 'hp': 5500, 'mp': 3500, 'agi': 1400, 'eva': 1400, 'grow': 1.3},
+    '神兽': {'atk': 1900, 'def': 1900, 'hp': 7000, 'mp': 4000, 'agi': 2100, 'eva': 2100, 'grow': 1.6},
+    '神兽_p': {'atk': 2000, 'def': 2000, 'hp': 7200, 'mp': 4200, 'agi': 2200, 'eva': 2200, 'grow': 1.8},
+}
+
 
 # ---------------------------------------------------------------- 兜底（真值表外）
 # `SPECIES` / `POOLS` 已是**内测版真值**（257 条 / 5 个池，解析 `$baby`），
@@ -337,4 +351,19 @@ def config_of(baby_id, data_key=None):
     if got:
         return got
     return _v201_fallback(baby_id)
+
+
+#: 六项资质（+成长）的内部键，顺序与 `Game_Baby_Attr#set_max_zizhi` 一致
+ATTR_KEYS = ("atk", "def", "hp", "mp", "agi", "eva", "grow")
+
+
+def max_attr(type_name, promote=False):
+    """该档位在游戏里的**资质硬上限**（`{atk: …, grow: …}`）；查不到返回 None。
+
+    `type_name` = `$baby` 的 `:type`（普通 / 神兽 / 泡泡灵仙）；
+    `promote` = 是否已进阶（存档里 `@attr.@promote`）。
+    游戏侧同一个函数：`BabyManager.get_attr_max(type, promote)`。
+    """
+    key = "%s_p" % (type_name,) if promote else str(type_name)
+    return MAX_ATTR.get(key)
 

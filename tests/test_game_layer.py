@@ -129,9 +129,16 @@ def main():
         check("改召唤兽等级生效", g.baby_value(baby, "level") == 7)
         g.set_baby(baby, "loyalty", 100.0)
         check("改忠诚（小数）生效", g.baby_value(baby, "loyalty") == 100.0)
+        # ⚠ 2026-10-08：资质有游戏硬上限（`$baby[:_max]`，未进阶 / 已进阶两档），
+        #   `set_baby` 会在写之前夹住 → 「+100」到顶以后加不动。期望值跟着夹。
+        _cap = (g.baby_max_attr(baby) or {}).get("atk")
+        _want = vals["atk"] + 100
+        if _cap is not None:
+            _want = min(_want, _cap)
         did = g.baby_preset(baby, "qual")
-        check("资质 +100 预设生效",
-              g.baby_value(baby, "atk") == vals["atk"] + 100, "、".join(did))
+        check("资质 +100 预设生效（到上限则夹住）",
+              g.baby_value(baby, "atk") == _want,
+              "、".join(did) or "上限 %s" % _cap)
         check("召唤兽技能能列出来", isinstance(g.baby_skills(baby), list),
               "%r" % (g.baby_skills(baby)[:3],))
 
