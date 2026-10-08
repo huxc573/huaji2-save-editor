@@ -661,12 +661,16 @@ class Babies(object):
         self.doc.mark_structural()
         return on
 
-    def set_max_zizhi(self, baby):
+    def set_max_zizhi(self, baby, only_below=True):
         """把六项资质 + 成长**拉到这个档位的上限**，返回动过的键。
 
         等价于游戏 `Game_Baby_Attr#set_max_zizhi`（把 `@atk…@grow` 设成
         `get_max_*`）。游戏里没有一步到位的道具（得进阶 + 把元宵吃满），
         所以这个只在工具里给。
+
+        ⚠ `only_below=True`（默认）**只升不降**：老档里有超过上限的账面值
+        （川那只涂山雪 atk/def 存 2100 > 上限 2000），照游戏原样硬写会把它
+        **拉低** —— 那不是用户要的。
         """
         a = self.attr_node(baby)
         cap = self.max_attr(baby)
@@ -679,7 +683,11 @@ class Babies(object):
             node = _deref(ivar(a, "@" + k))
             if node is None:
                 continue
-            self.doc.set_value(node, float(cap[k]) if k == "grow" else int(cap[k]))
+            tgt = float(cap[k]) if k == "grow" else int(cap[k])
+            cur = M.value_of(node)
+            if only_below and cur is not None and float(cur) >= float(tgt):
+                continue
+            self.doc.set_value(node, tgt)
             did.append(k)
         return did
 

@@ -211,16 +211,22 @@ def main():
     check("状态栏说明本来就进阶过",
           "本来就进阶过" in app.var_status.get(), app.var_status.get())
 
-    print("\n-- 「改字段」写超上限：夹住 + 如实提示 --")
+    print("\n-- 「改字段」写超上限：照写 + 提示按上限显示 --")
+    # 2026-10-08 反过来：**不夹**。上限管"游戏里能涨到多少"，存档里超限值合法
+    # （游戏面板画 min(值, 上限) 并标红）。夹住会把老档的超限值拉低。
     app.tv_baby.selection_set("b_atk")
     app.baby_pick()
     app.var_baby_val.set("9999")
     app.apply_baby()
     root.update()
-    check("落盘值 == 上限", app.g.baby_value(baby, "atk") == cap_a2["atk"],
+    check("落盘值就是填的 9999（不夹）",
+          app.g.baby_value(baby, "atk") == 9999,
           "%s" % (app.g.baby_value(baby, "atk"),))
-    check("状态栏提示被夹 + 指向「进阶」",
-          "超过本档资质上限" in app.var_status.get()
+    check("baby_over_cap 标出 atk 超限",
+          app.g.baby_over_cap(baby).get("atk") == (9999, cap_a2["atk"]),
+          "%r" % (app.g.baby_over_cap(baby),))
+    check("状态栏提示超限 + 指向「进阶」",
+          "超过当前上限" in app.var_status.get()
           and "进阶" in app.var_status.get(), app.var_status.get())
 
     print("\n-- 图鉴里没有进阶立绘的：跳过不写 --")
@@ -263,9 +269,9 @@ def main():
     hit = [(i, b) for i, b in g2.babies(sv2.actors()[0][1])
            if bd2.display_name(b) == name and bd2.promote_of(b)]
     check("重开后 promote 还在", bool(hit), "%d 只同名且已进阶" % len(hit))
-    check("重开后资质还是拉满值",
-          bool(hit) and max(g2.baby_value(b, "atk") for _i, b in hit)
-          == cap_a2["atk"], "%r" % ([g2.baby_value(b, "atk") for _i, b in hit],))
+    check("重开后超限值（atk 9999）还在",
+          bool(hit) and max(g2.baby_value(b, "atk") for _i, b in hit) == 9999,
+          "%r" % ([g2.baby_value(b, "atk") for _i, b in hit],))
 
     root.destroy()
     print("\n真档 sha1[:12] = %s（与开始时%s）"

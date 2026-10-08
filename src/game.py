@@ -2107,6 +2107,27 @@ class GameEditor(object):
         p = _deref(ivar(a, "@promote"))
         return baby_aptitude.max_attr(t, bool(M.value_of(p)) if p is not None else False)
 
+    def baby_over_cap(self, baby):
+        """返回**超过当前上限**的资质 `{键: (存档值, 上限)}`；空 dict = 都没超。
+
+        超上限**不是错误**：游戏读值一律 `min(@值, 上限)`，召唤兽面板上把上限那个
+        数画成**红色**（2026-10-08 川的档实测：涂山雪 atk/def 存 2100、上限 2000、
+        面板红字 2000）。工具只如实提示，**不改这个数**。
+        """
+        cap = self.baby_max_attr(baby) or {}
+        out = {}
+        for k, ck in self.BABY_ZIZHI.items():
+            v = self.baby_value(baby, k)
+            hi = cap.get(ck)
+            if v is None or hi is None:
+                continue
+            try:
+                if float(v) > float(hi):
+                    out[k] = (v, hi)
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def baby_promote(self, baby):
         """这只召唤兽是否已进阶（`@attr.@promote`）。"""
         a = self.baby_attr(baby)
@@ -2307,15 +2328,12 @@ class GameEditor(object):
                     raise KeyError("改不了 %s（%s）" % (k, path))
                 self.doc.mark_structural()
                 return value
-            # ⚠ 资质有**游戏硬上限**（`$baby[:_max]`，未进阶 / 已进阶两档）：写超了
-            #   游戏读的时候照样 `min(@值, 上限)` 夹回去，存档里那个大数只会骗自己
-            #   （2026-10-08 川报「改了资质进游戏没变化」就是这个）。这儿先夹住。
-            if key in self.BABY_ZIZHI:
-                cap = (self.baby_max_attr(baby) or {}).get(self.BABY_ZIZHI[key])
-                if cap is not None:
-                    hi = float(cap) if typ == "float" else int(cap)
-                    if (float(value) if typ == "float" else int(value)) > hi:
-                        value = hi
+            # ⚠ 这里**故意不夹上限**。资质确实有游戏硬上限（`$baby[:_max]`，未进阶 /
+            #   已进阶两档），但**存档里超过上限的值是合法且有意义的** —— 2026-10-08
+            #   翻川的档实测：李修远那只涂山雪 `@atk/@def` 存 2100，当前上限 2000，
+            #   游戏面板画 `min(值, 上限)` = **2000 并标红**（红字就是"超限了"）。
+            #   上一版在这儿夹住是**错的**：老档超限值一点「资质+100」就会**被降到
+            #   上限**（数字反而变小）。是否超限交给 `baby_over_cap()` 如实提示。
             if typ == "float":
                 self.doc.set_value(node, float(value))
             else:
@@ -2457,25 +2475,20 @@ class GameEditor(object):
             self.set_baby(baby, "life", MAX_BABY_LIFE)
             did.append("寿命→%d" % MAX_BABY_LIFE)
         elif what in ("qual", "qual500"):
-            # ⚠ 资质有游戏硬上限（`$baby[:_max]`）：`set_baby` 会在写之前夹住，
-            #   所以「+100 / +500」在这几项到顶以后是**加不动**的 —— 如实报出来
-            #   （2026-10-08 川报「改了资质进游戏没变化」就是这个上限）。
+            # ⚠ 纯加法、**不夹上限**：超上限的值在存档里合法，游戏面板会把它标红
+            #   并显示成上限那个数（2026-10-08 实测川的档：atk/def 存 2100、上限
+            #   2000、面板红字 2000）。超没超由界面用 `baby_over_cap()` 提示。
             step = 100 if what == "qual" else 500
-            hit = 0
             for k in ("atk", "def", "hpq", "mpq", "agi", "eva"):
                 v = self.baby_value(baby, k)
-                if v is None:
-                    continue
-                if self.set_baby(baby, k, v + step) != v + step:
-                    hit += 1
-            did.append("六项资质 +%d%s"
-                       % (step, "（%d 项已到上限）" % hit if hit else ""))
+                if v is not None:
+                    self.set_baby(baby, k, v + step)
+            did.append("六项资质 +%d" % step)
         elif what == "grow":
             v = self.baby_value(baby, "grow")
             if v is not None:
-                want = round(v + 0.1, 2)
-                got = self.set_baby(baby, "grow", want)
-                did.append("成长 +0.1" if got == want else "成长已到上限 %s" % got)
+                self.set_baby(baby, "grow", round(v + 0.1, 2))
+                did.append("成长 +0.1")
         # ⚠ 键名是 `five10` 不是 `five`（2026-09-27 改）：`five` 现在是
         #   BABY_FIELDS 里的**字段键**（五行 `@attr.@five`）。两者虽不同命名空间
         #   （一个是预设名、一个是字段名）不冲突，但同一个 `"five"` 两种含义

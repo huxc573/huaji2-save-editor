@@ -610,15 +610,25 @@ def main():
               and len(_r3["skipped"]) == 1 and not B4.promote_of(_nc),
               "%s：%r" % (B4.display_name(_nc), _r3["skipped"]))
 
-    print("\n-- set_baby 写超过上限会被夹住 --")
+    print("\n-- set_baby 写超上限：照写不误，能被标出来 --")
+    # ⚠ 2026-10-08 反过来：**不夹**。上限（`$baby[:_max]`）管的是"游戏里能涨到
+    #   多少"，存档里超限值**合法** —— 游戏面板画 `min(值, 上限)` 并把它**标红**
+    #   （实测川的档：涂山雪存 atk 2100、上限 2000、面板红字 2000）。夹住反而会把
+    #   老档里本来就超限的值**拉低**（点一下「资质+100」反而变小）。
     _c = B4.max_attr(_t)
-    check("atk 写 9999 → 落到上限 %d" % _c["atk"],
-          B4.g.set_baby(_t, "atk", 9999) == _c["atk"]
-          and B4.g.baby_value(_t, "atk") == _c["atk"], "")
-    check("grow 写 9.9 → 落到上限 %s" % _c["grow"],
-          abs(B4.g.set_baby(_t, "grow", 9.9) - _c["grow"]) < 1e-9, "")
+    check("atk 写 9999 → 原样写入（不夹，上限 %d）" % _c["atk"],
+          B4.g.set_baby(_t, "atk", 9999) == 9999
+          and B4.g.baby_value(_t, "atk") == 9999, "")
+    check("baby_over_cap 把超限项标成 (值, 上限)",
+          B4.g.baby_over_cap(_t).get("atk") == (9999, _c["atk"]),
+          "%r" % (B4.g.baby_over_cap(_t),))
+    check("grow 写 9.9 → 原样写入（不夹）",
+          abs(B4.g.set_baby(_t, "grow", 9.9) - 9.9) < 1e-9, "")
     check("非资质字段不受影响（level 照写）",
           B4.g.set_baby(_t, "level", 65) == 65, "")
+    check("set_max_zizhi 只升不降（不去动超限的 atk）",
+          "atk" not in B4.set_max_zizhi(_t)
+          and B4.g.baby_value(_t, "atk") == 9999, "")
 
     print("\n-- 进阶落盘 + 重开还在 --")
     B4.doc.save()
@@ -631,9 +641,9 @@ def main():
     check("重开后 promote 还在",
           bool(_same) and all(B5.promote_of(x) for x in _same),
           "%d 只同名" % len(_same))
-    check("重开后资质还是拉满值",
-          bool(_same) and max(B5.g.baby_value(x, "atk") for x in _same)
-          == caps["神兽_p"]["atk"],
+    check("重开后超限值（atk 9999）和拉满值都还在",
+          bool(_same) and max(B5.g.baby_value(x, "atk") for x in _same) == 9999
+          and B5.g.baby_value(_same[0], "hpq") == caps["神兽_p"]["hp"],
           "%r" % ([B5.g.baby_value(x, "atk") for x in _same],))
 
     shutil.rmtree(WORK, ignore_errors=True)

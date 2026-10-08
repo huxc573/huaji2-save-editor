@@ -4410,15 +4410,9 @@ class App(object):
             except ValueError:
                 messagebox.showinfo("提示", "这个字段要填数字。", parent=self.root)
                 return
-        clipped = None
         try:
             for _i, b in rows:
-                got = self.g.set_baby(b, key, val)
-                # ⚠ 资质有游戏硬上限（`$baby[:_max]`，未进阶 / 已进阶两档）：
-                #   `set_baby` 写到一半就夹住了 → 这里如实告诉川，别让他以为改上了
-                #   （2026-10-08 川报「改了资质进游戏没变化」就是这个）。
-                if got != val:
-                    clipped = got
+                self.g.set_baby(b, key, val)
         except Exception as e:
             messagebox.showerror("修改失败", human(str(e)), parent=self.root)
             return
@@ -4430,9 +4424,9 @@ class App(object):
             msg = "召唤兽「%s」的 %s 已改" % (self.g.baby_name(rows[0][1]), label)
         else:
             msg = "已把 %d 只召唤兽的 %s 改成 %s" % (len(rows), label, raw)
-        if clipped is not None:
-            msg += ("；⚠ 超过本档资质上限，实际写入 %s"
-                    "（想更高先用「进阶」抬高上限）" % clipped)
+        # ⚠ 资质超上限**照写不误**（游戏面板把上限那个数标红、按上限算），只提示一句
+        if key in game.GameEditor.BABY_ZIZHI:
+            msg += self._baby_cap_note([b for _i, b in rows])
         self.set_status(msg)
 
     def baby_preset(self, what):
@@ -4458,8 +4452,27 @@ class App(object):
         if did:
             self.mark_dirty()
             self.refresh_baby_list_keep([b for _i, b in rows])
-            self.set_status("召唤兽预设：%s" % "、".join(did[:8])
-                            + ("…" if len(did) > 8 else ""))
+            self.set_status("召唤兽预设：%s%s"
+                            % ("、".join(did[:8]) + ("…" if len(did) > 8 else ""),
+                               self._baby_cap_note([b for _i, b in rows])))
+
+    def _baby_cap_note(self, rows):
+        """超上限提示（返回带前导分隔的空串或说明）。
+
+        超上限**不是错误**：游戏读资质一律 `min(@值, 上限)`，面板把上限那个数画成
+        **红色**。2026-10-08 川的档实测：涂山雪存 atk/def 2100、上限 2000、面板红字
+        2000 —— 所以工具只管如实提示，**不动那个数**（夹回上限反而会把它变小）。
+        """
+        n = 0
+        for b in rows:
+            try:
+                if self.g.baby_over_cap(b):
+                    n += 1
+            except Exception:
+                continue
+        if not n:
+            return ""
+        return "；⚠ %d 只的资质超过当前上限 —— 游戏里按上限显示（面板标红），要提上限得先「进阶」" % n
 
     def baby_promote(self, fill=False):
         """把选中的召唤兽**进阶**（= 游戏里 `attr.promote = true` 那一步）。

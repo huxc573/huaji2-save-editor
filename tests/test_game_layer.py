@@ -129,16 +129,20 @@ def main():
         check("改召唤兽等级生效", g.baby_value(baby, "level") == 7)
         g.set_baby(baby, "loyalty", 100.0)
         check("改忠诚（小数）生效", g.baby_value(baby, "loyalty") == 100.0)
-        # ⚠ 2026-10-08：资质有游戏硬上限（`$baby[:_max]`，未进阶 / 已进阶两档），
-        #   `set_baby` 会在写之前夹住 → 「+100」到顶以后加不动。期望值跟着夹。
+        # ⚠ 2026-10-08 改：资质**不再夹上限**。上限（`$baby[:_max]`）管的是游戏里
+        #   能涨到多少，存档里超限值合法 —— 游戏面板画 `min(值, 上限)` 并标红
+        #   （实测川的档：涂山雪存 2100、上限 2000、面板红字 2000）。夹住反而会把
+        #   老档的超限值**拉低**。所以这儿期望就是纯加法。
         _cap = (g.baby_max_attr(baby) or {}).get("atk")
         _want = vals["atk"] + 100
-        if _cap is not None:
-            _want = min(_want, _cap)
         did = g.baby_preset(baby, "qual")
-        check("资质 +100 预设生效（到上限则夹住）",
+        check("资质 +100 预设生效（超上限照写）",
               g.baby_value(baby, "atk") == _want,
               "、".join(did) or "上限 %s" % _cap)
+        check("超上限的项能被 baby_over_cap 标出来",
+              (not g.baby_over_cap(baby)) if _want <= (_cap or 0)
+              else ("atk" in g.baby_over_cap(baby)),
+              "%r（上限 %s）" % (g.baby_over_cap(baby), _cap))
         check("召唤兽技能能列出来", isinstance(g.baby_skills(baby), list),
               "%r" % (g.baby_skills(baby)[:3],))
 

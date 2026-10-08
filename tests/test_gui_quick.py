@@ -1121,15 +1121,18 @@ def main():
                       _v1[0] > _cap0["atk"] and _v1[6] > _cap0["grow"],
                       "atk %s>%s grow %s>%s"
                       % (_v1[0], _cap0["atk"], _v1[6], _cap0["grow"]))
-                # 改字段写超上限 → 夹住 + 如实提示（别让川以为改上了）
+                # 改字段写超上限 → **照写不误** + 提示「游戏里按上限显示」
+                # （2026-10-08 反过来：夹住会把老档本来就超限的值拉低）
                 app.tv_baby.selection_set("b_atk")
                 app.baby_pick()
                 app.var_baby_val.set("9999")
                 app.apply_baby()
                 root.update()
-                check("改字段写超上限：夹住并提示",
-                      app.g.baby_value(_nc, "atk") == _cap1["atk"]
-                      and "超过本档资质上限" in app.var_status.get(),
+                check("改字段写超上限：照写 + 提示按上限显示",
+                      app.g.baby_value(_nc, "atk") == 9999
+                      and app.g.baby_over_cap(_nc).get("atk")
+                      == (9999, _cap1["atk"])
+                      and "超过当前上限" in app.var_status.get(),
                       "%s / %s" % (app.g.baby_value(_nc, "atk"),
                                    app.var_status.get()))
                 # 图鉴里没有进阶形象的不能硬写（游戏取 nil 当立绘名会崩）
