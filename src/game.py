@@ -2236,6 +2236,17 @@ class GameEditor(object):
         lv = max(0, int(lv))
         return (lv * lv + lv * 3 + 11) * 10
 
+    @classmethod
+    def practice_full_exp(cls, lv):
+        """某等级下的**满经验**＝差 1 点就升级（`next_exp(lv) - 1`）。
+
+        游戏 `Game_Actor#practice_add_exp` 是「`exp >= next_exp(lv)` ⇒ 减掉门槛、
+        `lv += 1`（溢出保留）」，所以**没升级时 exp 的最大值就是 `next_exp-1`**
+        —— 面板那个「修炼经验」条到这儿就是满的。川 2026-10-08：拉满时经验
+        也要一起拉满，做到「和游戏升到那个等级满经验一致」。
+        """
+        return max(0, cls.practice_next_exp(lv) - 1)
+
     def _practice_hash(self, actor):
         """`@sect_data[:修炼]` 那个 HashNode（8 项）。
 
@@ -2345,14 +2356,16 @@ class GameEditor(object):
             n += 1
         return n
 
-    def practice_set_everyone(self, lv=None, exp=0, groups=None,
+    def practice_set_everyone(self, lv=None, exp=None, groups=None,
                               skip_ids=PRACTICE_SKIP_IDS):
-        """**所有角色** × 每组 4 项，等级一起拉满。
+        """**所有角色** × 每组 4 项，等级一起拉满（经验默认也一起拉满）。
 
         * `lv=None`（默认）＝**按游戏规则逐人拉满**：`<90 级 → 20、≥90 级 → 25`
           （每人取自己的 `practice_max()`，走 `clamp=True`）—— 川 2026-10-08：
           「全员拉满也按游戏规则」。要**无视规则**直接全给 25，显式传 `lv=25`
           （那时走 `clamp=False`，游戏面板会显示「25/20」，战斗照吃满加成）。
+        * `exp=None`（默认）＝**本级满经验** `practice_full_exp(lv)`（＝门槛-1）；
+          想归零就显式传 `exp=0`。
         * `skip_ids` 里的角色整人跳过（默认 `PRACTICE_SKIP_IDS` = 巨小蛙）；
           按 `@actor_id` 判，不按名字。
         * `groups=None` = A + B 全给。没有 `@sect_data[:修炼]` 的角色**跳过不报错**
@@ -2370,13 +2383,11 @@ class GameEditor(object):
                 continue
             try:
                 for key in keys:
-                    if lv is None:
-                        self.practice_set(actor, key,
-                                          lv=self.practice_max(actor), exp=exp,
-                                          clamp=True)
-                    else:
-                        self.practice_set(actor, key, lv=lv, exp=exp,
-                                          clamp=False)
+                    use_lv = self.practice_max(actor) if lv is None else lv
+                    use_exp = (self.practice_full_exp(use_lv)
+                               if exp is None else exp)
+                    self.practice_set(actor, key, lv=use_lv, exp=use_exp,
+                                      clamp=(lv is None))
             except KeyError:
                 skipped.append(self.sv.actor_name(actor))
                 continue

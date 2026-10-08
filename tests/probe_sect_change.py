@@ -136,7 +136,7 @@ def main():
         "doc.path 不是副本！%r" % (p,)
 
     for i in range(app.nb.index("end")):
-        if app.nb.tab(i, "text") == "角色 / 属性":
+        if app.nb.tab(i, "text") == "角色":
             app.nb.select(i)
     root.update_idletasks()
     kill_timers(root)

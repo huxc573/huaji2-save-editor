@@ -1248,6 +1248,9 @@ def main():
           == (20, 0))
     check("lv=99 被夹到 20", gT.practice_set(aX, "A_法术", lv=99)[0] == 20)
     check("lv=-3 被夹到 0", gT.practice_set(aX, "A_防御", lv=-3)[0] == 0)
+    check("本级满经验 = 门槛 - 1（0 级 109、20 级 4709）",
+          gT.practice_full_exp(0) == 109 and gT.practice_full_exp(20) == 4709,
+          (gT.practice_full_exp(0), gT.practice_full_exp(20)))
     nX = gT.practice_next_exp(5)
     check("exp 超门槛被夹到 %d（门槛 -1）" % (nX - 1),
           gT.practice_set(aX, "A_法防", lv=5, exp=99999)[1] == nX - 1)
@@ -1300,10 +1303,13 @@ def main():
         if _aid in game.PRACTICE_SKIP_IDS:
             continue
         want = gT.practice_max(a)
+        wexp = gT.practice_full_exp(want)
         seenX[want] = seenX.get(want, 0) + 1
-        badX += ["%s=%s(应%d)" % (r["key"], r["lv"], want)
-                 for r in gT.practice(a) if r["lv"] != want or r["exp"] != 0]
-    check("除跳过的，所有人 8 项 = **各自规则上限** / 0 经验", not badX, badX[:4])
+        badX += ["%s=%s/%s(应%d/%d)" % (r["key"], r["lv"], r["exp"], want, wexp)
+                 for r in gT.practice(a)
+                 if r["lv"] != want or r["exp"] != wexp]
+    check("除跳过的，所有人 8 项 = **各自规则上限** / 本级满经验",
+          not badX, badX[:4])
     if game.get_int(game.ivar(aX, "@actor_id"), -1) not in game.PRACTICE_SKIP_IDS:
         check("<90 级角色（aX = %d 级）拉出来是 20" % gT.actor_level(aX),
               seenX.get(game.PRACTICE_LV_BELOW_90, 0) >= 1, seenX)
@@ -1321,9 +1327,10 @@ def main():
           gT.practice_set_everyone()[:2] == (nXa, nXi))
     # 想无视规则、一律 25 ⇒ 显式传 `lv=25`（那时才走 clamp=False）
     _n25a, _n25i, _s25 = gT.practice_set_everyone(lv=25)
-    check("显式 lv=25 仍能无视规则全给 25",
+    check("显式 lv=25 仍能无视规则全给 25（经验同样满）",
           _s25 == skipX and all(
-              r["lv"] == 25 for a, _aid in pairsX
+              r["lv"] == 25 and r["exp"] == gT.practice_full_exp(25)
+              for a, _aid in pairsX
               if _aid not in game.PRACTICE_SKIP_IDS
               for r in gT.practice(a)), _s25)
     gT.practice_set_everyone()                      # 复位回规则上限

@@ -190,6 +190,17 @@ def main():
         check("10 个页签都建好（开关/变量页已移到快捷修改）", app.nb.index("end") == 10,
               "%d 个：%s" % (app.nb.index("end"),
                               [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]))
+        # 2026-10-08 川：「角色 / 属性」→「角色」、「说明 / 机制」→「说明」
+        _tn = [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]
+        check("页签名是「角色」「说明」（不带「 / 属性」「 / 机制」尾巴）",
+              "角色" in _tn and "说明" in _tn
+              and "角色 / 属性" not in _tn and "说明 / 机制" not in _tn,
+              "、".join(_tn))
+        _sbh = [w for w in walk(app.tab_help)
+                if w.winfo_class() == "TScrollbar"]
+        check("「说明」页有滚动条（原来没有 ⇒ 长内容看不全）",
+              len(_sbh) >= 1 and bool(app.text_help.cget("yscrollcommand")),
+              "%d 个滚动条" % len(_sbh))
 
         say("加载存档副本…")
         app.load(copy, quiet=True)
@@ -1724,16 +1735,16 @@ def main():
                   all(x is y for x, y in
                       zip([b for _k, b in app.baby_rows], _keep_n)))
 
-        # ---------------- 2026-10-08：修炼管理（A+B 都在「角色 / 属性」页）---
+        # ---------------- 2026-10-08：修炼管理（A+B 都在「角色」页）---
         # 机制：游戏**只在战斗结算**读修炼等级，升级不改属性 ⇒ 主改等级。
         # 川 2026-10-08 的第二轮要求：A/B 收进角色页、等级可直接输入（不要滑条）、
         # 加「全员拉满」（跳过巨小蛙、直接 25）、保存前拦「存档已被游戏改过」。
-        say("修炼管理（角色 / 属性 页）…")
+        say("修炼管理（角色页）…")
         _btns_actor = [str(w.cget("text")) for w in walk(app.tab_actor)
                        if w.winfo_class() == "TButton"]
         _btns_baby = [str(w.cget("text")) for w in walk(app.tab_baby)
                       if w.winfo_class() == "TButton"]
-        check("「角色 / 属性」页有「修炼管理…」按钮",
+        check("「角色」页有「修炼管理…」按钮",
               "修炼管理…" in _btns_actor, "、".join(_btns_actor))
         # 2026-10-08 川：全员拉满从角色页**搬进**了修炼管理窗口
         check("「全员拉满」已收进修炼窗口（角色页上不再有）",
@@ -1764,7 +1775,7 @@ def main():
             _pw = app._practice_who_actor()
             # ⚠ 不能比对象身份：`sv.actors()` 每次都会给出**新的**解析对象，
             #   窗口里那份和 `current_actor()` 那份不是同一个实例 ⇒ 比 @actor_id。
-            check("默认选中的是「角色 / 属性」页那个角色",
+            check("默认选中的是「角色」页那个角色",
                   _pw is not None
                   and game.get_int(game.ivar(_pw, "@actor_id"), -1)
                   == game.get_int(game.ivar(_axl, "@actor_id"), -1),
@@ -1792,8 +1803,9 @@ def main():
                 check("「一键满级」填的是**游戏规则上限** %d" % _mx,
                       all(it[2].get() == str(_mx) for it in _ix),
                       [it[2].get() for it in _ix])
-                check("一键满级把经验也归 0",
-                      all(it[3].get() == "0" for it in _ix),
+                _we = str(app.g.practice_full_exp(_mx))
+                check("一键满级把经验也填满（本级满经验 %s）" % _we,
+                      all(it[3].get() == _we for it in _ix),
                       [it[3].get() for it in _ix])
             for it in _ix:                      # 等级直接敲 25（越规则上限）
                 it[2].set("25")
@@ -1860,8 +1872,9 @@ def main():
         check("确认窗名单里没有「巨小蛙」（只在「跳过」那句里出现）",
               "巨小蛙" in _ctxt and "巨小蛙" not in _tail,
               _ctxt.replace("\n", " | "))
-        check("确认窗文案改成了游戏规则（<90→20、≥90→25）",
-              "<90 级 → 20" in _ctxt and "≥90 级 → 25" in _ctxt,
+        check("确认窗文案改成了游戏规则（<90→20、≥90→25）＋经验一起拉满",
+              "<90 级 → 20" in _ctxt and "≥90 级 → 25" in _ctxt
+              and "经验一起拉满" in _ctxt,
               _ctxt.replace("\n", " | "))
         _bad = []
         for _i, _a in app.sv.actors():
@@ -1869,12 +1882,14 @@ def main():
             if game.get_int(game.ivar(_a, "@actor_id"), -1) == _frog_id:
                 continue
             _want = app.g.practice_max(_a)
+            _wexp = app.g.practice_full_exp(_want)
             for _r in app.g.practice(_a):
-                if _r["lv"] != _want or _r["exp"] != 0:
-                    _bad.append("%s/%s=%s(应%d)" % (app.sv.actor_name(_a),
-                                                   _r["key"], _r["lv"], _want))
-        check("除跳过的那只外，所有角色 8 项都按**各自规则上限**拉满",
-              not _bad, _bad[:4])
+                if _r["lv"] != _want or _r["exp"] != _wexp:
+                    _bad.append("%s/%s=%s/%s(应%d/%d)"
+                                % (app.sv.actor_name(_a), _r["key"],
+                                   _r["lv"], _r["exp"], _want, _wexp))
+        check("除跳过的那只外，所有角色 8 项都按**各自规则上限**拉满"
+              "（经验＝本级满经验）", not _bad, _bad[:4])
         if _frog is not None:
             check("被跳过的角色原样未动",
                   dict((r["key"], (r["lv"], r["exp"]))
@@ -1894,15 +1909,19 @@ def main():
             app.sv.set_actor_field(_tgt, "@level", 89)
             app.practice_max_all()
             root.update()
-            check("89 级角色 → 拉 20（不是 25）",
-                  all(r["lv"] == 20 for r in app.g.practice(_tgt)),
-                  [r["lv"] for r in app.g.practice(_tgt)])
+            _e20 = app.g.practice_full_exp(20)
+            check("89 级角色 → 等级 20、经验满（%d）" % _e20,
+                  all(r["lv"] == 20 and r["exp"] == _e20
+                      for r in app.g.practice(_tgt)),
+                  [(r["lv"], r["exp"]) for r in app.g.practice(_tgt)])
             app.sv.set_actor_field(_tgt, "@level", 90)
             app.practice_max_all()
             root.update()
-            check("90 级角色 → 拉 25",
-                  all(r["lv"] == 25 for r in app.g.practice(_tgt)),
-                  [r["lv"] for r in app.g.practice(_tgt)])
+            _e25 = app.g.practice_full_exp(25)
+            check("90 级角色 → 等级 25、经验满（%d）" % _e25,
+                  all(r["lv"] == 25 and r["exp"] == _e25
+                      for r in app.g.practice(_tgt)),
+                  [(r["lv"], r["exp"]) for r in app.g.practice(_tgt)])
             app.sv.set_actor_field(_tgt, "@level", _lv0)
 
         # ---------------- 保存前拦「存档已被游戏改过」--------------------

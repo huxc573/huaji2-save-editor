@@ -4,12 +4,12 @@
 页签（顺序与画迹1 对齐）：
   1. 概览 / 快捷修改      金钱/步数/次数 + 防作弊检测并修复（Lock/记账/标记一次修齐）
   2. 全部解析数据         全局搜索 + 树形浏览（懒加载）+ 右侧详情 + 右键菜单（中文注释）
-  3. 角色 / 属性          等级/HP/MP/名字/经验 + 中文五维（Game_Actor_Attr）+ 技能装备
-  4. 背包 / 物品          4 页 × 20 格：改数量 / 清空 / 添加（自动同步物品计数校验）
+  3. 角色                 等级/HP/MP/名字/经验 + 中文五维（Game_Actor_Attr）+ 技能装备 + 修炼
+  4. 物品                 4 页 × 20 格：改数量 / 清空 / 添加（自动同步物品计数校验）
   5. 召唤兽               等级·气血·五维·六项资质·忠诚·寿命 + 常用预设
   6. 开关 / 变量          双击切换 / 修改（带游戏自己的名字注释）
   7. 数据表 (CSV)         Data\\*.rvdata2 → CSV（物品/武器/防具/技能/状态/角色/职业/敌人）
-  8. 说明 / 机制          密钥、存档结构、防作弊、数据表说明
+  8. 说明                 密钥、存档结构、防作弊、数据表说明
   9. 更新日志             CHANGELOG.md
 
 启动：python src/huaji2_save_editor.py [存档路径] [--selftest]
@@ -140,9 +140,9 @@ HELP_HEAD = """%s %s
 HELP_BODY = """零、本工具是画迹1 存档编辑器的迭代产品
   界面、快捷键、右键菜单、"导出报告/导出明文"都沿用「画迹1 编辑器」的习惯，
   用过的直接上手。v0.4 新增了 4 个能改玩法数据的页：
-      「背包 / 物品」（4 页×20 格，改数量/清空/加物品）
+      「物品」（4 页×20 格，改数量/清空/加物品；可切背包/仓库）
       「召唤兽」（等级·气血·魔法·六项资质·忠诚·寿命·成长·五维）
-      「角色 / 属性」里的"获得经验"
+      「角色」里的"获得经验"与「修炼管理…」（人物 A + 召唤兽 B 共 8 项）
       「概览 / 快捷修改」里的"防作弊体检"（一键修复 + 清除作弊标记）
   另外「数据表 (CSV)」页把 Data\\*.rvdata2 转成 CSV 查表。
   独立发行版：Release 上只挂一个 zip（huaji2-save-editor-vX.Y.Z.zip），
@@ -3050,12 +3050,12 @@ class App(object):
         self.menu.add_separator()
         self.menu.add_command(label="刷新整棵树", command=self.fill_tree)
 
-    # -------------------------------------------------- 3 角色 / 属性
+    # -------------------------------------------------- 3 角色（原「角色 / 属性」）
     def _tab_actor(self):
         tk, ttk = self.tk, self.ttk
         f = ttk.Frame(self.nb, padding=8)
         self.tab_actor = f
-        self.nb.add(f, text="角色 / 属性")
+        self.nb.add(f, text="角色")
 
         ttk.Label(f, text="角色列表（点一行在下面改；Ctrl/Shift 多选 → "
                           "预设 / 应用修改对全部选中角色生效）").pack(anchor="w")
@@ -3609,7 +3609,7 @@ class App(object):
                   foreground="#888").pack(side="left", padx=6)
         # ⚠ 「召唤兽修炼…」2026-10-08 已撤：B 组那 4 项存在**角色**身上
         #   （`@sect_data[:修炼][:B_*]`，战斗走 `宝宝.master.…`），挂在召唤兽页
-        #   反而给人「属于某一只宠物」的错觉。川要求 A/B 都收进「角色 / 属性」页
+        #   反而给人「属于某一只宠物」的错觉。川要求 A/B 都收进「角色」页
         #   的「修炼管理…」+「全员拉满」。
 
         self.var_baby_note = tk.StringVar(value="")
@@ -5006,25 +5006,39 @@ class App(object):
         self.lst_db.selection_set(0)
 
     # -------------------------------------------------- 7 / 8
-    def _tab_help(self):
+    def _readonly_text(self, parent, content):
+        """只读长文本页：`tk.Text` + **纵向滚动条**（2026-10-08 川：说明页缺滚动条）。
+
+        ⚠ `tk.Text` 必须显式给 width/height（不给就是 1 个字符宽高，
+          窗口一拉就散架）；`yscrollcommand` / `command` 两边都要接上，
+          少一边滚动条就是死的。
+        """
         tk, ttk = self.tk, self.ttk
+        box = ttk.Frame(parent)
+        box.pack(fill="both", expand=True)
+        sb = ttk.Scrollbar(box, orient="vertical")
+        sb.pack(side="right", fill="y")
+        t = tk.Text(box, wrap="word", width=96, height=26,
+                    yscrollcommand=sb.set, font=("Microsoft YaHei UI", 10))
+        sb.configure(command=t.yview)
+        t.pack(side="left", fill="both", expand=True)
+        t.insert("1.0", content)
+        t.configure(state="disabled")
+        return t
+
+    def _tab_help(self):
+        ttk = self.ttk
         f = ttk.Frame(self.nb, padding=8)
         self.tab_help = f
-        self.nb.add(f, text="说明 / 机制")
-        t = tk.Text(f, wrap="word", font=("Microsoft YaHei UI", 10))
-        t.pack(fill="both", expand=True)
-        t.insert("1.0", HELP_TEXT)
-        t.configure(state="disabled")
+        self.nb.add(f, text="说明")
+        self.text_help = self._readonly_text(f, HELP_TEXT)
 
     def _tab_log(self):
-        tk, ttk = self.tk, self.ttk
+        ttk = self.ttk
         f = ttk.Frame(self.nb, padding=8)
         self.tab_log = f
         self.nb.add(f, text="更新日志")
-        t = tk.Text(f, wrap="word", font=("Microsoft YaHei UI", 10))
-        t.pack(fill="both", expand=True)
-        t.insert("1.0", CHANGELOG)
-        t.configure(state="disabled")
+        self.text_log = self._readonly_text(f, CHANGELOG)
 
     def _build_status(self):
         self.var_status = self.tk.StringVar(value="就绪")
@@ -7960,10 +7974,10 @@ class App(object):
           * **A/B 都收在这里** —— B 组原挂「召唤兽」页，可那 4 项其实存在角色
             身上（战斗里走 `宝宝.master.sect_data[:修炼][:B_*]`），挂那边会让人
             以为属于某一只宠物；
-          * **窗口里能切角色** —— 进来默认选中「角色 / 属性」页当前那个。
+          * **窗口里能切角色** —— 进来默认选中「角色」页当前那个。
         「一键满级」按**这个角色**的游戏规则（`<90 → 20、≥90 → 25`）；窗口里
         那个「全员拉满」＝所有角色一起拉满、跳过巨小蛙（2026-10-08 从
-        「角色 / 属性」页搬进来），同样按游戏规则逐人算。要无视规则直接给
+        「角色」页搬进来），同样按游戏规则逐人算。要无视规则直接给
         25，就手动把等级填成 25（`clamp=False`）。
         机制：游戏只在**战斗结算**时读 `[:lv]`，升级不改任何属性 ⇒ 改完存盘、
         回游戏重开即生效。
@@ -8009,7 +8023,8 @@ class App(object):
 
         ttk.Label(body, text="等级直接填，0~25。游戏规则：角色 <90 级上限 20、"
                              "≥90 级 25（超了也照写，游戏读等级时不校验上限）。\n"
-                             "⚠ 修炼是游戏**战斗时现读**的 —— 存盘、回游戏重开即生效；"
+                             "「一键满级」连经验一起填满（＝本级满经验，差 1 点升级）。\n"
+                             "⚠ 修炼是游戏战斗时现读的 —— 存盘、回游戏重开即生效；"
                              "它不改任何属性（属性和修炼是两回事）。",
                   justify="left", foreground="#888").grid(
             row=1, column=0, columnspan=6, sticky="w", pady=(6, 2))
@@ -8080,16 +8095,21 @@ class App(object):
         fill()
 
         def set_all(v):
-            """一键满级 / 全部清零（经验都归 0，和游戏里升完级一样）。
+            """一键满级 / 全部清零。
 
-            `v=None` = 按**这个角色**的游戏规则上限（<90 → 20、≥90 → 25）。
+            `v=None` = 按**这个角色**的游戏规则上限（<90 → 20、≥90 → 25），
+            经验一起拉满＝**本级满经验**（`next_exp(lv)-1`，游戏里不升级时的
+            最大值，面板那根条到这儿就是满的）；`v=0` = 等级 0 + 经验 0。
             """
             act = self._practice_who_actor()
-            mx = v if v is not None else (
-                self.g.practice_max(act) if act is not None else 0)
+            mx = int(v if v is not None else (
+                self.g.practice_max(act) if act is not None else 0))
+            # 经验一起拉满（川 2026-10-08）：满级 ⇒ 本级满经验（门槛-1），
+            # 清零 ⇒ 0。口径就是 `game.practice_full_exp`。
+            e = 0 if v == 0 else self.g.practice_full_exp(mx)
             for _k, _n, v_lv, v_exp, _mx, _nd in items:
-                v_lv.set(str(int(mx)))
-                v_exp.set("0")
+                v_lv.set(str(mx))
+                v_exp.set(str(e))
 
         def go():
             act = self._practice_who_actor()
@@ -8131,7 +8151,7 @@ class App(object):
                 command=lambda: set_all(None)).pack(side="left")
         fit_btn(bar, text="全部清零",
                 command=lambda: set_all(0)).pack(side="left", padx=(6, 0))
-        # 「全员拉满」（2026-10-08 川：从「角色 / 属性」页搬进来）——
+        # 「全员拉满」（2026-10-08 川：从「角色」页搬进来）——
         # ⚠ 它和左边那两个**不是一类**：左边只改这一屏的输入框（还要点「保存」），
         #   它直接改**所有角色**的存档对象（跳过巨小蛙），仍然要 Ctrl+S 落盘。
         btn_alla = fit_btn(bar, text="全员拉满",
@@ -8140,7 +8160,7 @@ class App(object):
         self._bind_tip(btn_alla,
                        "**所有角色**（不只上面下拉这个）的 A + B 共 8 项，\n"
                        "按游戏规则一次拉满：<90 级 → 20、≥90 级 → 25；\n"
-                       "· 跳过「巨小蛙」（剧情角色）；经验一律归 0。\n"
+                       "· 跳过「巨小蛙」（剧情角色）；经验一并拉到本级满经验。\n"
                        "· 它直接写进存档对象（会刷新这一屏），\n"
                        "  但还要点「保存修改」(Ctrl+S) 才落到文件。")
         fit_btn(bar, text="保存", command=go).pack(side="right")
@@ -8156,7 +8176,7 @@ class App(object):
           `<90 级 → 20`、`≥90 级 → 25` —— 走 `practice_set_everyone()` 的默认
           `lv=None`，它内部取每个人的 `practice_max()`。想无视规则直接 25，
           在修炼窗口里**手动把等级填成 25** 就行（那条走 `clamp=False`）。
-        入口在「修炼管理」窗口里（原来挂在「角色 / 属性」页，已撤）。
+        入口在「修炼管理」窗口里（原来挂在「角色」页，已撤）。
         """
         if not self.g or not self.sv:
             return
@@ -8179,7 +8199,8 @@ class App(object):
         todo = "、".join("%s→%d" % (nm, lv) for nm, lv in rows)
         text = ("把下列角色的 8 项修炼（人物 A + 召唤兽 B）拉满 —— "
                 "按游戏规则：\n\n"
-                "· 角色 <90 级 → 20 级，≥90 级 → 25 级；经验一律归 0；\n"
+                "· 角色 <90 级 → 20 级，≥90 级 → 25 级；\n"
+                "· 经验一起拉满 ＝ 本级满经验（差 1 点就升级，和游戏里一致）；\n"
                 "· 跳过「巨小蛙」（剧情角色），不在下面的名单里；\n"
                 "· 改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n"
                 "将修改 %d 人：%s\n\n确定吗？" % (len(rows), todo))
