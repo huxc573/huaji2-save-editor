@@ -61,7 +61,7 @@ def extract(txt):
         end = block.find("]", k)
         return [int(x) for x in re.findall(r"-?\d+", block[k:end])]
 
-    return table("actor"), table("baby")
+    return table("actor"), table("baby"), table("ride")
 
 
 def wrap(name, nums, per=16):
@@ -74,7 +74,7 @@ def wrap(name, nums, per=16):
     return "\n".join(lines)
 
 
-def gen(actor, baby):
+def gen(actor, baby, ride):
     head = '''# -*- coding: utf-8 -*-
 """升级经验表（**自动生成，别手改** —— 改了跑 `python tools/gen_exp_table.py`）。
 
@@ -82,21 +82,27 @@ def gen(actor, baby):
 用法见 `game.exp_for_level()`：
 
     升级所需经验 = ACTOR_EXP[当前等级]      # 下标就是等级，40 级 → 第 40 项
-    召唤兽同理解 BABY_EXP
+    召唤兽同理解 BABY_EXP，坐骑（「灵气」）解 RIDE_EXP
 
 游戏里对应的脚本：
 
     def exp_for_level(level) = $exps[:actor][level-1]
     def next_level_exp       = exp_for_level(@level + 1) == $exps[:actor][@level]
 
+坐骑（`Game_Ride#exp_for_level`）＝ `$exps[:ride][level-1]`：
+阶 1→2 要 500 点灵气、8→9 要 10000，**满阶是 9 阶**（`Game_Ride#max_level`
+写死 9），所以最后一项（15000）只是「9 阶再升一级要多少」的占位值。
+
 ⚠ 别把 `@limit_exp` 当升级所需经验：那是「累计获得经验」计数器，
   体验版超过 202123741 就不再发经验（见游戏脚本 Game_Actor#gain_exp）。
 """
 '''
-    body = "\n\n".join([wrap("ACTOR_EXP", actor), wrap("BABY_EXP", baby)])
+    body = "\n\n".join([wrap("ACTOR_EXP", actor), wrap("BABY_EXP", baby),
+                        wrap("RIDE_EXP", ride)])
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:
         f.write(head + "\n" + body + "\n")
-    print("已生成 %s（actor %d 项 / baby %d 项）" % (OUT, len(actor), len(baby)))
+    print("已生成 %s（actor %d 项 / baby %d 项 / ride %d 项）"
+          % (OUT, len(actor), len(baby), len(ride)))
 
 
 def main():
@@ -113,16 +119,18 @@ def main():
         if p is None:
             return 1
     txt = open(p, encoding="utf-8", errors="replace").read()
-    actor, baby = extract(txt)
+    actor, baby, ride = extract(txt)
     if "--check" in argv:
         sys.path.insert(0, os.path.join(ROOT, "src"))
         from tables import exp
-        same = (list(exp.ACTOR_EXP) == actor and list(exp.BABY_EXP) == baby)
+        same = (list(exp.ACTOR_EXP) == actor and list(exp.BABY_EXP) == baby
+                and list(exp.RIDE_EXP) == ride)
         print("一致" if same else "不一致，重新生成")
         return 0 if same else 1
-    gen(actor, baby)
+    gen(actor, baby, ride)
     print("  actor[40] =", actor[40], "（40 级的升级所需经验）")
     print("  baby[40]  =", baby[40])
+    print("  ride[8]   =", ride[8], "（8 阶 → 9 阶要的灵气）")
     return 0
 
 

@@ -50,6 +50,8 @@ TABS = (("tab_quick", "概览 / 快捷修改"), ("tab_saves", "存档管理"),
         ("tab_tree", "全部解析数据"),
         ("tab_actor", "角色"), ("tab_party", "物品"),
         ("tab_baby", "召唤兽"),
+        # 2026-10-08：坐骑单开一个页签（跟召唤兽同级的一整套东西）
+        ("tab_ride", "坐骑"),
         ("tab_machine", "机器码"),
         ("tab_db", "数据表 (CSV)"), ("tab_help", "说明"),
         ("tab_log", "更新日志"))

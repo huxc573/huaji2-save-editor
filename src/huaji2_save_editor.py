@@ -63,6 +63,7 @@ import doctree   # noqa: E402
 import nodetext   # noqa: E402
 import fieldnames   # noqa: E402
 import itemattr   # noqa: E402
+import rides     # noqa: E402
 import save    # noqa: E402
 from tables import sect   # noqa: E402
 
@@ -2459,6 +2460,7 @@ class App(object):
         self._tab_actor()
         self._tab_party()
         self._tab_baby()
+        self._tab_ride()
         # 开关/变量页只有 3 个 switch，没什么实际用，开关挪到快捷修改页做勾选框；
         # 但 _tab_switch 仍要调一次（只创建 tv_sw/tv_va widget 不挂到 Notebook），
         # 否则外部直接用到 self.tv_sw 的地方会报 AttributeError
@@ -4909,6 +4911,651 @@ class App(object):
         self.set_status("全员状态拉满：改了 %d 只（%d 个角色，其中忠诚 %d 只）"
                         % (n, na, nl))
 
+    # -------------------------------------------------- 5.5 坐骑（独立页签）
+    # 为什么单开一个页签（而不是塞进「角色」页）：一匹坐骑是一个有 46 个 ivar
+    # 的 `Game_Ride` 对象（等级 / 灵气 / 五资质 / 移速 / 6 个技能 / 装备 /
+    # 乘骑·出战两个位），跟召唤兽是同一量级的东西；川的档里光李修远就有 21 匹。
+    # 挂在角色页会跟「修炼管理」抢那点纵向空间（角色页在 1080 窗宽下本来就差
+    # 43px 就会把「门派技能」切掉）。
+    RIDE_COLS = ("no", "name", "tpl", "quality", "lv", "exp",
+                 "atk", "def", "hp", "mp", "agi", "speed", "sk", "state")
+    RIDE_HEADS = ("序", "名字", "模板", "品质", "阶", "灵气",
+                  "攻资", "防资", "体资", "法资", "速资", "移速", "技能", "状态")
+    RIDE_WIDTHS = (34, 110, 100, 50, 40, 64, 58, 58, 58, 58, 58, 62, 44, 50)
+    #: 「改字段」下拉：(键, 显示名, 控件类型)。`choice` 走只读下拉、`num` 走输入框、
+    #: `text` 走输入框（原名 / 昵称）。
+    RIDE_FIELDS = (
+        ("name", "名字", "text"),
+        ("nickname", "昵称", "text"),
+        ("quality", "品质", "choice"),
+        ("level", "等级(阶)", "num"),
+        ("exp", "灵气", "num"),
+        ("atk", "攻击资质", "num"),
+        ("def", "防御资质", "num"),
+        ("hp", "体力资质", "num"),
+        ("mp", "法力资质", "num"),
+        ("agi", "速度资质", "num"),
+        ("speed", "移速(%)", "num"),
+    )
+
+    def _tab_ride(self):
+        tk, ttk = self.tk, self.ttk
+        f = ttk.Frame(self.nb, padding=8)
+        self.tab_ride = f
+        self.nb.add(f, text="坐骑")
+
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        # ⚠ 先把右侧的「全部拉满」pack 掉：Tk 的 pack 是"先来先分地盘"，
+        #   空间不够时挨刀的是**最后** pack 的那个（同召唤兽页那条老账）。
+        b_max = fit_btn(top, text="全部拉满", command=self.ride_max_all)
+        b_max.pack(side="right")
+        self._bind_tip(b_max,
+                       "把这个角色**列表里的所有坐骑**一次拉满：\n"
+                       "神骑品质 + 9 阶 + 本级满灵气 + 五项资质 9999\n"
+                       "+ 移速取该坐骑神骑档上限 + 技能填满。\n"
+                       "⚠ 放生 / 乘骑中的那些也会一起改（不挑）。\n"
+                       "改完记得点「保存修改」(Ctrl+S)。")
+        ttk.Label(top, text="角色：").pack(side="left")
+        self.var_ride_actor = tk.StringVar()
+        self.cb_ride_actor = ttk.Combobox(top, textvariable=self.var_ride_actor,
+                                          state="readonly", width=22)
+        self.cb_ride_actor.pack(side="left")
+        self.cb_ride_actor.bind("<<ComboboxSelected>>",
+                                lambda e: self.fill_ride_list())
+        fit_btn(top, text="新增坐骑…",
+                command=self.ride_add_dialog).pack(side="left", padx=(10, 4))
+        b_del = fit_btn(top, text="放生（删除）", command=self.ride_delete)
+        b_del.pack(side="left")
+        self._bind_tip(b_del, "把列表里选中的坐骑从这只角色身上删掉。\n"
+                              "乘骑中 / 出战中的那匹会连引用一起清干净\n"
+                              "（不然游戏读 @ride 会指到已删的对象上）。\n"
+                              "不可撤销：删了只能重新加一匹。")
+        b_ride = fit_btn(top, text="乘骑 ⇄",
+                         command=lambda: self.ride_toggle("ride"))
+        b_ride.pack(side="left", padx=(6, 0))
+        self._bind_tip(b_ride, "把选中的坐骑设成「乘骑中」(`@ride`)；\n"
+                               "再点一次取消（一匹角色只能乘一匹）。\n"
+                               "乘骑决定跑图时的移动速度与坐骑立绘。")
+        b_fight = fit_btn(top, text="出战 ⇄",
+                          command=lambda: self.ride_toggle("ride2"))
+        b_fight.pack(side="left", padx=(6, 0))
+        self._bind_tip(b_fight, "把选中的坐骑设成「出战」(`@ride2`)；\n"
+                                "再点一次取消。出战的那匹会在战斗里替你上。")
+        b_sk = fit_btn(top, text="技能…", command=self.ride_skill_dialog)
+        b_sk.pack(side="left", padx=(6, 0))
+        self._bind_tip(b_sk, "改选中坐骑的技能。\n"
+                             "⚠ 只能从坐骑技能池里挑（%s ~ %s 共 16 个），\n"
+                             "数量上限按品质：普通 3 / 靓仔 4 / 神骑 6。\n"
+                             "游戏里这些技能是「3 / 6 / 9 阶」自动学的，"
+                             "这里是直接写进去。"
+                             % (rides.RIDE_SKILL_MAIN[0], rides.RIDE_SKILL_RARE[-1]))
+
+        self.var_ride_note = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.var_ride_note, foreground="#555",
+                  justify="left", wraplength=1000).pack(anchor="w", pady=(4, 4))
+
+        # ---------------- 排序表（跟召唤兽页同一套：滚动条装进同一个子 frame）
+        bw = ttk.Frame(f)
+        bw.pack(fill="x")
+        self.tv_rides = ttk.Treeview(bw, columns=self.RIDE_COLS,
+                                     show="headings", height=8,
+                                     selectmode="extended")
+        for c, h, w in zip(self.RIDE_COLS, self.RIDE_HEADS, self.RIDE_WIDTHS):
+            self.tv_rides.heading(c, text=h)
+            self.tv_rides.column(c, width=w, anchor="w")
+        self.tv_rides.tag_configure("onride", foreground="#0a0")
+        vs_r = ttk.Scrollbar(bw, orient="vertical", command=self.tv_rides.yview)
+        self.tv_rides.configure(yscrollcommand=vs_r.set)
+        hs_r = ttk.Scrollbar(f, orient="horizontal", command=self.tv_rides.xview)
+        self.tv_rides.configure(xscrollcommand=hs_r.set)
+        vs_r.pack(side="right", fill="y")
+        self.tv_rides.pack(side="left", fill="x", expand=True)
+        hs_r.pack(fill="x")
+        self.tv_rides.bind("<<TreeviewSelect>>", lambda e: self.on_ride_select())
+
+        edit = ttk.Frame(f)
+        edit.pack(fill="x", pady=(6, 0))
+        ttk.Label(edit, text="改字段：").pack(side="left")
+        self._ride_field_keys = [k for k, _cn, _t in self.RIDE_FIELDS]
+        self._ride_key_cn = dict((k, cn) for k, cn, _t in self.RIDE_FIELDS)
+        self._ride_cn_key = dict((cn, k) for k, cn, _t in self.RIDE_FIELDS)
+        self._ride_key_kind = dict((k, t) for k, _cn, t in self.RIDE_FIELDS)
+        # 字段用**只读下拉**选（列在界面上，一眼看得到能改什么），
+        # 不像召唤兽页那样靠左边那张字段表 —— 坐骑只有 11 个字段，
+        # 下拉更省纵向空间（角色页/召唤兽页在 1080 窗宽下已经贴着裁切线）。
+        self.var_ride_field = tk.StringVar(value=self._ride_key_cn["level"])
+        cb_field = ttk.Combobox(edit, textvariable=self.var_ride_field,
+                                values=[cn for _k, cn, _t in self.RIDE_FIELDS],
+                                width=12, state="readonly")
+        cb_field.pack(side="left")
+        cb_field.bind("<<ComboboxSelected>>", lambda e: self.on_ride_select())
+        self.var_ride_val = tk.StringVar()
+        val_wrap = ttk.Frame(edit)
+        val_wrap.pack(side="left", padx=(4, 0))
+        self.ent_ride_val = ttk.Entry(val_wrap, textvariable=self.var_ride_val,
+                                      width=14)
+        self.ent_ride_val.grid(row=0, column=0, sticky="w")
+        self.cb_ride_val = ttk.Combobox(val_wrap, textvariable=self.var_ride_val,
+                                        values=list(rides.RIDE_QUALITY),
+                                        width=12, state="readonly")
+        self.cb_ride_val.grid(row=0, column=0, sticky="w")
+        self.cb_ride_val.grid_remove()          # 默认是输入框
+        fit_btn(edit, "应用", self.apply_ride).pack(side="left", padx=6)
+        self.ent_ride_val.bind("<Return>", lambda e: self.apply_ride())
+        self.ride_rows = []
+        self._sync_ride_val_widget()
+
+    # ------------------------------------------------------------ 数据
+    def rides_ed(self):
+        """坐骑助手（rides.Rides）——换存档后重建一次。"""
+        if getattr(self, "_rides_src", None) is not self.g \
+                or not hasattr(self, "_rides_obj"):
+            self._rides_obj = rides.Rides(self.g) if self.g is not None else None
+            self._rides_src = self.g
+        return self._rides_obj
+
+    def fill_rides(self):
+        """刷角色下拉框（坐骑列表依赖它）。"""
+        if not self.sv or self.g is None:
+            self.cb_ride_actor["values"] = []
+            return
+        names = []
+        for aid, a in self.sv.actors():
+            names.append("%s (#%d)" % (self.sv.actor_name(a) or "?", aid))
+        self.cb_ride_actor["values"] = names
+        if names and self.var_ride_actor.get() not in names:
+            self.var_ride_actor.set(names[0])
+        self.fill_ride_list()
+
+    def _ride_actor(self):
+        sel = self.var_ride_actor.get()
+        if not sel or not self.sv:
+            return None
+        try:
+            aid = int(sel.split("#")[-1].rstrip(")"))
+        except ValueError:
+            return None
+        for a_id, a in self.sv.actors():
+            if a_id == aid:
+                return a
+        return None
+
+    def _ride(self):
+        """一览表里选中的第一匹 `Game_Ride` 节点；没有就 None。"""
+        sel = self.tv_rides.selection()
+        if not sel:
+            return None
+        try:
+            i = int(sel[0][1:])
+        except (ValueError, IndexError):
+            return None
+        if 0 <= i < len(self.ride_rows):
+            return self.ride_rows[i][1]
+        return None
+
+    def fill_ride_list(self):
+        """刷坐骑一览表。"""
+        self.ride_rows = []
+        self.tv_rides.delete(*self.tv_rides.get_children())
+        a = self._ride_actor()
+        rd = self.rides_ed()
+        if a is None or self.g is None or rd is None:
+            self.var_ride_note.set("")
+            return
+        self.ride_rows = rd.of(a)
+        ride_i = rd.index_of(a, rd.riding(a))
+        fight_i = rd.index_of(a, rd.fighting(a))
+        for i, r in self.ride_rows:
+            v = rd.info(r)
+            st = ("乘" if i == ride_i else "") + ("战" if i == fight_i else "")
+            self.tv_rides.insert(
+                "", "end", iid="r%d" % i,
+                values=(i + 1, v["name"], v["template"], v["quality_cn"],
+                        "%d/%d" % (v["level"], v["max_level"]), v["exp"],
+                        v["atk"], v["def"], v["hp"], v["mp"], v["agi"],
+                        "%.2f%%" % (v["speed"] * 100),
+                        "%d/%d" % (len(v["skills"]), v["skill_max"]), st),
+                tags=("onride",) if st else ())
+        n = len(self.ride_rows)
+        self.var_ride_note.set(
+            "这个角色 %d 匹坐骑。「阶」1~%d（满阶，游戏 `Game_Ride#max_level` "
+            "写死 9）；「灵气」是升阶用的：1→2 阶要 %s 点、8→9 阶要 %s 点，"
+            "本级满 = 门槛 − 1（改字段填 -1 就等于「本级满」）。"
+            "五资质不是属性值 —— 游戏按「资质 × 主人等级 × 系数」算加成"
+            "（攻/防/法 0.01、体 0.05、速 0.005）。"
+            % (n, rides.RIDE_MAX_LEVEL, rides.next_exp(1),
+               rides.next_exp(8) if n else "-"))
+        if n and not self.tv_rides.selection():
+            self.tv_rides.selection_set("r0")
+        self.on_ride_select()
+
+    def refresh_ride_list_keep(self, keep):
+        """刷完一览表把选中还原到 `keep`（`Game_Ride` 节点）。
+
+        ⚠ 通则：Treeview 重建后必须按 key 恢复选中，否则选中会跳回第一行
+          （批量操作后特别容易看出来）。
+        """
+        idx = -1
+        for i, r in enumerate(getattr(self, "ride_rows", [])):
+            if r[1] is keep:
+                idx = r[0]
+                break
+        self.fill_ride_list()
+        if idx >= 0 and self.tv_rides.exists("r%d" % idx):
+            self.tv_rides.selection_set("r%d" % idx)
+            self.tv_rides.see("r%d" % idx)
+        self.on_ride_select()
+
+    def _ride_key(self):
+        """「改字段」当前选中的字段键（下拉里显示的是中文名）。"""
+        return self._ride_cn_key.get(self.var_ride_field.get(), "level")
+
+    def on_ride_select(self):
+        """选中一行 → 把「改字段」的值同步成这匹的当前值。"""
+        r = self._ride()
+        rd = self.rides_ed()
+        if r is None or rd is None:
+            return
+        key = self._ride_key()
+        self._sync_ride_val_widget(key)
+        self.var_ride_val.set(self._ride_field_text(r, key))
+
+    def _ride_field_text(self, r, key, v=None):
+        rd = self.rides_ed()
+        v = v or rd.info(r)
+        if key == "name":
+            return v["name"]
+        if key == "nickname":
+            return v["nickname"]
+        if key == "quality":
+            return v["quality_cn"]
+        if key == "level":
+            return str(v["level"])
+        if key == "exp":
+            return str(v["exp"])
+        if key == "speed":
+            return "%.2f" % (v["speed"] * 100)
+        if key in ("atk", "def", "hp", "mp", "agi"):
+            return str(v[key])
+        return ""
+
+    def _sync_ride_val_widget(self, key=None):
+        """按字段类型切「改字段」右边那个控件（同召唤兽页五行那一手）。"""
+        if key is None:
+            key = self._ride_key()
+        kind = self._ride_key_kind.get(key, "num")
+        if kind == "choice":
+            self.ent_ride_val.grid_remove()
+            self.cb_ride_val.grid()
+        else:
+            self.cb_ride_val.grid_remove()
+            self.ent_ride_val.grid()
+
+    def apply_ride(self):
+        """把「改字段」的值写进选中那匹坐骑。"""
+        rd = self.rides_ed()
+        r = self._ride()
+        if rd is None or r is None:
+            messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
+                                parent=self.root)
+            return
+        key = self._ride_key()
+        raw = self.var_ride_val.get().strip()
+        try:
+            if key in ("name", "nickname"):
+                if key == "name" and not raw:
+                    raise ValueError("名字不能为空")
+                (rd.set_name if key == "name" else rd.set_nickname)(r, raw)
+            elif key == "quality":
+                if raw not in rides.RIDE_QUALITY:
+                    raise ValueError("品质只能是 %s"
+                                     % "、".join(rides.RIDE_QUALITY))
+                rd.set_quality(r, rides.RIDE_QUALITY.index(raw))
+            elif key == "level":
+                rd.set_level(r, int(raw))
+            elif key == "exp":
+                # -1 = 「本级满灵气」（门槛 − 1），省得自己查表
+                if int(raw) < 0:
+                    v = rd.info(r)
+                    rd.set_exp(r, rides.full_exp(v["level"]) or 0)
+                else:
+                    rd.set_exp(r, int(raw))
+            elif key == "speed":
+                rd.set_speed(r, float(raw) / 100.0)
+            elif key in ("atk", "def", "hp", "mp", "agi"):
+                rd.set_attr(r, key, int(raw))
+            else:
+                raise ValueError("不认识的字段 %r" % key)
+        except (ValueError, rides.RidesError) as e:
+            messagebox.showerror("改不了", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.refresh_ride_list_keep(r)
+        self.set_status("坐骑「%s」：%s → %s"
+                        % (rd.info(r)["name"], self._ride_key_cn.get(key, key),
+                           self._ride_field_text(r, key)))
+
+    # ------------------------------------------------------------ 操作
+    def ride_delete(self):
+        rd = self.rides_ed()
+        a = self._ride_actor()
+        if rd is None or a is None:
+            return
+        sel = self.tv_rides.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在列表里选要放生的坐骑。",
+                                parent=self.root)
+            return
+        idxs = sorted((int(i[1:]) for i in sel), reverse=True)
+        names = [rd.info(self.ride_rows[i][1])["name"] for i in idxs]
+        if not self.confirm("放生坐骑",
+                            "把下列 %d 匹坐骑从「%s」身上删掉：\n\n%s\n\n"
+                            "乘骑 / 出战中的会连引用一起清干净。\n"
+                            "不可撤销。确定吗？"
+                            % (len(idxs), self.sv.actor_name(a),
+                               "、".join(names))):
+            return
+        try:
+            for i in idxs:
+                rd.remove(a, i)
+        except (IndexError, rides.RidesError) as e:
+            messagebox.showerror("放生失败", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_ride_list()
+        self.set_status("坐骑：放生了 %d 匹（%s）"
+                        % (len(idxs), "、".join(names)))
+
+    def ride_toggle(self, which):
+        """`which` = `"ride"`（乘骑）/ `"ride2"`（出战）：选中就设、再点取消。"""
+        rd = self.rides_ed()
+        a = self._ride_actor()
+        if rd is None or a is None:
+            return
+        sel = self.tv_rides.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
+                                parent=self.root)
+            return
+        idx = int(sel[0][1:])
+        node = self.ride_rows[idx][1] if idx < len(self.ride_rows) else None
+        if node is None:
+            return
+        cur = rd.riding(a) if which == "ride" else rd.fighting(a)
+        label = "乘骑" if which == "ride" else "出战"
+        try:
+            if cur is node:
+                (rd.clear_riding if which == "ride" else rd.clear_fighting)(a)
+                msg = "坐骑：已取消%s" % label
+            else:
+                (rd.set_riding if which == "ride" else rd.set_fighting)(a, idx)
+                msg = "坐骑：%s → %s" % (label, rd.info(node)["name"])
+        except rides.RidesError as e:
+            messagebox.showerror(label, human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.refresh_ride_list_keep(node)
+        self.set_status(msg)
+
+    def ride_max_all(self):
+        """「全部拉满」：这个角色列表里所有坐骑 → 神骑 / 9 阶 / 满灵气 /
+        资质 9999 / 移速上限 / 技能填满。"""
+        rd = self.rides_ed()
+        a = self._ride_actor()
+        if rd is None or a is None or not self.ride_rows:
+            messagebox.showinfo("提示", "这个角色身上没有坐骑。",
+                                parent=self.root)
+            return
+        if not self.confirm(
+                "全部拉满",
+                "把「%s」身上这 %d 匹坐骑全部拉满：\n\n"
+                "· 品质 → 神骑；阶级 → %d 阶；灵气 → 本级满；\n"
+                "· 五项资质 → %d；移速 → 该坐骑神骑档上限；\n"
+                "· 技能 → 填满到神骑档的 6 个。\n\n"
+                "⚠ 游戏里 `Game_Ride#skill_max` 是「普通 3 / 靓仔 4 / 神骑 6」，\n"
+                "所以填满正好是 6 个。\n"
+                "改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n确定吗？"
+                % (self.sv.actor_name(a), len(self.ride_rows),
+                   rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX)):
+            return
+        keep = self._ride()
+        try:
+            n = rd.max_out_many(a, [i for i, _r in self.ride_rows])
+        except rides.RidesError as e:
+            messagebox.showerror("全部拉满", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_ride_list()
+        if keep is not None:
+            self.refresh_ride_list_keep(keep)
+        self.set_status("坐骑：%d 匹全部拉满（神骑 / %d 阶 / 资质 %d）"
+                        % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX))
+
+    # ------------------------------------------------------------ 新增
+    def ride_add_dialog(self):
+        """新增坐骑：挑坐骑 + 品质 + 阶，可选「灵气/资质/技能一并拉满」。"""
+        rd = self.rides_ed()
+        a = self._ride_actor()
+        if rd is None or a is None:
+            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+            return
+        if rd.donor() is None:
+            messagebox.showinfo(
+                "新增坐骑",
+                "存档里一匹坐骑都没有，克隆不出模板。\n\n"
+                "先用「物品」页给背包加一个「坐骑蛋蛋」(148)，\n"
+                "进游戏把它开掉（开出一匹坐骑），再回来加。", parent=self.root)
+            return
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root)
+        win.title("新增坐骑")
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=10)
+        f.pack(fill="both", expand=True)
+
+        ttk.Label(f, text="坐骑（坐骑蛋蛋能开出的那 8 种）：").grid(
+            row=0, column=0, sticky="w", pady=3)
+        var_ride = tk.StringVar()
+        rows = itemattr.ride_rows()          # [(id, 名字, 移速说明)]
+        labels = ["%s（id %d，%s）" % (nm, rid, desc) for rid, nm, desc in rows]
+        cb = ttk.Combobox(f, textvariable=var_ride, values=labels,
+                          width=34, state="readonly")
+        cb.grid(row=0, column=1, sticky="w", pady=3)
+        # 默认「封印坐骑 = 移速上限最高的那只」（同重抽管理那条口径）
+        _best = itemattr.ride_best_id()
+        cb.set(labels[[r[0] for r in rows].index(_best)] if _best in
+               [r[0] for r in rows] else labels[0])
+
+        ttk.Label(f, text="品质：").grid(row=1, column=0, sticky="w", pady=3)
+        var_q = tk.StringVar(value="神骑")
+        ttk.Combobox(f, textvariable=var_q, values=list(rides.RIDE_QUALITY),
+                     width=8, state="readonly").grid(row=1, column=1,
+                                                     sticky="w", pady=3)
+
+        ttk.Label(f, text="阶级：").grid(row=2, column=0, sticky="w", pady=3)
+        var_lv = tk.StringVar(value=str(rides.RIDE_MAX_LEVEL))
+        ttk.Spinbox(f, textvariable=var_lv, from_=1,
+                    to=rides.RIDE_MAX_LEVEL, width=6).grid(row=2, column=1,
+                                                           sticky="w", pady=3)
+
+        var_full = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="灵气给满（本级满灵气 = 门槛 − 1）",
+                        variable=var_full).grid(row=3, column=1, sticky="w")
+        var_zi = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="五项资质给满（%d）" % rides.RIDE_ATTR_MAX,
+                        variable=var_zi).grid(row=4, column=1, sticky="w")
+        var_sk = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="技能填满（按品质上限）",
+                        variable=var_sk).grid(row=5, column=1, sticky="w")
+
+        ttk.Label(f, text="新加出来的是一匹**独立**的坐骑：\n"
+                          "克隆存档里已有的一匹当模板，再按上面改。\n"
+                          "移速按该坐骑的区间随机（跟坐骑蛋蛋一样），\n"
+                          "品质 > 0 时再乘 1.0~1.5 / 1.5~2.0。",
+                  foreground="#666", justify="left").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(8, 4))
+
+        def go():
+            try:
+                i = labels.index(var_ride.get())
+            except ValueError:
+                i = 0
+            rid = rows[i][0]
+            q = rides.RIDE_QUALITY.index(var_q.get())
+            lv = int(var_lv.get() or 1)
+            exp = rides.full_exp(lv) if var_full.get() else 0
+            skills = None
+            if var_sk.get():
+                skills = list(rides.RIDE_SKILL_MAIN)[:rides.skill_max(q)]
+            try:
+                node = rd.add(a, ride_id=rid, quality=q, level=lv, exp=exp,
+                              skills=skills)
+                if var_zi.get():
+                    for k, _cn in rides.RIDE_ATTR_KEYS:
+                        rd.set_attr(node, k, rides.RIDE_ATTR_MAX)
+            except Exception as e:                   # noqa: BLE001
+                messagebox.showerror("新增坐骑", human(str(e)),
+                                     parent=self.root)
+                return
+            self.mark_dirty()
+            win.destroy()
+            self.fill_ride_list()
+            self.refresh_ride_list_keep(node)
+            self.set_status("坐骑：新增「%s」（%s / %d 阶）"
+                            % (rd.info(node)["name"], rd.info(node)["quality_cn"],
+                               rd.info(node)["level"]))
+
+        bar = ttk.Frame(f)
+        bar.grid(row=7, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        fit_btn(bar, text="取消", command=win.destroy,
+                width=8).pack(side="right", padx=4)
+        fit_btn(bar, text="新增", command=go, width=8).pack(side="right")
+        center_win(win, self.root)
+        esc_close(win)
+        return win
+
+    # ------------------------------------------------------------ 技能
+    def ride_skill_dialog(self):
+        """改选中坐骑的技能：只列坐骑技能池（471~486），按品质卡上限。"""
+        rd = self.rides_ed()
+        r = self._ride()
+        if rd is None or r is None:
+            messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
+                                parent=self.root)
+            return None
+        v = rd.info(r)
+        cap = v["skill_max"]
+        have = list(v["skills"])
+        tk, ttk = self.tk, self.ttk
+        win = tk.Toplevel(self.root)
+        win.title("坐骑技能")
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=10)
+        f.pack(fill="both", expand=True)
+
+        head = tk.StringVar(value="")
+        ttk.Label(f, textvariable=head, justify="left",
+                  wraplength=520).pack(anchor="w")
+        cols = ("on", "id", "name", "kind")
+        tv = ttk.Treeview(f, columns=cols, show="headings", height=12)
+        for c, h, w in zip(cols, ("已学", "id", "名字", "池"),
+                           (44, 50, 220, 60)):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, anchor="w")
+        tv.pack(fill="both", expand=True, pady=6)
+
+        pool = rd.skill_pool()
+        checked = set(have)
+
+        def refresh_head():
+            head.set("「%s」·%s · 已选 %d / 上限 %d\n"
+                     "点一行切换「已学 ⇄ 未学」；保存时按品质上限截断。"
+                     % (v["name"], v["quality_cn"], len(checked), cap))
+        pool_order = []
+        if have:
+            for sid in have:
+                if sid in [s for s, _n, _r in pool]:
+                    pool_order.append(sid)
+        for sid, nm, rare in pool:
+            if sid not in pool_order:
+                pool_order.append(sid)
+        idx_of = dict((s, i) for i, s in enumerate(pool_order))
+
+        def refill():
+            tv.delete(*tv.get_children())
+            names = rd.skill_names()
+            for sid in pool_order:
+                tv.insert("", "end", iid="s%d" % sid,
+                          values=("■" if sid in checked else "□", sid,
+                                  names.get(sid, "?"),
+                                  "稀有" if sid in rides.RIDE_SKILL_RARE else "普通"))
+
+        def toggle(e=None):
+            # ⚠ 必须用 `identify_row(e.y)`：Tk 的 selection 是在**类绑定**里更新的，
+            #   自己这个绑定先跑，这时候 `selection()` 还是旧选中的那一行
+            #   ⇒ 会翻到上一行去（空格键那条路没 event，走 selection 是对的）。
+            if e is not None:
+                iid = tv.identify_row(e.y)
+                ids = [iid] if iid else []
+            else:
+                ids = list(tv.selection())
+            for iid in ids:
+                sid = int(iid[1:])
+                if sid in checked:
+                    checked.discard(sid)
+                elif len(checked) < cap:
+                    checked.add(sid)
+                else:
+                    messagebox.showinfo("上限",
+                                        "这个品质最多 %d 个技能。" % cap,
+                                        parent=win)
+            refill()
+            refresh_head()
+        tv.bind("<Button-1>", toggle)
+        tv.bind("<space>", toggle)
+
+        def set_all(on):
+            checked.clear()
+            if on:
+                for sid, _nm, _r in pool[:cap]:
+                    checked.add(sid)
+            refill()
+            refresh_head()
+
+        refill()
+        refresh_head()
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        fit_btn(bar, text="填满", command=lambda: set_all(True)).pack(side="left")
+        fit_btn(bar, text="清空", command=lambda: set_all(False)
+                ).pack(side="left", padx=6)
+
+        def go():
+            order = [s for s in pool_order if s in checked]
+            order += [s for s in checked if s not in order]
+            try:
+                got = rd.set_skills(r, order)
+            except rides.RidesError as e:
+                messagebox.showerror("坐骑技能", human(str(e)),
+                                     parent=self.root)
+                return
+            self.mark_dirty()
+            win.destroy()
+            self.refresh_ride_list_keep(r)
+            self.set_status("坐骑「%s」：技能 → %d 个"
+                            % (v["name"], len(got)))
+
+        fit_btn(bar, text="保存", command=go, width=8).pack(side="right")
+        fit_btn(bar, text="取消", command=win.destroy,
+                width=8).pack(side="right", padx=4)
+        center_win(win, self.root)
+        esc_close(win)
+        return win
+
     # -------------------------------------------------- 5 开关 / 变量（已隐藏页签）
     def _tab_switch(self, add_to_notebook=True):
         tk, ttk = self.tk, self.ttk
@@ -5602,6 +6249,7 @@ class App(object):
                          ("数据树", self.fill_tree),
                          ("角色", self.fill_actors), ("背包", self.fill_party),
                          ("召唤兽", self.fill_babies),
+                         ("坐骑", self.fill_rides),
                          ("开关/变量", self.fill_switches),   # 页签已隐藏，仅刷新内容
                          ("机器码", lambda: self.machine_show(quiet=True)),
                          ("存档管理", self.saves_refresh),

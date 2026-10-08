@@ -20,6 +20,7 @@ import paths  # noqa: E402
 import game  # noqa: E402
 import itemattr  # noqa: E402
 import marshal_ruby as M  # noqa: E402
+import rides  # noqa: E402
 import save  # noqa: E402
 
 OK = [0, 0]
@@ -1356,6 +1357,123 @@ def main():
     check("落盘重开后 8 项一致",
           dict((r["key"], (r["lv"], r["exp"])) for r in gY.practice(aY))
           == wantX, "%r" % wantX)
+
+    # ================= 坐骑（2026-10-08 川：独立页签 + 增删改 / 乘骑出战）
+    # ================= 坐骑（2026-10-08 川：独立页签 + 增删改 / 乘骑出战）
+    # ⚠ 必须**重新**建一份 SaveDoc：前面第 676 行的 `sv.doc.save()` 之后
+    #   `sv.contents` / `sv.header` 还指着旧那棵树（`Doc.save` 会把
+    #   `doc.objects` 换成重解析出来的新对象），继续用 `sv` 读到的节点
+    #   根本不在 `doc.objects` 里 ⇒ 改上去的东西下次保存全丢（本轮实测踩到）。
+    #   界面侧没这个问题：`save_save()` 存完就是 `save.SaveDoc(doc=self.doc)`。
+    print("\n---- 坐骑（2026-10-08 川：独立页签 + 增删改 / 乘骑出战）----")
+    sv = save.SaveDoc(copy)
+    g = game.GameEditor(sv)
+    rds = rides.Rides(g)
+    aR = sv.actors()[0][1]
+    rowsR = rds.of(aR)
+    check("坐骑能列出来", len(rowsR) >= 1, "%d 匹" % len(rowsR))
+    if rowsR:
+        r0 = rowsR[0][1]
+        i0 = rds.info(r0)
+        check("坐骑字段齐全（名字/品质/阶/灵气/五资质/移速/技能）",
+              all(k in i0 for k in ("name", "quality_cn", "level", "exp", "atk",
+                                    "def", "hp", "mp", "agi", "speed", "skills")),
+              "%s/%s/%s阶" % (i0["name"], i0["quality_cn"], i0["level"]))
+        check("阶上限是 9（游戏 Game_Ride#max_level 写死）",
+              i0["max_level"] == 9 == rides.RIDE_MAX_LEVEL)
+        check("灵气表照 $exps[:ride]（1→2 要 500、8→9 要 10000）",
+              rides.next_exp(1) == 500 and rides.next_exp(8) == 10000,
+              "%s / %s" % (rides.next_exp(1), rides.next_exp(8)))
+        check("「本级满灵气」= 门槛 − 1（9 阶 = 14999）",
+              rides.full_exp(1) == 499 and rides.full_exp(9) == 14999)
+        check("技能上限按品质（普通 3 / 靓仔 4 / 神骑 6）",
+              (rides.skill_max(0), rides.skill_max(1), rides.skill_max(2))
+              == (3, 4, 6))
+        # 改字段
+        rds.set_level(r0, 99)
+        check("改阶会被夹到 9（照游戏 change_level）", rds.info(r0)["level"] == 9)
+        rds.set_level(r0, 0)
+        check("改阶下界是 1", rds.info(r0)["level"] == 1)
+        rds.set_level(r0, 7)
+        rds.set_exp(r0, rides.full_exp(7))
+        check("灵气写到「本级满」", rds.info(r0)["exp"] == rides.full_exp(7))
+        rds.set_attr(r0, "atk", 99999)
+        check("资质夹到 9999（Game_Ride_Attr#get_max_data）",
+              rds.info(r0)["atk"] == 9999)
+        rds.set_speed(r0, 0.095)
+        check("移速写进 @param_plus[6]（×1000）",
+              abs(rds.info(r0)["speed"] - 0.095) < 1e-9
+              and rides.RIDE_SPEED_MUL == 1000,
+              "%r" % rds.info(r0)["speed"])
+        rds.set_quality(r0, 0)
+        check("品质能改（神骑 → 普通）", rds.info(r0)["quality_cn"] == "普通")
+        rds.set_quality(r0, 2)
+        check("品质回到神骑", rds.info(r0)["quality_cn"] == "神骑")
+        rds.set_nickname(r0, "测试昵称")
+        check("昵称能改", rds.info(r0)["nickname"] == "测试昵称")
+        # 技能：按品质截断
+        got = rds.set_skills(r0, [471, 472, 473, 474, 475, 476, 477, 478])
+        check("技能按品质上限截断（神骑 6）", got == [471, 472, 473, 474, 475, 476],
+              "%r" % got)
+        check("技能去重", rds.set_skills(r0, [471, 471, 472]) == [471, 472])
+        # 乘骑 / 出战
+        rds.set_riding(aR, 0)
+        check("能设「乘骑中」", rds.index_of(aR, rds.riding(aR)) == 0)
+        rds.set_fighting(aR, 0)
+        check("能设「出战」", rds.index_of(aR, rds.fighting(aR)) == 0)
+        check("状态列显示「乘战」", rds.bike_state(aR, rds.riding(aR)) == "乘战")
+        rds.clear_riding(aR)
+        check("能取消乘骑", rds.riding(aR) is None)
+
+        # ---- 克隆新增
+        n_before = len(rds.of(aR))
+        new = rds.add(aR, ride_id=258, quality=2, level=9,
+                      exp=rides.full_exp(9), speed=0.19,
+                      skills=[471, 472, 473, 474, 475, 476])
+        check("新增后 +1 匹", len(rds.of(aR)) == n_before + 1)
+        ni = rds.info(new)
+        check("新匹照参数写（神骑 / 9 阶 / 满灵气 / 移速 19%）",
+              ni["quality"] == 2 and ni["level"] == 9
+              and ni["exp"] == rides.full_exp(9) and abs(ni["speed"] - 0.19) < 1e-9,
+              "%s/%s阶/%s" % (ni["quality_cn"], ni["level"], ni["speed"]))
+        check("新匹自引用指回自己（@attr.@master 是这匹）",
+              save._deref(save.ivar(rds.attr_node(new), "@master")) is new)
+        check("新匹 @master 指回主人",
+              save._deref(save.ivar(new, "@master")) is aR)
+        check("新匹没有进入乘骑位（已有一匹乘着时不抢）",
+              rds.index_of(aR, rds.riding(aR)) < 0)
+        # 拉满
+        rds.max_out(aR, 0)
+        m0 = rds.info(rds.of(aR)[0][1])
+        check("拉满：神骑 / 9 阶 / 满灵气 / 资质 9999 / 技能 6",
+              m0["quality"] == 2 and m0["level"] == 9
+              and m0["exp"] == rides.full_exp(9)
+              and m0["atk"] == m0["def"] == m0["hp"] == m0["mp"] == m0["agi"] == 9999
+              and len(m0["skills"]) == 6, "%r" % m0)
+        # 落盘 → 重解析
+        wantR = dict((i, rds.info(r)) for i, r in rds.of(aR))
+        sv.doc.save()
+        # ⚠ 存完必须重开（见本节开头那条）：旧 SaveDoc 的 contents 是旧树
+        sv = save.SaveDoc(copy)
+        g = game.GameEditor(sv)
+        svR = save.SaveDoc(copy)
+        gR = game.GameEditor(svR)
+        rdsR = rides.Rides(gR)
+        aRR = svR.actors()[0][1]
+        gotR = dict((i, rdsR.info(r)) for i, r in rdsR.of(aRR))
+        check("落盘重开后坐骑数一致", len(gotR) == len(wantR),
+              "%d vs %d" % (len(gotR), len(wantR)))
+        check("落盘重开后每匹字段一致",
+              all(gotR[i]["level"] == wantR[i]["level"]
+                  and gotR[i]["exp"] == wantR[i]["exp"]
+                  and gotR[i]["quality"] == wantR[i]["quality"]
+                  and gotR[i]["atk"] == wantR[i]["atk"]
+                  and gotR[i]["skills"] == wantR[i]["skills"]
+                  and gotR[i]["nickname"] == wantR[i]["nickname"]
+                  for i in wantR if i in gotR))
+        # 删
+        rdsR.remove(aRR, 0)
+        check("放生后 -1 匹", len(rdsR.of(aRR)) == len(wantR) - 1)
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))

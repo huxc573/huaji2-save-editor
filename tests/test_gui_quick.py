@@ -187,7 +187,7 @@ def main():
         kill_timers(root)
         root.update()
         say("窗口创建完成（%d 个页签）" % app.nb.index("end"))
-        check("10 个页签都建好（开关/变量页已移到快捷修改）", app.nb.index("end") == 10,
+        check("11 个页签都建好（开关/变量页已移到快捷修改）", app.nb.index("end") == 11,
               "%d 个：%s" % (app.nb.index("end"),
                               [app.nb.tab(i, "text") for i in range(app.nb.index("end"))]))
         # 2026-10-08 川：「角色 / 属性」→「角色」、「说明 / 机制」→「说明」

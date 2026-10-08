@@ -3261,6 +3261,20 @@ class GameEditor(object):
                 self.doc.set_value(node, 0)
         return base, pot
 
+    # ==================================================== 坐骑（@rides）
+    # 一匹坐骑 = 一个 `Game_Ride < Game_Battler` 对象，挂在**角色的** `@rides`
+    # 数组里；`@ride` = 乘骑中、`@ride2` = 出战。规则见 `src/rides.py`。
+    # ⚠ 这些薄封装只给界面读用；写 / 增 / 删走 `rides.Rides`（那边要维护
+    #   自引用链接与 `doc.mark_structural()`，不适合在这里散着做）。
+    def rides(self, actor):
+        """这个角色的坐骑 `[(下标, Game_Ride 节点), ...]`。"""
+        from rides import Rides
+        return Rides(self).of(actor)
+
+    def ride_count_all(self):
+        from rides import Rides
+        return Rides(self).count_all()
+
     # ==================================================== 防作弊体检
     def point_num(self, actor):
         """五维之和（游戏的反作弊就是这么算的：不含潜能）。"""
