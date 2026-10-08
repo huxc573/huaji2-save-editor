@@ -1721,6 +1721,97 @@ def main():
                   all(x is y for x, y in
                       zip([b for _k, b in app.baby_rows], _keep_n)))
 
+        # ---------------- 2026-10-08：修炼管理（人物 A 组 / 召唤兽 B 组）------
+        # 机制：游戏**只在战斗结算**读修炼等级，升级不改属性 ⇒ 主改等级。
+        say("修炼管理（人物 / 召唤兽）…")
+        _btns_actor = [str(w.cget("text")) for w in walk(app.tab_actor)
+                       if w.winfo_class() == "TButton"]
+        _btns_baby = [str(w.cget("text")) for w in walk(app.tab_baby)
+                      if w.winfo_class() == "TButton"]
+        check("「角色 / 属性」页有「人物修炼…」按钮",
+              "人物修炼…" in _btns_actor, "、".join(_btns_actor))
+        check("「召唤兽」页有「召唤兽修炼…」按钮",
+              "召唤兽修炼…" in _btns_baby, "、".join(_btns_baby))
+
+        _winx = _winb = None
+        _axl = app.current_actor()
+        check("人物页已选中角色", _axl is not None)
+        if _axl is not None:
+            _mx = app.g.practice_max(_axl)
+            _lv_now = app.g.actor_level(_axl)
+            app.practice_dialog("A")
+            root.update()
+            _winx = getattr(app, "_practice_win", None)
+            _ix = getattr(app, "_practice_items", None) or []
+            check("「人物修炼」窗口建得起来（4 项）",
+                  _winx is not None and _winx.winfo_exists() and len(_ix) == 4,
+                  len(_ix))
+            check("窗口里 4 项都是 A_ 前缀（人物修炼）",
+                  all(r["key"].startswith("A_") for r, *_ in _ix),
+                  [r["key"] for r, *_ in _ix])
+            check("上限跟着角色等级：%d 级 → %d" % (_lv_now, _mx),
+                  all(r["max"] == _mx for r, *_ in _ix), _mx)
+            check("等级文字显示「x / %d」" % _mx,
+                  all(("/ %d" % _mx) in it[3].get() for it in _ix),
+                  [it[3].get() for it in _ix])
+            _wbtn = [str(w.cget("text")) for w in walk(_winx)
+                     if w.winfo_class() == "TButton"]
+            check("有「一键满级 / 全部清零 / 保存」三个按钮",
+                  all(t in _wbtn for t in ("一键满级", "全部清零", "保存")),
+                  "、".join(_wbtn))
+            _full = [w for w in walk(_winx) if w.winfo_class() == "TButton"
+                     and str(w.cget("text")) == "一键满级"]
+            if _full:
+                _full[0].invoke()
+                root.update()
+                check("「一键满级」把 4 项滑条都拉到 %d" % _mx,
+                      all(abs(it[1].get() - _mx) < 0.01 for it in _ix),
+                      [it[1].get() for it in _ix])
+            _sav = [w for w in walk(_winx) if w.winfo_class() == "TButton"
+                    and str(w.cget("text")) == "保存"]
+            if _sav:
+                _sav[0].invoke()
+                root.update()
+                _nowA = app.g.practice(_axl, "A")
+                check("点「保存」写进副本（A 组 4 项全 %d 级）" % _mx,
+                      all(r["lv"] == _mx for r in _nowA),
+                      [(r["key"], r["lv"]) for r in _nowA])
+                check("保存后状态行有回执",
+                      "修炼" in app.var_status.get(), app.var_status.get())
+                check("保存后窗口自己关掉",
+                      _winx is None or not _winx.winfo_exists())
+
+        _bxl = app._baby_actor()
+        check("召唤兽页角色下拉已选中角色", _bxl is not None)
+        if _bxl is not None:
+            app.practice_dialog("B")
+            root.update()
+            _winb = getattr(app, "_practice_win", None)
+            _ib = getattr(app, "_practice_items", None) or []
+            check("「召唤兽修炼」窗口也是 4 项", len(_ib) == 4, len(_ib))
+            check("B 组窗口的项都是 B_ 前缀（召唤兽修炼）",
+                  all(r["key"].startswith("B_") for r, *_ in _ib),
+                  [r["key"] for r, *_ in _ib])
+            _keepA = [(r["key"], r["lv"]) for r in app.g.practice(_bxl, "A")]
+            _sb = [w for w in walk(_winb) if w.winfo_class() == "TButton"
+                   and str(w.cget("text")) == "保存"] if _winb else []
+            if _sb:
+                _sb[0].invoke()
+                root.update()
+                check("B 组保存不影响 A 组（两组互不干扰）",
+                      [(r["key"], r["lv"])
+                       for r in app.g.practice(_bxl, "A")] == _keepA,
+                      "%r -> %r" % (_keepA, [(r["key"], r["lv"])
+                                             for r in app.g.practice(_bxl, "A")]))
+
+        for _w in (_winx, _winb):
+            try:
+                if _w is not None and _w.winfo_exists():
+                    _w.destroy()
+            except Exception:
+                pass
+        root.update()
+
         app.baby_add_dialog()          # 打开「新增召唤兽」窗口（不点确定，只建得起来）
         root.update()
         opened = [w for w in root.winfo_children()

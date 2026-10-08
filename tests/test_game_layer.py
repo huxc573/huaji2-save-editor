@@ -67,10 +67,16 @@ def main():
         check("计数校验 == 实际持有数（AES 解密对得上）", sec0 == total0,
               "游戏记录 %d / 背包实际 %d" % (sec0, total0))
 
+    # ⚠ 期望值要按**夹取后**的值比：真档第 1 格的数量会随存档漂移，
+    #   一旦 `cnt0 + 7` 越过该物品的上限（多数是 `MAX_ITEM=99`），
+    #   `set_count` 会夹到上限 —— 2026-10-08 真档那格涨到 97 时就假红过
+    #   （97 + 7 = 104 被夹成 99）。
+    want_cnt = min(cnt0 + 7, g.stack_limit(_item_of(g, "Items", slot0)))
     newcnt = cnt0 + 7
     g.set_count("Items", slot0, newcnt)
-    check("改数量生效", dict((r[0], r[5]) for r in g.bag("Items"))[slot0] == newcnt,
-          "%d -> %d" % (cnt0, newcnt))
+    check("改数量生效",
+          dict((r[0], r[5]) for r in g.bag("Items"))[slot0] == want_cnt,
+          "%d -> %d（上限 %d）" % (cnt0, newcnt, want_cnt))
     if sec0 is not None:
         check("改数量后计数校验跟着 +7", g.security_total(iid0) == sec0 + 7,
               "%s -> %s" % (sec0, g.security_total(iid0)))
@@ -1210,6 +1216,77 @@ def main():
     check("重开后仓库一致", now_wh == want_wh, "%d 格" % len(now_wh))
     check("重开后每页件数不变",
           [len(gT.bag("pack", p)) for p in range(4)] == pages_before)
+
+    # ---------------- 2026-10-08：修炼（`@sect_data[:修炼]`，8 项）----------
+    # 机制（V2.201 脚本实测）：游戏**只在战斗结算**读 `[:lv]`，
+    # 升级不改任何属性；`A_*` = 人物修炼、`B_*` = 召唤兽修炼（都在角色身上）。
+    aX = svT.actors()[0][1]
+    rowsX = gT.practice(aX)
+    check("修炼读到 8 项", len(rowsX) == 8, len(rowsX))
+    check("A 组（人物）在前 4 项",
+          [r["key"] for r in rowsX[:4]] ==
+          ["A_攻击", "A_法术", "A_防御", "A_法防"],
+          [r["key"] for r in rowsX[:4]])
+    check("B 组（召唤兽）在后 4 项",
+          [r["key"] for r in rowsX[4:]] ==
+          ["B_攻击", "B_法术", "B_防御", "B_法防"],
+          [r["key"] for r in rowsX[4:]])
+    check("need = (lv² + 3lv + 11) × 10",
+          all(r["need"] == (r["lv"] * r["lv"] + r["lv"] * 3 + 11) * 10
+              for r in rowsX))
+    check("分组读：A / B 各 4 项",
+          len(gT.practice(aX, "A")) == 4 and len(gT.practice(aX, "B")) == 4)
+    check("两组的说明文字对得上",
+          gT.practice(aX, "A")[0]["group_cn"] == "人物修炼"
+          and gT.practice(aX, "B")[0]["group_cn"] == "召唤兽修炼")
+
+    lvX = gT.actor_level(aX)
+    check("角色 %d 级 ⇒ 上限 20" % lvX, gT.practice_max(aX) == 20, lvX)
+
+    orderX = dict((r["key"], (r["lv"], r["exp"])) for r in gT.practice(aX))
+    check("设等级 20 生效", gT.practice_set(aX, "A_攻击", lv=20, exp=0)
+          == (20, 0))
+    check("lv=99 被夹到 20", gT.practice_set(aX, "A_法术", lv=99)[0] == 20)
+    check("lv=-3 被夹到 0", gT.practice_set(aX, "A_防御", lv=-3)[0] == 0)
+    nX = gT.practice_next_exp(5)
+    check("exp 超门槛被夹到 %d（门槛 -1）" % (nX - 1),
+          gT.practice_set(aX, "A_法防", lv=5, exp=99999)[1] == nX - 1)
+    check("只传 exp 时等级不动",
+          gT.practice_set(aX, "B_法术", exp=50)[0] == orderX["B_法术"][0])
+    check("只传 lv 时经验不动",
+          gT.practice_set(aX, "B_攻击", lv=9)[1] == orderX["B_攻击"][1])
+    try:
+        gT.practice_set(aX, "C_攻击", lv=1)
+        check("不存在的修炼项被拒", False, "居然通过了")
+    except KeyError:
+        check("不存在的修炼项被拒", True)
+
+    atrX = list(svT.attr_items(aX))
+    check("B 组一键满级改 4 项",
+          gT.practice_set_group(aX, "B", lv=20, exp=0) == 4)
+    check("B 组全 20 级 / 0 经验",
+          all(r["lv"] == 20 and r["exp"] == 0 for r in gT.practice(aX, "B")))
+    check("A 组清零改 4 项",
+          gT.practice_set_group(aX, "A", lv=0, exp=0) == 4)
+    check("A 组全 0 级", all(r["lv"] == 0 for r in gT.practice(aX, "A")))
+    check("改修炼**不动属性**（@attr 原样）",
+          list(svT.attr_items(aX)) == atrX)
+
+    # 上限跟着角色等级走：≥90 级 → 25
+    gT.sv.set_actor_field(aX, "@level", 90)
+    check("90 级 ⇒ 上限 25", gT.practice_max(aX) == 25)
+    check("90 级能写到 25", gT.practice_set(aX, "A_攻击", lv=25)[0] == 25)
+    gT.sv.set_actor_field(aX, "@level", lvX)
+    check("退回 %d 级 ⇒ 上限又变 20" % lvX, gT.practice_max(aX) == 20)
+
+    wantX = dict((r["key"], (r["lv"], r["exp"])) for r in gT.practice(aX))
+    svT.doc.save()
+    svY = save.SaveDoc(copyS)
+    gY = game.GameEditor(svY)
+    aY = svY.actors()[0][1]
+    check("落盘重开后 8 项一致",
+          dict((r["key"], (r["lv"], r["exp"])) for r in gY.practice(aY))
+          == wantX, "%r" % wantX)
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))

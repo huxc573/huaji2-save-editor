@@ -132,6 +132,42 @@ MAX_ITEM_BY_ID = {2: 9999, 3: 9999,        # 包子 / 佛手
 #: 仓库页数上限（工具不判会员，按脚本 `max_warehouse` 的最大值 12+3+5=20 兜着）。
 MAX_WAREHOUSE_PAGES = 20
 
+# --------------------------------------------------------------------------
+# 修炼（`Game_Actor#@sect_data[:修炼]`，8 项）
+#
+# 2026-10-08 逐条对过内测版 V2.201 脚本（`script00_00000020.rb`）与尝鲜版
+# （`0000_000015.rb`），**两版差别不小**，别照抄尝鲜版：
+#   * 8 项**全在人物身上**：`A_*` = 人物修炼、`B_*` = 召唤兽修炼。
+#     召唤兽对象自己**没有** `@sect_data` —— 战斗里走
+#     `宝宝.master.sect_data[:修炼][:B_攻击][:lv]`（`master` 是主人＝人物）。
+#   * **升级不改属性**：`@attr`（体质/力量那套加点）与修炼毫无关系。
+#     全部 17 处引用都在**战斗结算**里实时读 `[:lv]` ⇒ 改等级立即生效，
+#     不用重算任何字段（`exp` 只是"距离下一级的进度"，与战斗无关）。
+#   * 上限：`level < 90 ? 20 : Config::Game::MAX_XIULIAN_LEVEL`（**25**）。
+#     ⚠ 战斗读 lv 时**不校验上限** ⇒ 写 25 也照生效，只是游戏界面显示「25/20」。
+#   * 门槛：`practice_next_level_exp(lv) = (lv² + 3lv + 11) × 10`
+#     （0→1 要 110 点，20→21 要 4710 点；每次点修炼只 +10 点、一次只升 1 级）。
+#   * 每级加成（`v` = 结算前伤害，`chance` = 封印几率）：
+#       攻击/防御/法术/法防：伤害 / 减伤  `±(v*0.02 + 5) * lv`
+#       攻击：命中 `目标闪避 -= 0.005 * lv`（即每级 +0.5% 命中）
+#       法术：抗封 `chance -= lv * 0.02`；治疗 `回复 += 基础回复 * lv * 0.02`
+#       法防：封印命中 `chance += lv * 0.012`
+# --------------------------------------------------------------------------
+#: 组内 4 项的顺序（和游戏「修炼」界面两栏的排布一致）
+PRACTICE_NAMES = ("攻击", "法术", "防御", "法防")
+#: 两组：A = 人物修炼、B = 召唤兽修炼
+PRACTICE_GROUPS = (("A", "人物修炼"), ("B", "召唤兽修炼"))
+#: 每项的战斗作用（给界面当说明用，系数都从脚本里抄的）
+PRACTICE_DESC = {
+    "攻击": "物理伤害 +2%/级（另加 5 点/级），命中 +0.5%/级",
+    "法术": "法术伤害与治疗量 +2%/级，被封印几率 -2%/级",
+    "防御": "受到的物理伤害 -2%/级（再减 5 点/级）",
+    "法防": "受到的法术伤害 -2%/级（再减 5 点/级），封印命中 +1.2%/级",
+}
+#: 修炼等级上限（角色 ≥90 级时；<90 级只有 20）
+PRACTICE_MAX_LV = 25
+PRACTICE_LV_BELOW_90 = 20
+
 
 # --------------------------------------------------------------------------
 # 节点小工具
@@ -2177,6 +2213,128 @@ class GameEditor(object):
 
     def add_exp(self, actor, delta):
         return self.set_exp(actor, self.exp(actor) + int(delta))
+
+    # ==================================================== 修炼（@sect_data[:修炼]）
+    # 机制与系数见模块头「修炼」那一段。这里只做**读 / 写**两件事：
+    # 写走 `doc.set_value`（标量就地补丁），不新增节点 ⇒ 不用整档重写。
+    def practice_max(self, actor):
+        """这个角色现在能把修炼点到几级：<90 级 → 20，≥90 级 → 25。"""
+        return (PRACTICE_LV_BELOW_90 if self.actor_level(actor) < 90
+                else PRACTICE_MAX_LV)
+
+    @staticmethod
+    def practice_next_exp(lv):
+        """升到下一级需要的**修炼经验**（游戏 `practice_next_level_exp`）。
+
+        `(lv² + 3lv + 11) × 10`：0→1 是 110、20→21 是 4710。
+        ⚠ 这是"点修炼加多少经验"的门槛，不是角色经验 —— 每次点修炼只 +10 点。
+        """
+        lv = max(0, int(lv))
+        return (lv * lv + lv * 3 + 11) * 10
+
+    def _practice_hash(self, actor):
+        """`@sect_data[:修炼]` 那个 HashNode（8 项）。
+
+        缺了就抛 KeyError（带人话说明）—— 不现场造结构：造出来的半截 Hash
+        一旦少项，游戏的 `keys[@index]` 会取到 nil 直接报错。
+
+        ⚠⚠ **键要比的是 `M.value_of(_deref(k))`，不能 `isinstance(k, SymbolNode)`**：
+          真档里 `:门派`/`:辅助` 是 `IVarNode(inner=SymbolNode)`（盘上 `I:门派`），
+          而 `:A_攻击` 这 8 项也**全是 IVarNode** —— 只有 `:修炼` 自己是裸
+          `SymbolNode`。少了 `_deref` 就会「读得到 8 项但每项都是 0、写不进」，
+          静默无异常（2026-10-08 探针里就是这么栽的）。
+        """
+        sd = _deref(ivar(actor, "@sect_data"))
+        if not isinstance(sd, M.HashNode):
+            raise KeyError("这个角色没有 @sect_data（门派/修炼数据）")
+        for k, v in sd.pairs:
+            if M.value_of(_deref(k)) == "修炼":
+                h = _deref(v)
+                if isinstance(h, M.HashNode):
+                    return h
+                raise KeyError(":修炼 不是 Hash（存档结构异常）")
+        raise KeyError("这个角色还没有 :修炼 数据（游戏里没开启修炼？）")
+
+    @staticmethod
+    def _practice_field(node, name):
+        """修炼项（`{lv:…, exp:…}`）里的某个字段节点；没有返回 None。"""
+        if not isinstance(node, M.HashNode):
+            return None
+        for k, v in node.pairs:
+            if M.value_of(_deref(k)) == name:
+                return v
+        return None
+
+    def practice(self, actor, group=None):
+        """读修炼现状。
+
+        `group` 传 `"A"` / `"B"` 只取那一组，`None` = 8 项全给（A 组在前）。
+        每项：`{key, group, group_cn, name, lv, exp, need, max, desc}`
+        —— `need` = 升下一级还差多少修炼经验。
+        """
+        h = self._practice_hash(actor)
+        mx = self.practice_max(actor)
+        out = []
+        for g, gcn in PRACTICE_GROUPS:
+            if group is not None and g != group:
+                continue
+            for nm in PRACTICE_NAMES:
+                key = "%s_%s" % (g, nm)
+                node = None
+                for k, v in h.pairs:
+                    if M.value_of(_deref(k)) == key:
+                        node = _deref(v)
+                        break
+                lv = get_int(self._practice_field(node, "lv"), 0)
+                exp = get_int(self._practice_field(node, "exp"), 0)
+                out.append({"key": key, "group": g, "group_cn": gcn,
+                            "name": nm, "lv": lv, "exp": exp, "max": mx,
+                            "need": self.practice_next_exp(lv),
+                            "desc": PRACTICE_DESC.get(nm, "")})
+        return out
+
+    def practice_set(self, actor, key, lv=None, exp=None):
+        """写一项修炼（`key` 形如 `"A_攻击"`），返回 `(lv, exp)`。
+
+        * `lv` 夹到 `0..practice_max()`；`exp` 夹到 `0..(本级门槛 - 1)`
+          （到门槛游戏就该升级了，它自己也不会停在 ≥ 门槛）。
+        * 传 `None` = 这一项不动。
+        * 只改 `[:lv]` / `[:exp]` 两个整数节点，别的一律不碰。
+        """
+        h = self._practice_hash(actor)
+        mx = self.practice_max(actor)
+        node = None
+        for k, v in h.pairs:
+            if M.value_of(_deref(k)) == key:
+                node = _deref(v)
+                break
+        if not isinstance(node, M.HashNode):
+            raise KeyError("存档里没有修炼项 %s" % key)
+        n_lv = self._practice_field(node, "lv")
+        n_exp = self._practice_field(node, "exp")
+        if n_lv is None or n_exp is None:
+            raise KeyError("修炼项 %s 结构不对（缺 lv / exp）" % key)
+        out_lv = get_int(n_lv, 0) if lv is None else int(lv)
+        out_lv = max(0, min(out_lv, mx))
+        out_exp = get_int(n_exp, 0) if exp is None else int(exp)
+        out_exp = max(0, out_exp)
+        if out_lv < mx and out_exp > self.practice_next_exp(out_lv) - 1:
+            out_exp = self.practice_next_exp(out_lv) - 1
+        self.doc.set_value(_deref(n_lv), out_lv)
+        self.doc.set_value(_deref(n_exp), out_exp)
+        return out_lv, out_exp
+
+    def practice_set_group(self, actor, group, lv=None, exp=0):
+        """整组一起设（一键满级 / 清零），返回改了几项。
+
+        `lv=None` = 等级保持原样，只动经验。
+        """
+        n = 0
+        for row in self.practice(actor, group):
+            self.practice_set(actor, row["key"],
+                              lv=row["lv"] if lv is None else lv, exp=exp)
+            n += 1
+        return n
 
     # ==================================================== 角色技能（@skills）
     # 2026-09-20 加的一层：角色技能可视化编辑要用。
