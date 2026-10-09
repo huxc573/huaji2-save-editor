@@ -2413,6 +2413,56 @@ def main():
                       getattr(app, "_skill_win", None) is None)
         del dialogs[dlg_mark:]       # 本段自造的不算数
 
+        # ---- 坐骑页「铺开面板」（2026-10-09 川：「改属性太麻烦了，想铺开」）
+        say("坐骑页：铺开的属性面板…")
+        app.nb.select(app.tab_ride)
+        root.update()
+        _rk = [k for k, _c, _w in app.RIDE_FORM]
+        check("坐骑面板铺开 11 个字段", len(app.ride_var) == 11
+              and set(app.ride_var) == set(_rk), "%d 个" % len(app.ride_var))
+        _rnode = app._ride()
+        if _rnode is not None:
+            _rds = app.rides_ed()
+            _rv = _rds.info(_rnode)
+            _want = {"name": _rv["name"], "nickname": _rv["nickname"],
+                     "quality": _rv["quality_cn"], "level": str(_rv["level"]),
+                     "exp": str(_rv["exp"]), "atk": str(_rv["atk"]),
+                     "def": str(_rv["def"]), "hp": str(_rv["hp"]),
+                     "mp": str(_rv["mp"]), "agi": str(_rv["agi"]),
+                     "speed": "%.2f" % (_rv["speed"] * 100)}
+            _bad = [k for k, w in _want.items() if app.ride_var[k].get() != w]
+            check("选中即回填全部字段", not _bad, str(_bad))
+            _keep_hp = _rv["hp"]
+            app.ride_var["atk"].set("7777")
+            app.apply_ride()
+            root.update()
+            _rv2 = _rds.info(app._ride())
+            check("应用全部：只写改动过的字段",
+                  _rv2["atk"] == 7777 and _rv2["hp"] == _keep_hp,
+                  "atk=%s hp=%s" % (_rv2["atk"], _rv2["hp"]))
+            app.apply_ride()
+            root.update()
+            check("没改动＝不写（不脏存档）",
+                  "没有改动" in app.var_status.get(),
+                  app.var_status.get()[:30])
+            # 多选（真档每人只有 1 匹 ⇒ 先在副本上加一匹）
+            _rds.add(app._ride_actor(), ride_id=258, quality=2, level=1, exp=0)
+            app.fill_ride_list()
+            root.update()
+            _kids9 = app.tv_rides.get_children()
+            if len(_kids9) >= 2:
+                app.tv_rides.selection_set(_kids9[0], _kids9[1])
+                app.on_ride_select()
+                root.update()
+                app.ride_var["level"].set("3")
+                app.apply_ride()
+                root.update()
+                _lv = [_rds.info(r)["level"] for _i, r in app.ride_rows[:2]]
+                check("多选：改动写给所有选中项", _lv == [3, 3], str(_lv))
+            else:
+                check("多选：改动写给所有选中项", False, "只加到 1 匹")
+        del dialogs[dlg_mark:]       # 本段自造的不算数
+
         check("全程没弹出错误框", not [d for d in dialogs if d[0] == "error"],
               "%r" % ([d[1][0] for d in dialogs if d[0] == "error"][:3],))
     except SystemExit:

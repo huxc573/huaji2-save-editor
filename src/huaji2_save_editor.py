@@ -5069,21 +5069,36 @@ class App(object):
     RIDE_HEADS = ("序", "名字", "模板", "品质", "阶", "灵气",
                   "攻资", "防资", "体资", "法资", "速资", "移速", "技能", "状态")
     RIDE_WIDTHS = (34, 110, 100, 50, 40, 64, 58, 58, 58, 58, 58, 62, 44, 50)
-    #: 「改字段」下拉：(键, 显示名, 控件类型)。`choice` 走只读下拉、`num` 走输入框、
-    #: `text` 走输入框（原名 / 昵称）。
-    RIDE_FIELDS = (
-        ("name", "名字", "text"),
-        ("nickname", "昵称", "text"),
-        ("quality", "品质", "choice"),
-        ("level", "等级(阶)", "num"),
-        ("exp", "灵气", "num"),
-        ("atk", "攻击资质", "num"),
-        ("def", "防御资质", "num"),
-        ("hp", "体力资质", "num"),
-        ("mp", "法力资质", "num"),
-        ("agi", "速度资质", "num"),
-        ("speed", "移速(%)", "num"),
-    )
+    #: 铺开面板的字段表：(键, 标签, 输入框宽)。品质那格是只读下拉，其余是输入框。
+    RIDE_FORM = (("name", "名字", 12), ("nickname", "昵称", 12),
+                 ("quality", "品质", 8), ("level", "阶级", 4),
+                 ("exp", "灵气", 6),
+                 ("atk", "攻资", 5), ("def", "防资", 5), ("hp", "体资", 5),
+                 ("mp", "法资", 5), ("agi", "速资", 5), ("speed", "移速%", 6))
+    #: 悬停提示（键 → 说明）。五资质**不是属性值**，是给召唤兽算加成的系数。
+    RIDE_TIPS = {
+        "name": "坐骑名字（游戏里显示的那个）。",
+        "nickname": "列表里显示的昵称。",
+        "quality": "普通 / 靓仔 / 神骑。\n"
+                   "决定技能位 3/4/6、学技能的阶、资质区间、移速系数。",
+        "level": "1~9 阶（游戏写死 9 阶）。\n"
+                 "⚠ 阶**不涨资质、也不涨移速** —— 游戏里进阶只涨基础属性\n"
+                 "（模板参数曲线）＋ 到 4 / 8 阶再多学一个技能。",
+        "exp": "升阶用的灵气。填 -1 ＝ 本级满（门槛 − 1）。",
+        "atk": "攻击资质（0~9999，不是属性值）。\n"
+                "加成按「资质 × 主人等级 × 0.01」算给**召唤兽**。",
+        "def": "防御资质（0~9999，不是属性值）。\n"
+                "加成按「资质 × 主人等级 × 0.01」算给**召唤兽**。",
+        "hp": "体力资质（0~9999，不是属性值）。\n"
+              "加成按「资质 × 主人等级 × 0.05」算给**召唤兽**。",
+        "mp": "法力资质（0~9999，不是属性值）。\n"
+              "加成按「资质 × 主人等级 × 0.01」算给**召唤兽**。",
+        "agi": "速度资质（0~9999，不是属性值）。\n"
+               "加成按「资质 × 主人等级 × 0.005」算给**召唤兽**。",
+        "speed": "跑图的移动速度（百分比，15 就是 15%）。\n"
+                 "⚠ 不随阶变化 —— 孵蛋时按模板区间随机，\n"
+                 "靓仔 ×1.0~1.5、神骑 ×1.5~2.0。",
+    }
 
     def _tab_ride(self):
         tk, ttk = self.tk, self.ttk
@@ -5159,39 +5174,52 @@ class App(object):
         vs_r.pack(side="right", fill="y")
         self.tv_rides.pack(side="left", fill="x", expand=True)
         hs_r.pack(fill="x")
-        self.tv_rides.bind("<<TreeviewSelect>>", lambda e: self.on_ride_select())
+        # ---------------- 铺开的属性面板（2026-10-09 川：改属性太麻烦，铺开）
+        # 原来是「下拉选字段 → 填值 → 点应用」：改五项资质得来回选五次。
+        # 坐骑一共 11 个可改字段、一屏铺得下 ⇒ 全铺开：选中一行自动回填，
+        # 改完点「应用全部」一次写回（只写变动过的；多选时写给所有选中项）。
+        form = ttk.LabelFrame(f, text="属性", padding=6)
+        form.pack(fill="x", pady=(6, 0))
+        self.ride_var = {}
+        self.ride_ent = {}
+        rows_spec = (self.RIDE_FORM[:5], self.RIDE_FORM[5:])
+        for ri, spec in enumerate(rows_spec):
+            for j, (key, cn, w) in enumerate(spec):
+                ttk.Label(form, text=cn + "：").grid(
+                    row=ri, column=j * 2, sticky="e",
+                    padx=(8 if j else 0, 2), pady=3)
+                var = tk.StringVar()
+                self.ride_var[key] = var
+                if key == "quality":
+                    wdg = ttk.Combobox(form, textvariable=var, width=w,
+                                       values=list(rides.RIDE_QUALITY),
+                                       state="readonly")
+                else:
+                    wdg = ttk.Entry(form, textvariable=var, width=w)
+                wdg.grid(row=ri, column=j * 2 + 1, sticky="w", pady=3)
+                self.ride_ent[key] = wdg
+                if self.RIDE_TIPS.get(key):
+                    self._bind_tip(wdg, self.RIDE_TIPS[key])
+                if key != "quality":
+                    wdg.bind("<Return>", lambda e: self.apply_ride())
 
-        edit = ttk.Frame(f)
-        edit.pack(fill="x", pady=(6, 0))
-        ttk.Label(edit, text="改字段：").pack(side="left")
-        self._ride_field_keys = [k for k, _cn, _t in self.RIDE_FIELDS]
-        self._ride_key_cn = dict((k, cn) for k, cn, _t in self.RIDE_FIELDS)
-        self._ride_cn_key = dict((cn, k) for k, cn, _t in self.RIDE_FIELDS)
-        self._ride_key_kind = dict((k, t) for k, _cn, t in self.RIDE_FIELDS)
-        # 字段用**只读下拉**选（列在界面上，一眼看得到能改什么），
-        # 不像召唤兽页那样靠左边那张字段表 —— 坐骑只有 11 个字段，
-        # 下拉更省纵向空间（角色页/召唤兽页在 1080 窗宽下已经贴着裁切线）。
-        self.var_ride_field = tk.StringVar(value=self._ride_key_cn["level"])
-        cb_field = ttk.Combobox(edit, textvariable=self.var_ride_field,
-                                values=[cn for _k, cn, _t in self.RIDE_FIELDS],
-                                width=12, state="readonly")
-        cb_field.pack(side="left")
-        cb_field.bind("<<ComboboxSelected>>", lambda e: self.on_ride_select())
-        self.var_ride_val = tk.StringVar()
-        val_wrap = ttk.Frame(edit)
-        val_wrap.pack(side="left", padx=(4, 0))
-        self.ent_ride_val = ttk.Entry(val_wrap, textvariable=self.var_ride_val,
-                                      width=14)
-        self.ent_ride_val.grid(row=0, column=0, sticky="w")
-        self.cb_ride_val = ttk.Combobox(val_wrap, textvariable=self.var_ride_val,
-                                        values=list(rides.RIDE_QUALITY),
-                                        width=12, state="readonly")
-        self.cb_ride_val.grid(row=0, column=0, sticky="w")
-        self.cb_ride_val.grid_remove()          # 默认是输入框
-        fit_btn(edit, "应用", self.apply_ride).pack(side="left", padx=6)
-        self.ent_ride_val.bind("<Return>", lambda e: self.apply_ride())
+        bar = ttk.Frame(form)
+        bar.grid(row=2, column=0, columnspan=12, sticky="w", pady=(6, 0))
+        b_apply = fit_btn(bar, "应用全部", self.apply_ride)
+        b_apply.pack(side="left")
+        self._bind_tip(b_apply, "把上面这些框**一次写回**选中的坐骑。\n"
+                                "只写你改动过的那几项，没动的不碰。\n"
+                                "多选时：改动会写给**所有选中项**。")
+        b_back = fit_btn(bar, "读回", lambda: self.on_ride_select())
+        b_back.pack(side="left", padx=4)
+        self._bind_tip(b_back, "放弃输入框里的改动，重新读一遍选中那匹的值。")
+        b_one = fit_btn(bar, "本匹拉满", self.ride_max_pick)
+        b_one.pack(side="left")
+        self._bind_tip(b_one, "把选中的坐骑拉满：\n"
+                              "神骑品质 + %d 阶 + 本级满灵气 + 五项资质 %d\n"
+                              "+ 移速取该坐骑神骑档上限 + 技能填满。"
+                              % (rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX))
         self.ride_rows = []
-        self._sync_ride_val_widget()
 
     # ------------------------------------------------------------ 数据
     def rides_ed(self):
@@ -5266,13 +5294,14 @@ class App(object):
                 tags=("onride",) if st else ())
         n = len(self.ride_rows)
         self.var_ride_note.set(
-            "这个角色 %d 匹坐骑。「阶」1~%d（满阶，游戏 `Game_Ride#max_level` "
-            "写死 9）；「灵气」是升阶用的：1→2 阶要 %s 点、8→9 阶要 %s 点，"
-            "本级满 = 门槛 − 1（改字段填 -1 就等于「本级满」）。"
-            "五资质不是属性值 —— 游戏按「资质 × 主人等级 × 系数」算加成"
-            "（攻/防/法 0.01、体 0.05、速 0.005）。"
-            % (n, rides.RIDE_MAX_LEVEL, rides.next_exp(1),
-               rides.next_exp(8) if n else "-"))
+            "这个角色 %d 匹坐骑。下面的输入框＝**选中那匹**的当前值，"
+            "改完点「应用全部」一次写回（只写改动过的；多选就写给所有选中项）。"
+            "灵气填 -1 ＝ 本级满（8→9 阶要 %s 点）。"
+            "⚠ 阶**不涨资质和移速**：游戏里进阶也只涨基础属性、"
+            "到 4 / 8 阶多学一个技能。"
+            % (n, rides.next_exp(8) if n else "-"))
+        if not n:
+            self._ride_fill_forms(None)
         if n and not self.tv_rides.selection():
             self.tv_rides.selection_set("r0")
         self.on_ride_select()
@@ -5294,94 +5323,159 @@ class App(object):
             self.tv_rides.see("r%d" % idx)
         self.on_ride_select()
 
-    def _ride_key(self):
-        """「改字段」当前选中的字段键（下拉里显示的是中文名）。"""
-        return self._ride_cn_key.get(self.var_ride_field.get(), "level")
+    def _ride_sel(self):
+        """一览表里选中的**全部**坐骑节点（按表里的顺序）。"""
+        out = []
+        for iid in self.tv_rides.selection():
+            try:
+                i = int(iid[1:])
+            except (ValueError, IndexError):
+                continue
+            if 0 <= i < len(self.ride_rows):
+                out.append(self.ride_rows[i][1])
+        return out
 
     def on_ride_select(self):
-        """选中一行 → 把「改字段」的值同步成这匹的当前值。"""
-        r = self._ride()
+        """选中一行 → 把铺开面板的 11 个框全部回填成这匹的当前值。"""
+        sels = self._ride_sel()
+        self._ride_fill_forms(sels[0] if sels else None)
+
+    def _ride_fill_forms(self, r):
+        """把 `r` 的值回填到铺开的输入框；`r=None` 清空。"""
         rd = self.rides_ed()
         if r is None or rd is None:
+            for k in getattr(self, "ride_var", {}):
+                self.ride_var[k].set("")
             return
-        key = self._ride_key()
-        self._sync_ride_val_widget(key)
-        self.var_ride_val.set(self._ride_field_text(r, key))
+        v = rd.info(r)
+        self.ride_var["name"].set(v["name"])
+        self.ride_var["nickname"].set(v["nickname"])
+        self.ride_var["quality"].set(v["quality_cn"])
+        self.ride_var["level"].set(str(v["level"]))
+        self.ride_var["exp"].set(str(v["exp"]))
+        for k in ("atk", "def", "hp", "mp", "agi"):
+            self.ride_var[k].set(str(v[k]))
+        self.ride_var["speed"].set("%.2f" % (v["speed"] * 100))
 
-    def _ride_field_text(self, r, key, v=None):
-        rd = self.rides_ed()
-        v = v or rd.info(r)
+    def _ride_diff(self, cur):
+        """拿面板里的输入跟 `cur`（rd.info 结果）比，返回 `{键: 新值}`。
+
+        只收**真变了**的字段；值域错误直接抛 `ValueError`（调用方弹框）。
+        灵气填 `-1` 特殊：代表「本级满」，只有当前不是满的时候才算改动。
+        """
+        diff = {}
+        nm = self.ride_var["name"].get().strip()
+        if not nm:
+            raise ValueError("名字不能为空")
+        if nm != cur["name"]:
+            diff["name"] = nm
+        nk = self.ride_var["nickname"].get().strip()
+        if nk != cur["nickname"]:
+            diff["nickname"] = nk
+        q = self.ride_var["quality"].get()
+        if q not in rides.RIDE_QUALITY:
+            raise ValueError("品质只能是 %s" % "、".join(rides.RIDE_QUALITY))
+        if rides.RIDE_QUALITY.index(q) != cur["quality"]:
+            diff["quality"] = rides.RIDE_QUALITY.index(q)
+        lv = int(self.ride_var["level"].get().strip())
+        if lv != cur["level"]:
+            diff["level"] = lv
+        e = int(self.ride_var["exp"].get().strip())
+        if e < 0:
+            if cur["exp"] != (rides.full_exp(cur["level"]) or 0):
+                diff["exp"] = -1                  # -1 现算，多选时各按各的阶
+        elif e != cur["exp"]:
+            diff["exp"] = e
+        for k in ("atk", "def", "hp", "mp", "agi"):
+            v = int(self.ride_var[k].get().strip())
+            if v != cur[k]:
+                diff[k] = v
+        sp = float(self.ride_var["speed"].get().strip())
+        if abs(sp - cur["speed"] * 100) > 1e-6:
+            diff["speed"] = sp / 100.0
+        return diff
+
+    def _ride_write(self, rd, r, key, val):
+        """把单个字段写进某匹坐骑（`val` 已解析成对应类型）。"""
         if key == "name":
-            return v["name"]
-        if key == "nickname":
-            return v["nickname"]
-        if key == "quality":
-            return v["quality_cn"]
-        if key == "level":
-            return str(v["level"])
-        if key == "exp":
-            return str(v["exp"])
-        if key == "speed":
-            return "%.2f" % (v["speed"] * 100)
-        if key in ("atk", "def", "hp", "mp", "agi"):
-            return str(v[key])
-        return ""
-
-    def _sync_ride_val_widget(self, key=None):
-        """按字段类型切「改字段」右边那个控件（同召唤兽页五行那一手）。"""
-        if key is None:
-            key = self._ride_key()
-        kind = self._ride_key_kind.get(key, "num")
-        if kind == "choice":
-            self.ent_ride_val.grid_remove()
-            self.cb_ride_val.grid()
+            rd.set_name(r, val)
+        elif key == "nickname":
+            rd.set_nickname(r, val)
+        elif key == "quality":
+            rd.set_quality(r, val)
+        elif key == "level":
+            rd.set_level(r, val)
+        elif key == "exp":
+            if val < 0:
+                val = rides.full_exp(rd.info(r)["level"]) or 0
+            rd.set_exp(r, val)
+        elif key == "speed":
+            rd.set_speed(r, val)
         else:
-            self.cb_ride_val.grid_remove()
-            self.ent_ride_val.grid()
+            rd.set_attr(r, key, val)
 
     def apply_ride(self):
-        """把「改字段」的值写进选中那匹坐骑。"""
+        """把铺开面板**一次写回**选中那匹（多选时写给所有选中项）。
+
+        多选语义跟召唤兽页「改字段作用于全部选中项」一致：拿**第一个**选中项
+        当基准算出「哪些字段变了」，再把改动写给每一个选中项。
+        """
         rd = self.rides_ed()
-        r = self._ride()
-        if rd is None or r is None:
+        sels = self._ride_sel()
+        if rd is None or not sels:
             messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
                                 parent=self.root)
             return
-        key = self._ride_key()
-        raw = self.var_ride_val.get().strip()
+        base = sels[0]
         try:
-            if key in ("name", "nickname"):
-                if key == "name" and not raw:
-                    raise ValueError("名字不能为空")
-                (rd.set_name if key == "name" else rd.set_nickname)(r, raw)
-            elif key == "quality":
-                if raw not in rides.RIDE_QUALITY:
-                    raise ValueError("品质只能是 %s"
-                                     % "、".join(rides.RIDE_QUALITY))
-                rd.set_quality(r, rides.RIDE_QUALITY.index(raw))
-            elif key == "level":
-                rd.set_level(r, int(raw))
-            elif key == "exp":
-                # -1 = 「本级满灵气」（门槛 − 1），省得自己查表
-                if int(raw) < 0:
-                    v = rd.info(r)
-                    rd.set_exp(r, rides.full_exp(v["level"]) or 0)
-                else:
-                    rd.set_exp(r, int(raw))
-            elif key == "speed":
-                rd.set_speed(r, float(raw) / 100.0)
-            elif key in ("atk", "def", "hp", "mp", "agi"):
-                rd.set_attr(r, key, int(raw))
-            else:
-                raise ValueError("不认识的字段 %r" % key)
+            diff = self._ride_diff(rd.info(base))
+            if diff:
+                for r in sels:
+                    for k, v in diff.items():
+                        self._ride_write(rd, r, k, v)
         except (ValueError, rides.RidesError) as e:
             messagebox.showerror("改不了", human(str(e)), parent=self.root)
             return
+        if not diff:
+            self.set_status("坐骑：没有改动")
+            return
         self.mark_dirty()
-        self.refresh_ride_list_keep(r)
-        self.set_status("坐骑「%s」：%s → %s"
-                        % (rd.info(r)["name"], self._ride_key_cn.get(key, key),
-                           self._ride_field_text(r, key)))
+        cn = dict((k, c) for k, c, _w in self.RIDE_FORM)
+        self.refresh_ride_list_keep(base)
+        self.set_status("坐骑：%s%s → 改了 %s"
+                        % (rd.info(base)["name"],
+                           "" if len(sels) == 1 else "（等 %d 匹）" % len(sels),
+                           "、".join(cn[key] for key, _c, _w in self.RIDE_FORM
+                                     if key in diff)))
+
+    def ride_max_pick(self):
+        """把列表里选中的坐骑拉满（品质/阶/灵气/资质/移速/技能）。"""
+        rd = self.rides_ed()
+        a = self._ride_actor()
+        idxs = []
+        for iid in self.tv_rides.selection():
+            try:
+                idxs.append(int(iid[1:]))
+            except (ValueError, IndexError):
+                continue
+        idxs = sorted(set(idxs))
+        if rd is None or a is None or not idxs:
+            messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
+                                parent=self.root)
+            return
+        keep = (self.ride_rows[idxs[0]][1]
+                if idxs[0] < len(self.ride_rows) else None)
+        try:
+            n = rd.max_out_many(a, idxs)
+        except rides.RidesError as e:
+            messagebox.showerror("拉满", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_ride_list()
+        if keep is not None:
+            self.refresh_ride_list_keep(keep)
+        self.set_status("坐骑：%d 匹拉满（神骑 / %d 阶 / 资质 %d）"
+                        % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX))
 
     # ------------------------------------------------------------ 操作
     def ride_delete(self):
