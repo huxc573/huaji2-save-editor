@@ -2489,6 +2489,9 @@ def main():
         check("↑/↓ 已接管所有下拉框（原生 ↑ 本来是空、↓ 本来只弹列表）",
               "break" in app.root.bind_class("TCombobox", "<Up>"),
               repr(app.root.bind_class("TCombobox", "<Up>")[:40]))
+        check("Alt+↓ 接住了「弹列表」（原生 ↓ 被换成换条目后的补位）",
+              bool(app.root.bind_class("TCombobox", "<Alt-Down>")),
+              repr(app.root.bind_class("TCombobox", "<Alt-Down>")[:40]))
         # 真点一次「全员拉满」（跨角色；副本上跑，confirm 在测试里恒 True）
         _all_n = app.rides_ed().count_all()
         app.ride_max_everyone()

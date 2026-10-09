@@ -2567,11 +2567,23 @@ class App(object):
 
         `ttk::combobox` 关着的时候，↑ 没绑定、↓ 是原生 `Post`（只弹列表）。
         这里把 `TCombobox` 这个 class 的 ↑/↓ 接管成「值 ±1」—— 一处生效
-        ＝全部下拉框（含各处子窗口里临时建的那些）。要弹列表还有 **F4**。
+        ＝全部下拉框（含各处子窗口里临时建的那些）。
+        ⚠ 接管 ↓ 等于拿掉了「键盘弹列表」，所以**补一个 Alt+↓ / F4**
+          （跟 Windows 原生 combobox 一致）；要滚列表也可以鼠标滚轮。
         """
         for seq, d in (("<Up>", -1), ("<Down>", 1)):
             self.root.bind_class("TCombobox", seq,
                                  lambda e, d=d: self._combo_step(e.widget, d))
+        for seq in ("<Alt-Down>", "<F4>"):
+            self.root.bind_class("TCombobox", seq,
+                                 lambda e: self._combo_post(e.widget))
+
+    def _combo_post(self, w):
+        """弹开下拉列表（＝原生 ↓ 的行为），现在挂在 Alt+↓ / F4 上。"""
+        try:
+            w.tk.call("ttk::combobox::Post", w)
+        except Exception:                       # noqa: BLE001
+            pass
 
     def _combo_step(self, w, d):
         """把 `w` 的当前值在 `values` 里挪 `d` 位（到顶/到底就停，不循环）。
