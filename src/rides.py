@@ -15,11 +15,12 @@
     def init_skills          # 471~482 里随机抽（5% 概率抽 483~486）
     def level_up             # 每次升级 @seeds[:skills][1] += 1，到 4/8（神骑 3/6/9）阶再抽技能
     def change_level(level)  = clamp(1..9)
-    def get_max_data         = {atk/def/hp/mp/agi: 9999}  # 五资质上限
-    def markup(type)         = 资质 × 主人等级 × (atk/def/mp 0.01 / hp 0.05 / agi 0.005)
+    def get_max_data         = {atk/def/hp/mp/agi: 9999}  # 硬顶（游戏内到不了）
+    def markup(type)         = 资质 × 坐骑阶 × (atk/def/mp 0.01 / hp 0.05 / agi 0.005)
 
-**五资质不是属性值**：上面那个 `markup` 才是它给主人的加成（`Window_Ride
-#get_draw` 画的就是这 5 个数）。坐骑自己的 `@param_plus[6]` = 移速 × 1000
+**五资质不是属性值**：它的作用是 `markup`（= 资质 × 坐骑阶 × 系数），**加给
+这匹统驭的召唤兽**（`Game_Baby#mhp/atk/def/agi` 里的 `r.attr.markup`）；
+面板（`Window_Ride#draw`）画的也只是这 5 个数与它们的加成。坐骑自己的 `@param_plus[6]` = 移速 × 1000
 （蛋的 `data[:speed]`，品质 > 0 时再乘 1.0~1.5 / 1.5~2.0）。
 
 ⚠ 「造一匹新坐骑」走**克隆**：拿存档里已有的一匹当模板，改字段后塞进
@@ -39,8 +40,15 @@ from save import _deref, ivar
 
 #: 坐骑满阶（`Game_Ride#max_level` 写死 9）。
 RIDE_MAX_LEVEL = 9
-#: 五资质上限（`Game_Ride_Attr#get_max_data` 都是 9999）。
+#: 五资质的**代码硬顶**（`Game_Ride_Attr#get_max_data` 都是 9999）。
+#: ⚠ 游戏内到不了这个数，见下面的 `RIDE_ATTR_RANGE`。
 RIDE_ATTR_MAX = 9999
+#: 五资质的**出生区间**（`Game_Ride_Attr#initialize`，按品质）：
+#: 普通 500~1500 / 靓仔 800~1800 / 神骑 1000~2000。
+#: ⚠ 游戏里坐骑资质**只有出生随机这一条来源** —— `level_up` 只动等级与技能、
+#:   「喂养」只加灵气、没有任何加资质的道具 ⇒ 单只坐骑的资质永远 ≤ 本档上限。
+#:   所以「拉满」按这里给，不按 9999。
+RIDE_ATTR_RANGE = ((500, 1500), (800, 1800), (1000, 2000))
 #: 品质：0 普通 / 1 靓仔 / 2 神骑（`rand_average([920,80,1])`）。
 RIDE_QUALITY = ("普通", "靓仔", "神骑")
 #: 各品质的技能上限（`Game_Ride#skill_max`）。
@@ -609,7 +617,7 @@ class Rides(object):
 
         a = self.attr_node(new)
         if a is not None:
-            lo_hi = ((500, 1500), (800, 1800), (1000, 2000))[q]
+            lo_hi = RIDE_ATTR_RANGE[q]
             for k, _cn in RIDE_ATTR_KEYS:
                 node = _deref(ivar(a, "@" + k))
                 if node is not None:
@@ -664,8 +672,12 @@ class Rides(object):
 
     # ------------------------------------------------------------------ 一键
     def max_out(self, actor, index):
-        """把第 `index` 匹拉满：神骑 + 9 阶 + 本级满灵气 + 五资质 9999
-        + 移速取该坐骑神骑档上限 + 技能填满。"""
+        """把第 `index` 匹拉满 —— **全按游戏内规则能给到的最大值**：
+
+        神骑 + 9 阶 + 本级满灵气 + 五资质取神骑档出生上限（`RIDE_ATTR_RANGE`
+        的 2000；9999 只是代码硬顶，游戏里到不了）
+        + 移速取该坐骑神骑档上限 + 技能填满。
+        """
         from itemattr import RIDE_IDS, RIDE_SPEED_RANGE
         _arr, node = self._by_index(actor, index)
         ride = _deref(node)
@@ -674,7 +686,7 @@ class Rides(object):
         self.set_level(ride, RIDE_MAX_LEVEL)
         self.set_exp(ride, full_exp(RIDE_MAX_LEVEL))
         for k, _cn in RIDE_ATTR_KEYS:
-            self.set_attr(ride, k, RIDE_ATTR_MAX)
+            self.set_attr(ride, k, RIDE_ATTR_RANGE[2][1])
         i = RIDE_IDS.index(rid) if rid in RIDE_IDS else 0
         self.set_speed(ride, RIDE_SPEED_RANGE[i][1] * 2.0)
         self.set_skills(ride, list(RIDE_SKILL_MAIN)[:skill_max(2)])

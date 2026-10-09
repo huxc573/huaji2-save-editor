@@ -1444,10 +1444,11 @@ def main():
         # 拉满
         rds.max_out(aR, 0)
         m0 = rds.info(rds.of(aR)[0][1])
-        check("拉满：神骑 / 9 阶 / 满灵气 / 资质 9999 / 技能 6",
+        check("拉满：神骑 / 9 阶 / 满灵气 / 资质取神骑档上限 / 技能 6",
               m0["quality"] == 2 and m0["level"] == 9
               and m0["exp"] == rides.full_exp(9)
-              and m0["atk"] == m0["def"] == m0["hp"] == m0["mp"] == m0["agi"] == 9999
+              and m0["atk"] == m0["def"] == m0["hp"] == m0["mp"] == m0["agi"]
+              == rides.RIDE_ATTR_RANGE[2][1]
               and len(m0["skills"]) == 6, "%r" % m0)
         # 落盘 → 重解析
         wantR = dict((i, rds.info(r)) for i, r in rds.of(aR))
