@@ -1255,12 +1255,12 @@ class SkillManager(object):
         if self.key == "ride":
             rd = self.app.rides_ed()
             out = []
-            for _aid, a in self.app.sv.actors():
+            for aid, a in self.app.sv.actors():
                 for i, r in rd.of(a):
                     if r is src:
                         continue
                     v = rd.info(r)
-                    out.append({"ride": r, "index": i,
+                    out.append({"ride": r, "index": i, "aid": aid,
                                 "who": "%s · 第%d匹"
                                        % (self.app.sv.actor_name(a), i + 1),
                                 "name": "%s(%s)" % (v["name"],
@@ -1275,10 +1275,19 @@ class SkillManager(object):
         和「从…克隆」（整套抄、可选覆盖）方向相反：这里只搬选中的那几个，
         目标已有的自动跳过 —— 语义等同 `learn_many`。
         """
-        sids = self._need_sel()
         src = self.target()
-        if sids is None or src is None:
+        if src is None:
             return
+        # 没勾技能就搬**整套**：技能都配好了，凭什么还要再挑一遍（川 2026-10-09）
+        picked = self.sel_sids()
+        sids = picked or self.have()
+        if not sids:
+            messagebox.showinfo("提示",
+                                "%s还没学技能，没什么可复制的。" % self.who(),
+                                parent=self.win)
+            return
+        what = "选中的 %d 个" % len(sids) if picked \
+            else "它现在这套 %d 个" % len(sids)
         rows = self._copy_targets(src)
         if not rows:
             messagebox.showinfo("提示", "存档里没有别%s可以当目标。"
@@ -1308,7 +1317,7 @@ class SkillManager(object):
         elif self.key == "ride":
             for r in rows:
                 items.append({
-                    "iid": "d%d" % r["index"],
+                    "iid": "d%d_%d" % (r["aid"], r["index"]),
                     "who": r["who"], "no": r["index"] + 1,
                     "name": r["name"], "tname": r["name"],
                     "skills": r["skills"], "obj": r["ride"]})
@@ -1321,14 +1330,18 @@ class SkillManager(object):
                     "skills": self.app.g.actor_skills(x), "obj": x})
 
         win = tk.Toplevel(self.win)
-        win.title("复制 %d 个技能 → 选目标" % len(sids))
+        win.title("复制技能 → 选目标（%s）" % what)
         win.transient(self.win)
         win.grab_set()
         f = ttk.Frame(win, padding=8)
         f.pack(fill="both", expand=True)
-        ttk.Label(f, text="要复制的 %d 个技能：%s"
-                  % (len(sids), skill_text(sids)), foreground="#8a8a8a",
-                  wraplength=600, justify="left").pack(fill="x", pady=(0, 6))
+        ttk.Label(f, text="要复制的技能（%s）：%s" % (what, skill_text(sids)),
+                  foreground="#8a8a8a", wraplength=600,
+                  justify="left").pack(fill="x", pady=(0, 6))
+
+        var_rep = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="覆盖目标的原有技能（先清空再写）",
+                        variable=var_rep).pack(anchor="w", pady=(0, 6))
 
         bar = ttk.Frame(f)
         bar.pack(fill="x")
@@ -1378,31 +1391,49 @@ class SkillManager(object):
             if it is None:
                 return
             tgt, tname = it["obj"], it["tname"]
+            rep = bool(var_rep.get())
             if not self.app.confirm(
                     "复制技能",
-                    "把选中的 %d 个技能加给「%s」？\n"
-                    "（目标原有的技能不动，已经会的自动跳过）"
-                    % (len(sids), tname)):
+                    "把%s技能%s「%s」？\n%s"
+                    % (what,
+                       "覆盖式写到" if rep else "加给", tname,
+                       "（目标原有的技能会被清掉）" if rep else
+                       "（目标原有的技能不动，已经会的自动跳过）")):
                 return
+            over = []
             try:
                 if self.key == "actor":
+                    if rep:
+                        self.app.g.actor_clear_skills(tgt)
                     added, already = self.app.g.actor_learn_many(tgt, sids)
                 elif self.key == "ride":
-                    added, already = self.app.rides_ed().learn_many(
-                        tgt, sids)[:2]
+                    rd = self.app.rides_ed()
+                    if rep:
+                        rd.clear_skills(tgt)
+                    added, already, over = rd.learn_many(tgt, sids)
                 else:
-                    added, already = self.app.babies_ed().learn_many(tgt, sids)
+                    bd = self.app.babies_ed()
+                    if rep:
+                        bd.clear_skills(tgt)
+                    added, already = bd.learn_many(tgt, sids)
             except Exception as e:
                 messagebox.showerror("复制失败", zh_error(e), parent=win)
                 return
             win.destroy()
             self.app.mark_dirty()
             if added:
-                msg = "已把 %d 个技能复制给「%s」" % (len(added), tname)
+                msg = "已把 %d 个技能%s「%s」" % (
+                    len(added), "覆盖写入" if rep else "复制给", tname)
                 if already:
                     msg += "（%d 个目标本来就会，跳过）" % len(already)
+            elif rep:
+                msg = "「%s」已按这套重写（目标原来 %d 个技能被清掉）" \
+                    % (tname, len(already))
             else:
                 msg = "「%s」这些技能本来就都会（%d 个）" % (tname, len(already))
+            if over:
+                cap = rides.skill_max(self.app.rides_ed().info(tgt)["quality"])
+                msg += "；⚠ 另有 %d 个超出目标上限 %d 没写" % (len(over), cap)
             if self.key == "baby":
                 n = len(self.app.babies_ed().skills(tgt))
                 if n > babies.GAME_LEARN_LIMIT:

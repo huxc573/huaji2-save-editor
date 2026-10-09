@@ -2382,6 +2382,31 @@ def main():
                 _got3 = app.rides_ed().skills(app.ride_by_anchor(_w3.anchor))
                 check("全选学会按品质上限截断（%d）" % _cap3,
                       len(_got3) == _cap3, "%d / %d" % (len(_got3), _cap3))
+                # 「复制给…」不勾技能也能搬整套（2026-10-09 川：
+                # 「我已经配置好技能了，为啥还要自己再选一次？」）
+                _w3.refill()
+                root.update()
+                _sel3 = _w3.tv.selection()
+                if _sel3:
+                    _w3.tv.selection_remove(*_sel3)
+                _gs3 = tk.Toplevel.grab_set
+                tk.Toplevel.grab_set = lambda self: None       # 别抢输入
+                try:
+                    _w3.do_copy_to()
+                finally:
+                    tk.Toplevel.grab_set = _gs3
+                root.update()
+                _tws3 = [c for c in _w3.win.winfo_children()
+                         if isinstance(c, tk.Toplevel)]
+                check("「复制给…」不勾技能也能开选目标窗",
+                      len(_tws3) == 1, "%d 个" % len(_tws3))
+                check("没再弹「先选技能」的提示",
+                      not any("先选" in str(a)
+                              for _k, a in dialogs[dlg_mark:]),
+                      str([a[0] for _k, a in dialogs[dlg_mark:]])[:60])
+                for _c in _tws3:
+                    _c.destroy()
+                root.update()
                 _w3.close()
                 root.update()
                 check("关窗后引用清掉（下次能重开）",
