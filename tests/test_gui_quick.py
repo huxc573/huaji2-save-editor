@@ -2461,6 +2461,48 @@ def main():
                 check("多选：改动写给所有选中项", _lv == [3, 3], str(_lv))
             else:
                 check("多选：改动写给所有选中项", False, "只加到 1 匹")
+        # ---- 2026-10-09 川：①「全员拉满」按钮 ②下拉框 ↑/↓ 换条目
+        _btns_r2 = [w.cget("text") for w in walk(app.tab_ride)
+                    if w.winfo_class() == "TButton"]
+        check("坐骑页有「全部拉满」＋「全员拉满」",
+              "全部拉满" in _btns_r2 and "全员拉满" in _btns_r2,
+              "、".join(_btns_r2))
+        _cb = app.cb_ride_actor
+        _cbv = list(_cb.cget("values"))
+        _keep_cb = _cb.get()
+        if len(_cbv) >= 2:
+            _cb.set(_cbv[0])
+            app._combo_step(_cb, 1)
+            root.update()
+            _down_ok = _cb.get() == _cbv[1]
+            app._combo_step(_cb, -1)
+            root.update()
+            check("下拉框按 ↓ / ↑ 换条目（到顶到底就停）",
+                  _down_ok and _cb.get() == _cbv[0],
+                  "%r → %r" % (_cbv[0], _cb.get()))
+        else:
+            check("下拉框按 ↓ / ↑ 换条目（到顶到底就停）", False,
+                  "角色下拉只有 %d 项" % len(_cbv))
+        _cb.set(_keep_cb)
+        app.fill_ride_list()
+        root.update()
+        check("↑/↓ 已接管所有下拉框（原生 ↑ 本来是空、↓ 本来只弹列表）",
+              "break" in app.root.bind_class("TCombobox", "<Up>"),
+              repr(app.root.bind_class("TCombobox", "<Up>")[:40]))
+        # 真点一次「全员拉满」（跨角色；副本上跑，confirm 在测试里恒 True）
+        _all_n = app.rides_ed().count_all()
+        app.ride_max_everyone()
+        root.update()
+        _all_info = [app.rides_ed().info(r)
+                     for _ai, _a in app.sv.actors()
+                     for _i, r in app.rides_ed().of(_a)]
+        check("「全员拉满」把全档坐骑都拉满（%d 匹）" % _all_n,
+              _all_n > 0 and len(_all_info) == _all_n
+              and all(x["quality"] == 2 and x["level"] == 9
+                      and x["atk"] == rides.RIDE_ATTR_RANGE[2][1]
+                      for x in _all_info)
+              and "全员拉满" in app.var_status.get(),
+              app.var_status.get()[:40])
         del dialogs[dlg_mark:]       # 本段自造的不算数
 
         check("全程没弹出错误框", not [d for d in dialogs if d[0] == "error"],

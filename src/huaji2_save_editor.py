@@ -2518,6 +2518,7 @@ class App(object):
         root.title(TITLE)
         root.geometry("1220x800")
 
+        self._bind_combo_keys()
         self._build_top(save_path)
         self._build_notebook()
         self._build_status()
@@ -2559,6 +2560,46 @@ class App(object):
             except Exception:
                 pass
             self._auto_load_job = None
+
+    # ================================================== 下拉框 ↑/↓
+    def _bind_combo_keys(self):
+        """所有下拉框：焦点在框上时按 ↑/↓ 直接换条目（2026-10-09 川）。
+
+        `ttk::combobox` 关着的时候，↑ 没绑定、↓ 是原生 `Post`（只弹列表）。
+        这里把 `TCombobox` 这个 class 的 ↑/↓ 接管成「值 ±1」—— 一处生效
+        ＝全部下拉框（含各处子窗口里临时建的那些）。要弹列表还有 **F4**。
+        """
+        for seq, d in (("<Up>", -1), ("<Down>", 1)):
+            self.root.bind_class("TCombobox", seq,
+                                 lambda e, d=d: self._combo_step(e.widget, d))
+
+    def _combo_step(self, w, d):
+        """把 `w` 的当前值在 `values` 里挪 `d` 位（到顶/到底就停，不循环）。
+
+        并补发 `<<ComboboxSelected>>`，让各处的联动照常跑（换角色刷列表、
+        换页签刷一页之类）。回调返回 `"break"` 吃掉事件。
+        ⚠ 单独拆成一个方法是为了**能直接测** —— 键盘事件在无焦点的窗口上
+          `event_generate` 根本不派发（实测 widget 级/class 级绑定都不进）。
+        """
+        try:
+            vals = list(w.cget("values"))
+        except Exception:                       # noqa: BLE001
+            return None
+        if not vals:
+            return "break"
+        cur = w.get()
+        try:
+            i = vals.index(cur)
+        except ValueError:                      # 空值 / 手填的 → 从一端起步
+            i = -1 if d > 0 else 0
+        j = min(len(vals) - 1, max(0, i + d))
+        if j != i:
+            w.set(vals[j])
+            try:
+                w.event_generate("<<ComboboxSelected>>")
+            except Exception:                   # noqa: BLE001
+                pass
+        return "break"
 
     # ================================================== 顶部
     def _build_top(self, save_path):
@@ -5118,15 +5159,29 @@ class App(object):
 
         top = ttk.Frame(f)
         top.pack(fill="x")
-        # ⚠ 先把右侧的「全部拉满」pack 掉：Tk 的 pack 是"先来先分地盘"，
-        #   空间不够时挨刀的是**最后** pack 的那个（同召唤兽页那条老账）。
+        # ⚠ 先把右侧的「全员拉满 / 全部拉满」pack 掉：Tk 的 pack 是"先来先分
+        #   地盘"，空间不够时挨刀的是**最后** pack 的那个（同召唤兽页那条老账）。
+        #   先 pack 的更靠右 ⇒ 顺序：全员拉满（最右）→ 全部拉满。
+        b_max2 = fit_btn(top, text="全员拉满", command=self.ride_max_everyone)
+        b_max2.pack(side="right")
+        self._bind_tip(b_max2,
+                       "把**所有角色**身上的**所有坐骑**一次拉满：\n"
+                       "神骑品质 + 9 阶 + 本级满灵气\n"
+                       "+ 五项资质 %d（神骑档出生上限，游戏里给不出更大）\n"
+                       "+ 移速取该坐骑神骑档上限。\n"
+                       "技能**不动**（你配好的原样保留）。\n"
+                       "⚠ 是全存档范围：别的角色的坐骑也会一起改，\n"
+                       "放生 / 乘骑中的那些也不挑。\n"
+                       "改完记得点「保存修改」(Ctrl+S)。"
+                       % rides.RIDE_ATTR_RANGE[2][1])
         b_max = fit_btn(top, text="全部拉满", command=self.ride_max_all)
-        b_max.pack(side="right")
+        b_max.pack(side="right", padx=(0, 6))
         self._bind_tip(b_max,
                        "把这个角色**列表里的所有坐骑**一次拉满：\n"
                        "神骑品质 + 9 阶 + 本级满灵气\n"
                        "+ 五项资质 %d（神骑档出生上限，游戏里给不出更大）\n"
-                       "+ 移速取该坐骑神骑档上限 + 技能填满。\n"
+                       "+ 移速取该坐骑神骑档上限。\n"
+                       "技能**不动**（你配好的原样保留）。\n"
                        "⚠ 放生 / 乘骑中的那些也会一起改（不挑）。\n"
                        "改完记得点「保存修改」(Ctrl+S)。"
                        % rides.RIDE_ATTR_RANGE[2][1])
@@ -5586,6 +5641,45 @@ class App(object):
             self.refresh_ride_list_keep(keep)
         self.set_status(
             "坐骑：%d 匹全部拉满（神骑 / %d 阶 / 资质 %d，技能未动）"
+            % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_RANGE[2][1]))
+
+    def ride_max_everyone(self):
+        """「全员拉满」：**所有角色**身上的**所有坐骑** → 神骑 / 9 阶 /
+        满灵气 / 资质（神骑档出生上限）/ 移速上限。**技能不动**。
+        """
+        rd = self.rides_ed()
+        if rd is None or not self.sv:
+            messagebox.showinfo("提示", "先打开一个存档。", parent=self.root)
+            return
+        total = rd.count_all()
+        if not total:
+            messagebox.showinfo("提示", "这个存档里一匹坐骑都没有。",
+                                parent=self.root)
+            return
+        if not self.confirm(
+                "全员拉满",
+                "把存档里**所有角色**身上的 %d 匹坐骑全部拉满：\n\n"
+                "· 品质 → 神骑；阶级 → %d 阶；灵气 → 本级满；\n"
+                "· 五项资质 → %d（神骑档的出生上限）；移速 → 该坐骑神骑档上限；\n"
+                "· 技能 → **不动**，你配好的原样保留。\n\n"
+                "⚠ 这是**全存档**范围：别的角色身上的坐骑也会一起改，\n"
+                "包括放生 / 乘骑中的（不挑）。\n"
+                "改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n确定吗？"
+                % (total, rides.RIDE_MAX_LEVEL,
+                   rides.RIDE_ATTR_RANGE[2][1])):
+            return
+        keep = self._ride()
+        try:
+            n = rd.max_out_all()
+        except rides.RidesError as e:
+            messagebox.showerror("全员拉满", human(str(e)), parent=self.root)
+            return
+        self.mark_dirty()
+        self.fill_ride_list()
+        if keep is not None:
+            self.refresh_ride_list_keep(keep)
+        self.set_status(
+            "坐骑：全员拉满 %d 匹（神骑 / %d 阶 / 资质 %d，技能未动）"
             % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_RANGE[2][1]))
 
     # ------------------------------------------------------------ 新增

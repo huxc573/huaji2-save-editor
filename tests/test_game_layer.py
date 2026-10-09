@@ -1454,6 +1454,19 @@ def main():
         check("拉满不动技能（原样保留，不重配）",
               sk_before and m0["skills"] == sk_before,
               "%r → %r" % (sk_before, m0["skills"]))
+        # 全员拉满（2026-10-09 川：「顺便加个全员拉满按钮」）—— 跨角色
+        _n_all = rds.count_all()
+        _got_all = rds.max_out_all()
+        _bad_all = [(ai, i) for ai, a in sv.actors()
+                    for i, r in rds.of(a)
+                    if not (rds.info(r)["quality"] == 2
+                            and rds.info(r)["level"] == 9
+                            and rds.info(r)["atk"]
+                            == rides.RIDE_ATTR_RANGE[2][1])]
+        check("全员拉满：跨角色、匹数对、全到神骑/9 阶/资质上限",
+              _got_all == _n_all and _n_all > 0 and not _bad_all,
+              "改了 %d / 共 %d，没拉满的 %r"
+              % (_got_all, _n_all, _bad_all))
         # 落盘 → 重解析
         wantR = dict((i, rds.info(r)) for i, r in rds.of(aR))
         sv.doc.save()

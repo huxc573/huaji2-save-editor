@@ -703,3 +703,16 @@ class Rides(object):
             self.max_out(actor, i)
             n += 1
         return n
+
+    def max_out_all(self):
+        """**所有角色**身上的**所有坐骑**一次拉满（界面里「全员拉满」）。
+
+        返回改了匹数。技能跟 `max_out` 一样**一个字都不动**。
+        （2026-10-09 川：「顺便加个全员拉满按钮」）
+        """
+        n = 0
+        for _ai, a in self.sv.actors():
+            for i, _r in self.of(a):
+                self.max_out(a, i)
+                n += 1
+        return n
