@@ -5230,7 +5230,8 @@ class App(object):
         self._bind_tip(b_one,
                        "把选中的坐骑拉满（**全按游戏内规则能给到的最大值**）：\n"
                        "神骑品质 + %d 阶 + 本级满灵气 + 五项资质 %d（神骑档上限）\n"
-                       "+ 移速取该坐骑神骑档上限 + 技能填满。"
+                       "+ 移速取该坐骑神骑档上限。\n"
+                       "技能**不动**——你配好的技能原样保留。"
                        % (rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_RANGE[2][1]))
         self.ride_rows = []
 
@@ -5462,7 +5463,7 @@ class App(object):
                                      if key in diff)))
 
     def ride_max_pick(self):
-        """把列表里选中的坐骑拉满（品质/阶/灵气/资质/移速/技能）。"""
+        """把列表里选中的坐骑拉满（品质/阶/灵气/资质/移速；**技能不动**）。"""
         rd = self.rides_ed()
         a = self._ride_actor()
         idxs = []
@@ -5487,8 +5488,9 @@ class App(object):
         self.fill_ride_list()
         if keep is not None:
             self.refresh_ride_list_keep(keep)
-        self.set_status("坐骑：%d 匹拉满（神骑 / %d 阶 / 资质 %d）"
-                        % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX))
+        self.set_status(
+            "坐骑：%d 匹拉满（神骑 / %d 阶 / 资质 %d，技能未动）"
+            % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_RANGE[2][1]))
 
     # ------------------------------------------------------------ 操作
     def ride_delete(self):
@@ -5554,7 +5556,7 @@ class App(object):
 
     def ride_max_all(self):
         """「全部拉满」：这个角色列表里所有坐骑 → 神骑 / 9 阶 / 满灵气 /
-        资质 9999 / 移速上限 / 技能填满。"""
+        资质（神骑档出生上限）/ 移速上限。**技能不动**。"""
         rd = self.rides_ed()
         a = self._ride_actor()
         if rd is None or a is None or not self.ride_rows:
@@ -5565,13 +5567,12 @@ class App(object):
                 "全部拉满",
                 "把「%s」身上这 %d 匹坐骑全部拉满：\n\n"
                 "· 品质 → 神骑；阶级 → %d 阶；灵气 → 本级满；\n"
-                "· 五项资质 → %d；移速 → 该坐骑神骑档上限；\n"
-                "· 技能 → 填满到神骑档的 6 个。\n\n"
-                "⚠ 游戏里 `Game_Ride#skill_max` 是「普通 3 / 靓仔 4 / 神骑 6」，\n"
-                "所以填满正好是 6 个。\n"
+                "· 五项资质 → %d（神骑档的出生上限）；移速 → 该坐骑神骑档上限；\n"
+                "· 技能 → **不动**，你配好的原样保留。\n\n"
+                "⚠ 阶只涨等级，不涨资质/移速（游戏里也一样）。\n"
                 "改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n确定吗？"
                 % (self.sv.actor_name(a), len(self.ride_rows),
-                   rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX)):
+                   rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_RANGE[2][1])):
             return
         keep = self._ride()
         try:
@@ -5583,8 +5584,9 @@ class App(object):
         self.fill_ride_list()
         if keep is not None:
             self.refresh_ride_list_keep(keep)
-        self.set_status("坐骑：%d 匹全部拉满（神骑 / %d 阶 / 资质 %d）"
-                        % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_MAX))
+        self.set_status(
+            "坐骑：%d 匹全部拉满（神骑 / %d 阶 / 资质 %d，技能未动）"
+            % (n, rides.RIDE_MAX_LEVEL, rides.RIDE_ATTR_RANGE[2][1]))
 
     # ------------------------------------------------------------ 新增
     def ride_add_dialog(self):
@@ -5638,7 +5640,7 @@ class App(object):
         ttk.Checkbutton(f, text="灵气给满（本级满灵气 = 门槛 − 1）",
                         variable=var_full).grid(row=3, column=1, sticky="w")
         var_zi = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text="五项资质给满（%d）" % rides.RIDE_ATTR_MAX,
+        ttk.Checkbutton(f, text="五项资质给满（按品质的出生上限）",
                         variable=var_zi).grid(row=4, column=1, sticky="w")
         var_sk = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="技能填满（按品质上限）",
@@ -5668,7 +5670,7 @@ class App(object):
                               skills=skills)
                 if var_zi.get():
                     for k, _cn in rides.RIDE_ATTR_KEYS:
-                        rd.set_attr(node, k, rides.RIDE_ATTR_MAX)
+                        rd.set_attr(node, k, rides.RIDE_ATTR_RANGE[q][1])
             except Exception as e:                   # noqa: BLE001
                 messagebox.showerror("新增坐骑", human(str(e)),
                                      parent=self.root)

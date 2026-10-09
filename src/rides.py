@@ -676,7 +676,11 @@ class Rides(object):
 
         神骑 + 9 阶 + 本级满灵气 + 五资质取神骑档出生上限（`RIDE_ATTR_RANGE`
         的 2000；9999 只是代码硬顶，游戏里到不了）
-        + 移速取该坐骑神骑档上限 + 技能填满。
+        + 移速取该坐骑神骑档上限。
+
+        ⚠ **技能一个字都不动** —— 拉满是「把数值拉到游戏内能给到的上限」，
+          不是「替你重新配一套」。已经配好的技能、你的组合选择，原样保留。
+          （2026-10-09 川：「你拉满，改我原本的技能干嘛？？」）
         """
         from itemattr import RIDE_IDS, RIDE_SPEED_RANGE
         _arr, node = self._by_index(actor, index)
@@ -689,7 +693,7 @@ class Rides(object):
             self.set_attr(ride, k, RIDE_ATTR_RANGE[2][1])
         i = RIDE_IDS.index(rid) if rid in RIDE_IDS else 0
         self.set_speed(ride, RIDE_SPEED_RANGE[i][1] * 2.0)
-        self.set_skills(ride, list(RIDE_SKILL_MAIN)[:skill_max(2)])
+        # 技能不动：拉满只管数值。要配技能有「技能管理…」那一套。
         return ride
 
     def max_out_many(self, actor, indexes):

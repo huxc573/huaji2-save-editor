@@ -1441,15 +1441,19 @@ def main():
               save._deref(save.ivar(new, "@master")) is aR)
         check("新匹没有进入乘骑位（已有一匹乘着时不抢）",
               rds.index_of(aR, rds.riding(aR)) < 0)
-        # 拉满
+        # 拉满（⚠ 只管数值：技能一个字都不动 —— 2026-10-09 川
+        #   「你拉满，改我原本的技能干嘛？？」）
+        sk_before = rds.skills(rds.of(aR)[0][1])
         rds.max_out(aR, 0)
         m0 = rds.info(rds.of(aR)[0][1])
-        check("拉满：神骑 / 9 阶 / 满灵气 / 资质取神骑档上限 / 技能 6",
+        check("拉满：神骑 / 9 阶 / 满灵气 / 资质取神骑档上限",
               m0["quality"] == 2 and m0["level"] == 9
               and m0["exp"] == rides.full_exp(9)
               and m0["atk"] == m0["def"] == m0["hp"] == m0["mp"] == m0["agi"]
-              == rides.RIDE_ATTR_RANGE[2][1]
-              and len(m0["skills"]) == 6, "%r" % m0)
+              == rides.RIDE_ATTR_RANGE[2][1], "%r" % m0)
+        check("拉满不动技能（原样保留，不重配）",
+              sk_before and m0["skills"] == sk_before,
+              "%r → %r" % (sk_before, m0["skills"]))
         # 落盘 → 重解析
         wantR = dict((i, rds.info(r)) for i, r in rds.of(aR))
         sv.doc.save()
