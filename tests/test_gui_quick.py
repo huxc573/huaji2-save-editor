@@ -151,6 +151,7 @@ def main():
     import paths
     import game
     import save
+    import rides
     from tables import sect
     import huaji2_save_editor
 
@@ -2333,6 +2334,59 @@ def main():
                                          ".huaji2-save-editor")),
               os.path.dirname(p))
         del dialogs[dlg_mark:]       # 本段自造的弹框（含故意的“打开失败”）不算数
+
+        # ---- 坐骑技能管理器（2026-10-09 川：「要做成召唤兽那样，浮窗你也没做」）
+        say("坐骑页：技能管理器（跟召唤兽同一套）…")
+        app.nb.select(app.tab_ride)
+        root.update()
+        _rn = app._ride()
+        check("坐骑页默认选中一匹", _rn is not None)
+        if _rn is not None:
+            _cap3 = rides.skill_max(app.rides_ed().info(_rn)["quality"])
+            _w3 = app.ride_skill_manager()
+            root.update()
+            check("坐骑技能窗＝SkillManager（跟召唤兽同一个窗）",
+                  _w3 is not None and _w3.win.winfo_exists()
+                  and "坐骑技能" in _w3.win.title(),
+                  _w3.win.title() if _w3 is not None else "")
+            if _w3 is not None:
+                _sids3 = [int(k[2:]) for k in _w3.tv.get_children()]
+                check("只列坐骑技能池 471~486（16 个）",
+                      sorted(_sids3) == list(range(471, 487)),
+                      "%d 项" % len(_sids3))
+                check("筛选那一格是「池」（全部 / 普通 / 稀有）",
+                      list(_w3.cb_own.cget("values"))
+                      == ["全部", "普通", "稀有"],
+                      str(_w3.cb_own.cget("values")))
+                _kids3 = _w3.tv.get_children()
+                _w3.tv.selection_set(_kids3[0])
+                _w3.on_select()
+                root.update()
+                _d3 = _w3.desc.get("1.0", "end").strip()
+                check("说明框写出技能说明（原来只有 id / 名字）",
+                      len(_d3) > 10 and "（没有说明）" not in _d3,
+                      _d3.split("\n")[0][:40])
+                # 窗口 transient 到 withdraw 掉的 root，未必真被 map ⇒ bbox 空，
+                # 直接把 identify_row 钉成第一行，走的还是同一条 row_tip。
+                _w3.tv.identify_row = lambda y: _kids3[0]
+                _w3.row_tip(type("E", (), {"x": 4, "y": 2})())
+                root.update()
+                _t3 = tip_text(app)
+                check("鼠标划到技能行 → 浮窗给出技能说明",
+                      bool(_t3) and "技能 #" in _t3,
+                      (_t3 or "").split("\n")[0][:40])
+                app._tip_hide()
+                _w3.select("all")
+                _w3.do_learn()
+                root.update()
+                _got3 = app.rides_ed().skills(app.ride_by_anchor(_w3.anchor))
+                check("全选学会按品质上限截断（%d）" % _cap3,
+                      len(_got3) == _cap3, "%d / %d" % (len(_got3), _cap3))
+                _w3.close()
+                root.update()
+                check("关窗后引用清掉（下次能重开）",
+                      getattr(app, "_skill_win", None) is None)
+        del dialogs[dlg_mark:]       # 本段自造的不算数
 
         check("全程没弹出错误框", not [d for d in dialogs if d[0] == "error"],
               "%r" % ([d[1][0] for d in dialogs if d[0] == "error"][:3],))

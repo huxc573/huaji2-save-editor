@@ -636,7 +636,7 @@ def skill_sections(meta):
 
 
 class SkillManager(object):
-    """技能管理器 —— 批量学 / 忘技能的独立窗口（角色页、召唤兽页共用）。
+    """技能管理器 —— 批量学 / 忘技能的独立窗口（角色页、召唤兽页、坐骑页共用）。
 
     为什么单开窗口（2026-10-04 川定）：主界面那块技能区只有 7 行高、筛选
     只有"搜索"一个维度，「全选 / 反选」这种批量操作根本铺不开；再往左栏挤
@@ -652,9 +652,16 @@ class SkillManager(object):
       旧引用迟早出问题。
     """
 
-    def __init__(self, app, key, first=False):
+    def __init__(self, app, key, first=False, anchor=None):
         self.app = app
-        self.key = key                  # "actor" / "baby"
+        self.key = key                  # "actor" / "baby" / "ride"
+        #: 坐骑用 `(角色下标, 坐骑下标)` 认目标 —— 窗口是常驻的，而
+        #: `doc.save()` 会重解析整档、旧节点全失效，攥着节点引用迟早
+        #: 出问题（见 `target()` / `app.ride_by_anchor()`）。
+        self.anchor = anchor
+        #: 可选技能池：坐骑只能是 471~486 那 16 个；角色 / 召唤兽＝整个表。
+        self.pool = (set(rides.RIDE_SKILL_MAIN) | set(rides.RIDE_SKILL_RARE)
+                     if key == "ride" else None)
         self.meta = app._skills_meta()
         self.desc_full = ""
         tk, ttk = app.tk, app.ttk
@@ -677,12 +684,18 @@ class SkillManager(object):
         ent = ttk.Entry(bar, textvariable=self.var_kw, width=16)
         ent.pack(side="left", padx=4)
         ent.bind("<KeyRelease>", lambda e: self.refill())
-        ttk.Label(bar, text="归属").pack(side="left", padx=(8, 0))
+        # 坐骑没有「门派 / 分段」这一维，这一格改成「池」（普通 / 稀有）——
+        # 坐骑能学的本来就只有 471~486 那 16 个（见 `self.pool`）。
+        ttk.Label(bar, text="池" if key == "ride" else "归属").pack(
+            side="left", padx=(8, 0))
         self.var_own = tk.StringVar(value=OWN_ALL)
         self.groups = skill_sections(self.meta)     # {技能 id: 分段名}
         # 归属下拉 = 表里真实存在的分段名（特效 / 特技 / 锻造技能…）＋ 三个固定项。
         # 2026-10-04 川：「归属不是有很多吗？」—— 原来只列固定项，13 个分段名全丢了。
-        vals = [OWN_ALL] + sorted(set(self.groups.values())) + [OWN_SECT, OWN_NA]
+        if key == "ride":
+            vals = [OWN_ALL, "普通", "稀有"]
+        else:
+            vals = [OWN_ALL] + sorted(set(self.groups.values())) + [OWN_SECT, OWN_NA]
         self.cb_own = ttk.Combobox(bar, textvariable=self.var_own,
                                    state="readonly", width=10,
                                    values=tuple(vals), height=min(len(vals), 20))
@@ -788,9 +801,18 @@ class SkillManager(object):
 
     # ------------------------------------------------------------ 目标 / 数据
     def target(self):
-        """当前操作对象（角色节点 / 召唤兽节点）—— 每次现取，绝不缓存。"""
+        """当前操作对象（角色 / 召唤兽 / 坐骑节点）—— 每次现取，绝不缓存。"""
+        if self.key == "ride":
+            return self.app.ride_by_anchor(self.anchor)
         return self.app.current_actor() if self.key == "actor" \
             else self.app._baby()
+
+    def ride_cap(self):
+        """坐骑这匹品质的技能数上限（普通 3 / 靓仔 4 / 神骑 6）。"""
+        r = self.target()
+        if r is None:
+            return 0
+        return rides.skill_max(self.app.rides_ed().info(r)["quality"])
 
     def have(self):
         """这个目标已学的技能 id 列表（存档真值）。"""
@@ -799,17 +821,27 @@ class SkillManager(object):
             return []
         if self.key == "actor":
             return list(self.app.g.actor_skills(t2))
+        if self.key == "ride":
+            return list(self.app.rides_ed().skills(t2))
         return list(self.app.babies_ed().skills(t2))
 
     def who(self):
         t2 = self.target()
         if t2 is None:
             return "（没选中）"
-        nm = self.app.sv.actor_name(t2) if self.key == "actor" \
-            else self.app.babies_ed().display_name(t2)
+        if self.key == "actor":
+            nm = self.app.sv.actor_name(t2)
+        elif self.key == "ride":
+            v = self.app.rides_ed().info(t2)
+            nm = "%s · %s" % (v["name"], v["quality_cn"])
+        else:
+            nm = self.app.babies_ed().display_name(t2)
         return "「%s」" % nm
 
     def title_text(self):
+        if self.key == "ride":
+            return "坐骑技能 — %s（已学 %d / 上限 %d）" % (
+                self.who(), len(self.have()), self.ride_cap())
         return "技能管理器 — %s（已学 %d 个）" % (self.who(), len(self.have()))
 
     @staticmethod
@@ -836,6 +868,8 @@ class SkillManager(object):
           两边都算的话，「按分段筛出来的行会标着门派名」——同一个筛选里混着两种
           归属，看着就乱。所以分段赢（它是技能表自己的组织方式，门派是另一维度）。
         """
+        if self.key == "ride":
+            return "稀有" if sid in rides.RIDE_SKILL_RARE else "普通"
         sec = getattr(self, "groups", {}).get(sid)
         if sec:
             return sec
@@ -854,6 +888,8 @@ class SkillManager(object):
         mode = self.var_own.get()
         if mode == OWN_ALL:
             return True
+        if self.key == "ride":          # 坐骑这一格是「池」：普通 / 稀有
+            return (mode == "稀有") == (sid in rides.RIDE_SKILL_RARE)
         is_sect = sect.sect_of_skill(sid) is not None
         grouped = bool(self.groups.get(sid))
         if mode == OWN_SECT:
@@ -883,6 +919,8 @@ class SkillManager(object):
             # 判据统一走 `datatables.section_of()`（两种形式都认），别在这儿另写正则。
             if datatables.section_of(nm):
                 continue
+            if self.pool is not None and sid not in self.pool:
+                continue            # 不在池里的（坐骑只有 471~486）不列
             got = sid in have
             if st == ST_HAVE and not got:
                 continue
@@ -899,7 +937,9 @@ class SkillManager(object):
         for sid in keep:
             if tv.exists("sk%d" % sid):
                 tv.selection_add("sk%d" % sid)
-        self.var_count.set("匹配 %d / %d" % (n, len(self.meta)))
+        self.var_count.set("匹配 %d / %d"
+                           % (n, len(self.pool) if self.pool is not None
+                              else len(self.meta)))
         self.on_select()
         try:
             self.win.title(self.title_text())
@@ -911,9 +951,12 @@ class SkillManager(object):
         if sids:
             have = set(self.have())
             n_have = len([s for s in sids if s in have])
-            self.var_sel.set("已选 %d 项（已学 %d / 未学 %d）　"
-                             "点「已学」格子 / 按空格＝切换"
-                             % (len(sids), n_have, len(sids) - n_have))
+            txt = ("已选 %d 项（已学 %d / 未学 %d）　"
+                   "点「已学」格子 / 按空格＝切换"
+                   % (len(sids), n_have, len(sids) - n_have))
+            if self.key == "ride":
+                txt = "已学 %d / 上限 %d　%s" % (len(have), self.ride_cap(), txt)
+            self.var_sel.set(txt)
         else:
             self.var_sel.set("")
         self.show_desc()
@@ -996,7 +1039,14 @@ class SkillManager(object):
         return sids
 
     def warn_limit(self, msg):
-        """召唤兽技能数超游戏上限时补一句警告（角色 `@skills` 没有上限）。"""
+        """召唤兽 / 坐骑技能数超游戏上限时补一句警告（角色 `@skills` 没有上限）。"""
+        if self.key == "ride":
+            n = len(self.have())
+            cap = self.ride_cap()
+            if n > cap:
+                msg += ("；⚠ 现在 %d 个，超过这匹品质的上限 %d"
+                        "（普通 3 / 靓仔 4 / 神骑 6）" % (n, cap))
+            return msg
         if self.key != "baby":
             return msg
         n = len(self.have())
@@ -1011,21 +1061,31 @@ class SkillManager(object):
         t2 = self.target()
         if sids is None or t2 is None:
             return
+        over = []
         try:
             if self.key == "actor":
                 added, already = self.app.g.actor_learn_many(t2, sids)
+            elif self.key == "ride":
+                added, already, over = self.app.rides_ed().learn_many(
+                    t2, sids)
             else:
                 added, already = self.app.babies_ed().learn_many(t2, sids)
         except Exception as e:
             messagebox.showerror("改不了", zh_error(e), parent=self.win)
             return
         if not added:
+            if over:
+                self.app.set_status("一个都没写进去：%d 个超出上限 %d"
+                                    % (len(over), self.ride_cap()))
+                return
             self.app.set_status("选中的 %d 个技能本来就都会了" % len(sids))
             return
         self.app.mark_dirty()
         msg = "已学会 %d 个技能" % len(added)
         if already:
             msg += "（%d 个本来就会，跳过）" % len(already)
+        if over:
+            msg += "；⚠ 另有 %d 个超出上限 %d 没写" % (len(over), self.ride_cap())
         self.after_change(self.warn_limit(msg))
 
     def do_forget(self):
@@ -1036,6 +1096,8 @@ class SkillManager(object):
         try:
             if self.key == "actor":
                 drop, missing = self.app.g.actor_forget_many(t2, sids)
+            elif self.key == "ride":
+                drop, missing = self.app.rides_ed().forget_many(t2, sids)
             else:
                 drop, missing = self.app.babies_ed().forget_many(t2, sids)
         except Exception as e:
@@ -1072,6 +1134,17 @@ class SkillManager(object):
                 ga = self.app.g
                 la, _a = ga.actor_learn_many(t2, learn) if learn else ([], [])
                 fd, _f = ga.actor_forget_many(t2, forget) if forget else ([], [])
+            elif self.key == "ride":
+                # ⚠ 坐骑有品质上限 ⇒ 不能照「先学后忘」两步走：学的时候
+                #   没位置、之后又把原来那几个忘了，全选反相会直接清成 0。
+                #   一次算出目标集合交给 set_skills（它按上限截断）。
+                rd = self.app.rides_ed()
+                cur = list(rd.skills(t2))
+                keep = [s for s in cur if s not in set(forget)]
+                merged = keep + [s for s in learn if s not in keep]
+                final = rd.set_skills(t2, merged)
+                la = [s for s in final if s in set(learn)]
+                fd = [s for s in cur if s not in set(final)]
             else:
                 bd = self.app.babies_ed()
                 la, _a = bd.learn_many(t2, learn) if learn else ([], [])
@@ -1117,12 +1190,22 @@ class SkillManager(object):
             if got:
                 if self.key == "actor":
                     done, _skip = self.app.g.actor_forget_many(t2, [sid])
+                elif self.key == "ride":
+                    done, _skip = self.app.rides_ed().forget_many(t2, [sid])
                 else:
                     done, _skip = self.app.babies_ed().forget_many(t2, [sid])
                 what = "忘掉"
             else:
                 if self.key == "actor":
                     done, _skip = self.app.g.actor_learn_many(t2, [sid])
+                elif self.key == "ride":
+                    done, _skip, _over = self.app.rides_ed().learn_many(
+                        t2, [sid])
+                    if _over:
+                        self.app.set_status("坐骑技能已到上限 %d，"
+                                            "想学新的先忘掉一个。"
+                                            % self.ride_cap())
+                        return
                 else:
                     done, _skip = self.app.babies_ed().learn_many(t2, [sid])
                 what = "学会"
@@ -1150,6 +1233,8 @@ class SkillManager(object):
         try:
             if self.key == "actor":
                 self.app.g.actor_clear_skills(t2)
+            elif self.key == "ride":
+                self.app.rides_ed().clear_skills(t2)
             else:
                 self.app.babies_ed().clear_skills(t2)
         except Exception as e:
@@ -1161,11 +1246,27 @@ class SkillManager(object):
     def _copy_targets(self, src):
         """「复制给…」的可选目标 —— 同类型的**其他**目标（排除自己）。
 
-        召唤兽 → 存档里别的召唤兽（别的角色身上的也行）；角色 → 别的角色。
+        召唤兽 → 存档里别的召唤兽（别的角色身上的也行）；角色 → 别的角色；
+        坐骑 → 存档里别的坐骑（同角色 / 别的角色都算，要的是「会这几招」）。
         """
         if self.key == "baby":
             return [r for r in self.app.babies_ed().all_babies()
                     if r["baby"] is not src]
+        if self.key == "ride":
+            rd = self.app.rides_ed()
+            out = []
+            for _aid, a in self.app.sv.actors():
+                for i, r in rd.of(a):
+                    if r is src:
+                        continue
+                    v = rd.info(r)
+                    out.append({"ride": r, "index": i,
+                                "who": "%s · 第%d匹"
+                                       % (self.app.sv.actor_name(a), i + 1),
+                                "name": "%s(%s)" % (v["name"],
+                                                    v["quality_cn"]),
+                                "skills": list(rd.skills(r))})
+            return out
         return [(aid, x) for aid, x in self.app.sv.actors() if x is not src]
 
     def do_copy_to(self):
@@ -1204,6 +1305,13 @@ class SkillManager(object):
                     "name": "%s / %s" % (r["name"], r["tpl"]),
                     "tname": r["name"],
                     "skills": r["skills"], "obj": r["baby"]})
+        elif self.key == "ride":
+            for r in rows:
+                items.append({
+                    "iid": "d%d" % r["index"],
+                    "who": r["who"], "no": r["index"] + 1,
+                    "name": r["name"], "tname": r["name"],
+                    "skills": r["skills"], "obj": r["ride"]})
         else:
             for aid, x in rows:
                 nm = self.app.sv.actor_name(x)
@@ -1279,6 +1387,9 @@ class SkillManager(object):
             try:
                 if self.key == "actor":
                     added, already = self.app.g.actor_learn_many(tgt, sids)
+                elif self.key == "ride":
+                    added, already = self.app.rides_ed().learn_many(
+                        tgt, sids)[:2]
                 else:
                     added, already = self.app.babies_ed().learn_many(tgt, sids)
             except Exception as e:
@@ -1319,9 +1430,14 @@ class SkillManager(object):
         self.refill()
 
     def sync_main(self):
-        """把主界面那块技能区 / 召唤兽列表刷成新状态。"""
+        """把主界面那块技能区 / 召唤兽 / 坐骑列表刷成新状态。"""
         if self.key == "actor":
             self.app.load_actor()
+        elif self.key == "ride":
+            self.app.fill_ride_list()
+            r = self.target()
+            if r is not None:
+                self.app.refresh_ride_list_keep(r)
         else:
             self.app.load_baby()
             b = self.target()
@@ -4982,7 +5098,7 @@ class App(object):
         b_fight.pack(side="left", padx=(6, 0))
         self._bind_tip(b_fight, "把选中的坐骑设成「出战」(`@ride2`)；\n"
                                 "再点一次取消。出战的那匹会在战斗里替你上。")
-        b_sk = fit_btn(top, text="技能…", command=self.ride_skill_dialog)
+        b_sk = fit_btn(top, text="技能…", command=self.ride_skill_manager)
         b_sk.pack(side="left", padx=(6, 0))
         self._bind_tip(b_sk, "改选中坐骑的技能。\n"
                              "⚠ 只能从坐骑技能池里挑（%s ~ %s 共 16 个），\n"
@@ -5437,124 +5553,56 @@ class App(object):
         return win
 
     # ------------------------------------------------------------ 技能
-    def ride_skill_dialog(self):
-        """改选中坐骑的技能：只列坐骑技能池（471~486），按品质卡上限。"""
-        rd = self.rides_ed()
-        r = self._ride()
-        if rd is None or r is None:
-            messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
-                                parent=self.root)
+    def ride_anchor(self, ride):
+        """坐骑节点 → `(角色下标, 坐骑下标)`；找不到返回 None。
+
+        ⚠ 技能管理器窗口是**常驻**的，而 `doc.save()` 会重解析整档、旧节点
+          全部失效 ⇒ 窗口里绝不能攥着节点引用，只记这对下标、每次现取
+          （`ride_by_anchor`）。角色下标就是 `sv.actors()` 的枚举序 ——
+          存档没增删角色时它稳定不变。
+        """
+        if ride is None or not self.sv:
             return None
-        v = rd.info(r)
-        cap = v["skill_max"]
-        have = list(v["skills"])
-        tk, ttk = self.tk, self.ttk
-        win = tk.Toplevel(self.root)
-        win.title("坐骑技能")
-        win.transient(self.root)
-        win.grab_set()
-        f = ttk.Frame(win, padding=10)
-        f.pack(fill="both", expand=True)
+        rd = self.rides_ed()
+        for ai, a in self.sv.actors():
+            for ri, r in rd.of(a):
+                if r is ride:
+                    return (ai, ri)
+        return None
 
-        head = tk.StringVar(value="")
-        ttk.Label(f, textvariable=head, justify="left",
-                  wraplength=520).pack(anchor="w")
-        cols = ("on", "id", "name", "kind")
-        tv = ttk.Treeview(f, columns=cols, show="headings", height=12)
-        for c, h, w in zip(cols, ("已学", "id", "名字", "池"),
-                           (44, 50, 220, 60)):
-            tv.heading(c, text=h)
-            tv.column(c, width=w, anchor="w")
-        tv.pack(fill="both", expand=True, pady=6)
+    def ride_by_anchor(self, anchor):
+        """`ride_anchor` 的逆：下标 → 当前的 `Game_Ride` 节点（没了就 None）。"""
+        if not anchor or not self.sv:
+            return None
+        ai, ri = anchor
+        rd = self.rides_ed()
+        for a_i, a in self.sv.actors():
+            if a_i != ai:
+                continue
+            rows = rd.of(a)
+            return rows[ri][1] if 0 <= ri < len(rows) else None
+        return None
 
-        pool = rd.skill_pool()
-        checked = set(have)
+    def ride_skill_manager(self):
+        """打开**坐骑技能管理器**。
 
-        def refresh_head():
-            head.set("「%s」·%s · 已选 %d / 上限 %d\n"
-                     "点一行切换「已学 ⇄ 未学」；保存时按品质上限截断。"
-                     % (v["name"], v["quality_cn"], len(checked), cap))
-        pool_order = []
-        if have:
-            for sid in have:
-                if sid in [s for s, _n, _r in pool]:
-                    pool_order.append(sid)
-        for sid, nm, rare in pool:
-            if sid not in pool_order:
-                pool_order.append(sid)
-        idx_of = dict((s, i) for i, s in enumerate(pool_order))
+        跟召唤兽共用同一个窗口（`SkillManager`）—— 搜索 / 池 / 已学·未学三个
+        筛选、说明框、悬停浮窗、空格切换、全选反选都有；差别只在两点：能挑的
+        只有坐骑技能池（471~486 那 16 个），数量上限按品质（普通 3 / 靓仔 4 /
+        神骑 6）。
 
-        def refill():
-            tv.delete(*tv.get_children())
-            names = rd.skill_names()
-            for sid in pool_order:
-                tv.insert("", "end", iid="s%d" % sid,
-                          values=("■" if sid in checked else "□", sid,
-                                  names.get(sid, "?"),
-                                  "稀有" if sid in rides.RIDE_SKILL_RARE else "普通"))
-
-        def toggle(e=None):
-            # ⚠ 必须用 `identify_row(e.y)`：Tk 的 selection 是在**类绑定**里更新的，
-            #   自己这个绑定先跑，这时候 `selection()` 还是旧选中的那一行
-            #   ⇒ 会翻到上一行去（空格键那条路没 event，走 selection 是对的）。
-            if e is not None:
-                iid = tv.identify_row(e.y)
-                ids = [iid] if iid else []
-            else:
-                ids = list(tv.selection())
-            for iid in ids:
-                sid = int(iid[1:])
-                if sid in checked:
-                    checked.discard(sid)
-                elif len(checked) < cap:
-                    checked.add(sid)
-                else:
-                    messagebox.showinfo("上限",
-                                        "这个品质最多 %d 个技能。" % cap,
-                                        parent=win)
-            refill()
-            refresh_head()
-        tv.bind("<Button-1>", toggle)
-        tv.bind("<space>", toggle)
-
-        def set_all(on):
-            checked.clear()
-            if on:
-                for sid, _nm, _r in pool[:cap]:
-                    checked.add(sid)
-            refill()
-            refresh_head()
-
-        refill()
-        refresh_head()
-
-        bar = ttk.Frame(f)
-        bar.pack(fill="x")
-        fit_btn(bar, text="填满", command=lambda: set_all(True)).pack(side="left")
-        fit_btn(bar, text="清空", command=lambda: set_all(False)
-                ).pack(side="left", padx=6)
-
-        def go():
-            order = [s for s in pool_order if s in checked]
-            order += [s for s in checked if s not in order]
-            try:
-                got = rd.set_skills(r, order)
-            except rides.RidesError as e:
-                messagebox.showerror("坐骑技能", human(str(e)),
-                                     parent=self.root)
-                return
-            self.mark_dirty()
-            win.destroy()
-            self.refresh_ride_list_keep(r)
-            self.set_status("坐骑「%s」：技能 → %d 个"
-                            % (v["name"], len(got)))
-
-        fit_btn(bar, text="保存", command=go, width=8).pack(side="right")
-        fit_btn(bar, text="取消", command=win.destroy,
-                width=8).pack(side="right", padx=4)
-        center_win(win, self.root)
-        esc_close(win)
-        return win
+        2026-10-09 川：「坐骑的技能管理，要做成召唤兽那样，浮窗你也没做，
+        我都不知道技能干嘛的。」—— 原来那个自制的勾选窗只有 id / 名字 / 池，
+        没有说明、没有浮窗，看不出技能是干什么的。
+        """
+        r = self._ride()
+        if r is None:
+            messagebox.showinfo("提示", "先在列表里选一匹坐骑。", parent=self.root)
+            return None
+        anchor = self.ride_anchor(r)
+        if anchor is None:
+            return None
+        return self.open_skill_manager("ride", anchor=anchor)
 
     # -------------------------------------------------- 5 开关 / 变量（已隐藏页签）
     def _tab_switch(self, add_to_notebook=True):
@@ -7682,11 +7730,14 @@ class App(object):
         self.set_status("%s（游戏里快捷技能栏/门派技能页不可用；记得点「保存修改」）"
                         % msg)
 
-    def open_skill_manager(self, key):
+    def open_skill_manager(self, key, anchor=None):
         """开技能管理器窗口（已经开着就抬到前面；目标没了就给一句提示）。
 
         ⚠ 窗口是**常驻**的：操作完不自动关，可以连着刷几批。`_skill_win`
           留着引用，这样重复点按钮不会开出第二个一模一样的窗口。
+        ⚠ 坐骑的目标是 `(角色下标, 坐骑下标)` 而不是节点引用（存了也会
+          随 `doc.save()` 失效）⇒ 换另一匹时要把 `anchor` 更新过去；
+          换了目标**类型**（角色 ⇄ 坐骑）就直接换一个窗。
         """
         if key == "actor" and self.current_actor() is None:
             messagebox.showinfo("提示", "先在角色列表选一个角色。",
@@ -7696,14 +7747,22 @@ class App(object):
             messagebox.showinfo("提示", "先在列表里选一只召唤兽。",
                                 parent=self.root)
             return None
+        if key == "ride" and self.ride_by_anchor(anchor) is None:
+            messagebox.showinfo("提示", "先在列表里选一匹坐骑。",
+                                parent=self.root)
+            return None
         w = getattr(self, "_skill_win", None)
         if w is not None and getattr(w, "win", None) is not None \
-                and w.win.winfo_exists():
+                and w.win.winfo_exists() and getattr(w, "key", None) == key:
+            if key == "ride":
+                w.anchor = anchor            # 换另一匹坐骑
             w.win.lift()
             w.win.focus_set()
             w.refill()
             return w
-        w = SkillManager(self, key, first=True)
+        if w is not None:
+            w.close()               # 换了目标类型 ⇒ 换一个窗
+        w = SkillManager(self, key, first=True, anchor=anchor)
         self._skill_win = w
         return w
 

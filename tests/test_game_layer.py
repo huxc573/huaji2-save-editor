@@ -1359,7 +1359,6 @@ def main():
           == wantX, "%r" % wantX)
 
     # ================= 坐骑（2026-10-08 川：独立页签 + 增删改 / 乘骑出战）
-    # ================= 坐骑（2026-10-08 川：独立页签 + 增删改 / 乘骑出战）
     # ⚠ 必须**重新**建一份 SaveDoc：前面第 676 行的 `sv.doc.save()` 之后
     #   `sv.contents` / `sv.header` 还指着旧那棵树（`Doc.save` 会把
     #   `doc.objects` 换成重解析出来的新对象），继续用 `sv` 读到的节点
@@ -1456,10 +1455,8 @@ def main():
         # ⚠ 存完必须重开（见本节开头那条）：旧 SaveDoc 的 contents 是旧树
         sv = save.SaveDoc(copy)
         g = game.GameEditor(sv)
-        svR = save.SaveDoc(copy)
-        gR = game.GameEditor(svR)
-        rdsR = rides.Rides(gR)
-        aRR = svR.actors()[0][1]
+        rdsR = rides.Rides(g)
+        aRR = sv.actors()[0][1]
         gotR = dict((i, rdsR.info(r)) for i, r in rdsR.of(aRR))
         check("落盘重开后坐骑数一致", len(gotR) == len(wantR),
               "%d vs %d" % (len(gotR), len(wantR)))
@@ -1474,6 +1471,39 @@ def main():
         # 删
         rdsR.remove(aRR, 0)
         check("放生后 -1 匹", len(rdsR.of(aRR)) == len(wantR) - 1)
+
+    # ---- 坐骑技能批量学 / 忘 / 清空（2026-10-09 川：「要做成召唤兽那样」）----
+    svS = save.SaveDoc(copy)
+    gS = game.GameEditor(svS)
+    rdsS = rides.Rides(gS)
+    aS = svS.actors()[0][1]
+    if rdsS.of(aS):
+        r0S = rdsS.of(aS)[0][1]
+        i0S = rdsS.info(r0S)
+        capS = rides.skill_max(i0S["quality"])
+        pool = [s for s, _n, _r in rdsS.skill_pool()]
+        check("坐骑技能池 = 471~486 共 16 个",
+              pool == list(range(471, 487)) and len(pool) == 16,
+              "%d 个" % len(pool))
+        curS = set(rdsS.skills(r0S))
+        added, already, over = rdsS.learn_many(r0S, pool)
+        gotS = rdsS.skills(r0S)
+        check("批量学按品质上限截断（超的原样报回、不静默丢）",
+              len(gotS) <= capS
+              and set(already) == set(pool) & curS
+              and set(over) == set(pool) - set(gotS),
+              "%d 个 ≤ 上限 %d，超出 %d" % (len(gotS), capS, len(over)))
+        dropS, missS = rdsS.forget_many(r0S, gotS[:2] + [9999])
+        check("批量忘（不在身上的原样报回）",
+              len(dropS) == min(2, len(gotS)) and missS == [9999],
+              "%s / %s" % (dropS, missS))
+        rdsS.clear_skills(r0S)
+        check("清空技能", rdsS.skills(r0S) == [])
+        svS.doc.save()
+        svS2 = save.SaveDoc(copy)
+        rdsS2 = rides.Rides(game.GameEditor(svS2))
+        check("坐骑技能清空能落盘、重开一致",
+              rdsS2.skills(rdsS2.of(svS2.actors()[0][1])[0][1]) == [])
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))

@@ -400,6 +400,41 @@ class Rides(object):
         self.doc.mark_structural()
         return want
 
+    def learn_many(self, ride, ids):
+        """批量学：返回 `(真写进去的, 本来就会的, 超出上限没写的)`。
+
+        ⚠ 上限是**游戏规则**（`Game_Ride#skill_max`：普通 3 / 靓仔 4 /
+          神骑 6）。超了的**不写**、原样报回去，让界面明说漏了几个 ——
+          直接截断会让人以为「点过了就都学会了」。
+        """
+        cur = self.skills(ride)
+        cap = skill_max(get_int(ivar(ride, "@quality"), 0))
+        already, fresh = [], []
+        for s in ids:
+            s = int(s)
+            if s in cur or s in fresh:
+                already.append(s)
+            else:
+                fresh.append(s)
+        added = fresh[:max(0, cap - len(cur))]
+        over = fresh[len(added):]
+        if added:
+            self.set_skills(ride, cur + added)
+        return added, already, over
+
+    def forget_many(self, ride, ids):
+        """批量忘：返回 `(真忘掉的, 本来就没学的)`。"""
+        cur = self.skills(ride)
+        drop = [int(s) for s in ids if int(s) in cur]
+        missing = [int(s) for s in ids if int(s) not in cur]
+        if drop:
+            self.set_skills(ride, [s for s in cur if s not in set(drop)])
+        return drop, missing
+
+    def clear_skills(self, ride):
+        """把这匹的技能全忘掉。"""
+        return self.set_skills(ride, [])
+
     # ------------------------------------------------------------------ 乘骑 / 出战
     def _by_index(self, actor, index):
         arr = _deref(ivar(actor, "@rides"))
