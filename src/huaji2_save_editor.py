@@ -1532,10 +1532,10 @@ class PayloadManager(object):
         self.win = win
         win.title("重抽管理")
         win.transient(app.root)
-        win.geometry("680x470")
+        win.geometry("700x600")
         # ⚠ 最小宽别小于四列之和（标签 52 + 过滤框 76 + 控件 205 + 提示 250 左右）
         #   —— 提示列是唯一带 weight 的，窗口再窄就先裁它。
-        win.minsize(600, 360)
+        win.minsize(620, 420)
         f = ttk.Frame(win, padding=8)
         f.pack(fill="both", expand=True)
         f.columnconfigure(0, weight=1)
@@ -1811,6 +1811,20 @@ class PayloadManager(object):
         for fd in fields:                       # 第一趟：区间不现算的字段
             if fd.get("rng_fn"):
                 continue
+            if fd["kind"] == "rows":
+                # 行数据：**存档里是什么就回填什么**（含「0 项」—— 空数组在
+                # 游戏里是合法状态，补默认行等于白送属性）。读不出来才铺
+                # `rows_default`（名字 + 满值），那是「按游戏规则新造」的兜底。
+                got = self._current_value(fd["key"])
+                if isinstance(got, list):
+                    cur[fd["key"]] = [dict(r) for r in (got or [])]
+                    continue
+                fn = fd.get("rows_default")
+                try:
+                    cur[fd["key"]] = list(fn(dict(cur))) if fn else []
+                except Exception:                # noqa: BLE001
+                    cur[fd["key"]] = []
+                continue
             val = self._default_of(fd)
             if val is None:
                 val = self._current_value(fd["key"])
@@ -1869,7 +1883,14 @@ class PayloadManager(object):
         pool = (grp.get("pools") or {}).get(fd["key"])
         want = set(pool) if pool else None
         if fd["kind"] == "choice":
-            src = list(fd["choices"])
+            fn = fd.get("choices_fn")
+            if fn:                        # 候选跟着别的字段现算（门派→技能）
+                try:
+                    src = list(fn(self.picked.get(self.fam) or {}))
+                except Exception:         # noqa: BLE001
+                    src = []
+            else:
+                src = list(fd.get("choices") or [])
         elif fd["kind"] == "ride":
             src = [(i, nm) for i, nm, _n in itemattr.ride_rows()]
         elif fd["kind"] == "actor":
@@ -1894,6 +1915,8 @@ class PayloadManager(object):
         ⚠ 控件一律 `sticky="ew"`：列宽＝该列最宽控件的请求宽，窄的那些被拉齐
           ⇒ 右边缘一致，右边那列提示文字的起点也就整齐。
         """
+        if fd["kind"] == "rows":
+            return self._add_rows_row(fd)
         row = self._form_row
         self._form_row += 1
         ttk.Label(self.form, text=fd["label"], anchor="e").grid(
@@ -1935,6 +1958,201 @@ class PayloadManager(object):
         rec["note"].grid(row=row, column=3, sticky="w", padx=(6, 0))
         self._set_row_value(fd["key"])
         self._row_note(fd["key"])
+
+    # ------------------------------------------------------------ 可增删的行
+    def _rows_of(self, key):
+        """当前家族这个 `rows` 字段的数据（`[{列键: 值}, …]`），没有就建空表。"""
+        cur = self.picked.setdefault(self.fam, {})
+        v = cur.get(key)
+        if not isinstance(v, list):
+            v = []
+            cur[key] = v
+        return v
+
+    def _add_rows_row(self, fd):
+        """`kind="rows"` 的字段：一个标签 + 一叠子行（每行几个控件）+ 加/删。
+
+        2026-10-26 川：「1~3 项，你就对应选项，给合适并且对应框不就行了？」
+        —— 圣者精气的五维点数、战神/仙人的属性提升都是**数组**，原先只说
+        「没法拆成下拉」，等于把游戏里点开就看到的数值藏了。这里按行铺开：
+        每行「属性下拉 + 数值 + 上限」，项数在 `min`~`max` 之间可增删；
+        `fixed=True` 的行数由游戏规则定（战神技能数值），只给改值不给增删。
+        """
+        row = self._form_row
+        self._form_row += 1
+        ttk.Label(self.form, text=fd["label"], anchor="ne").grid(
+            row=row, column=0, sticky="ne", padx=(0, 6), pady=2)
+        fr = ttk.Frame(self.form)
+        fr.grid(row=row, column=2, sticky="ew", pady=2)
+        rec = {"fd": fd, "kind": "rows", "row": row, "frame": fr,
+               "subs": [], "vars": []}
+        self.rows[fd["key"]] = rec
+        rec["note"] = ttk.Label(self.form, foreground="#8a8a8a",
+                                justify="left")
+        rec["note"].grid(row=row, column=3, sticky="nw", padx=(6, 0))
+        self._fill_rows(fd["key"])
+
+    def _fill_rows(self, key):
+        """按数据重建这个字段的所有子行（改行数 / 换了依赖项都走这里）。"""
+        rec = self.rows.get(key)
+        if not rec:
+            return
+        for w in list(rec["frame"].children.values()):
+            w.destroy()
+        rec["subs"] = []
+        fd = rec["fd"]
+        cols = fd.get("cols") or []
+        data = self._rows_of(key)
+        for i, item in enumerate(data):
+            self._add_sub_row(rec, i, item, cols)
+        if not fd.get("fixed") and len(data) < int(fd.get("max") or 99):
+            b = fit_btn(rec["frame"], text="＋ 加一项",
+                        command=lambda k=key: self._rows_add(k))
+            b.pack(side="top", anchor="w", pady=(2, 0))
+            self.app._bind_tip(
+                b, "再加一行（最多 %s 项，游戏只按 1 / 2 / 3 项算品阶；\n"
+                   "重复的属性名游戏也会算两项，但没意义）。"
+                   % fd.get("max"))
+        rec["ent"] = rec["subs"][0]["widgets"].get(cols[0]["key"]) \
+            if rec["subs"] else None
+        self._row_note(key)
+
+    def _add_sub_row(self, rec, i, item, cols):
+        """一行子控件：属性下拉 + 数值 + 上限（列由字段的 `cols` 决定）。"""
+        tk, ttk = self.app.tk, self.app.ttk
+        fr = ttk.Frame(rec["frame"])
+        fr.pack(side="top", anchor="w", fill="x")
+        sub = {"item": item, "widgets": {}, "vars": []}
+        for c in cols:
+            if c["kind"] == "choice":
+                pairs = list(c.get("choices") or [])
+                vals = [v for v, _l in pairs]
+                labels = [str(l) for _v, l in pairs]
+                var = tk.StringVar()
+                cb = ttk.Combobox(fr, textvariable=var, state="readonly",
+                                  values=labels, width=c.get("width", 9))
+                cb.pack(side="left", padx=(0, 4))
+                if item.get(c["key"]) in vals:
+                    var.set(labels[vals.index(item[c["key"]])])
+                elif labels:
+                    var.set(labels[0])
+                    item[c["key"]] = vals[0]
+                cb.bind("<<ComboboxSelected>>",
+                        lambda e, it=item, cc=c, vv=vals, ll=labels, w=cb,
+                        kk=rec["fd"]["key"], ii=i:
+                        self._rows_choice(it, cc, w, vv, ll, kk, ii))
+                sub["widgets"][c["key"]] = cb
+                sub["vars"].append(var)
+            else:
+                var = tk.StringVar()
+                v = item.get(c["key"])
+                var.set("" if v is None else
+                        ("%g" % float(v) if isinstance(v, float) else str(v)))
+                ent = ttk.Entry(fr, textvariable=var, width=c.get("width", 7))
+                ent.pack(side="left", padx=(0, 4))
+                var.trace_add("write", lambda *a, it=item, cc=c, vv=var:
+                              self._rows_num(it, cc, vv))
+                sub["widgets"][c["key"]] = ent
+                sub["vars"].append(var)
+                sub["ent"] = ent
+        if not rec["fd"].get("fixed"):
+            lab = ttk.Label(fr, text="✕", cursor="hand2", foreground="#b33")
+            lab.pack(side="left", padx=(2, 0))
+            lab.bind("<Button-1>",
+                     lambda e, k=rec["fd"]["key"], idx=i: self._rows_del(k, idx))
+        rec["subs"].append(sub)
+        # ⚠ StringVar 必须留引用：只挂 textvariable 会被 GC ⇒ 控件变空、
+        #   current() 返回 -1（2026-10-26 经脉窗口踩过一次）。
+        rec["vars"].extend(sub["vars"])
+
+    def _rows_choice(self, item, col, cb, vals, labels, key=None, idx=None):
+        """行里的属性下拉换值：名字换了，「上限」也跟着那一项的满值走。
+
+        只在「上限还是旧名字的满值」（＝用户没手动改过）时才跟，免得把人家
+        特意压低的数值顶回去。
+        """
+        txt = cb.get()
+        if txt not in labels:
+            return
+        new = vals[labels.index(txt)]
+        old = item.get(col["key"])
+        item[col["key"]] = new
+        fd = (self.rows.get(key) or {}).get("fd") or {}
+        full = fd.get("full") or {}
+        if full and item.get("max") is not None \
+                and item.get("max") == full.get(old) and full.get(new):
+            # ⚠ 先刷控件再写 item：Entry 的 trace 会在 delete/insert 之间把
+            #   `item["max"]` pop 掉（读到空串），反序会 KeyError。
+            rec = self.rows.get(key) or {}
+            subs = rec.get("subs") or []
+            w = subs[idx]["widgets"].get("max") \
+                if idx is not None and 0 <= idx < len(subs) else None
+            if w is not None and hasattr(w, "delete"):
+                w.delete(0, "end")
+                w.insert(0, str(full[new]))
+            item["max"] = full[new]
+            # 数值原来按旧上限填的（比如气血 200/200 → 法术防御），换了名
+            # 之后会变成「200/100」这种超上限的组合 → 一起压下来。
+            try:
+                over = float(item.get("val") or 0) > float(item["max"])
+            except (TypeError, ValueError):
+                over = False
+            if over:
+                w2 = subs[idx]["widgets"].get("val") \
+                    if idx is not None and 0 <= idx < len(subs) else None
+                if w2 is not None and hasattr(w2, "delete"):
+                    w2.delete(0, "end")
+                    w2.insert(0, str(item["max"]))
+                item["val"] = item["max"]
+
+    def _rows_num(self, item, col, var):
+        txt = (var.get() or "").strip()
+        if txt == "":
+            item.pop(col["key"], None)
+            return
+        try:
+            v = float(txt)
+        except ValueError:
+            return
+        item[col["key"]] = int(v) if v == int(v) else v
+
+    def _rows_add(self, key):
+        fd = (self.rows.get(key) or {}).get("fd") or {}
+        data = self._rows_of(key)
+        if len(data) >= int(fd.get("max") or 99):
+            return
+        cols = fd.get("cols") or []
+        keys = [c["key"] for c in cols]
+        rng_of = {c["key"]: (c.get("rng") or (0, 0))[1] for c in cols}
+        names = [v for c in cols if c["kind"] == "choice"
+                 for v, _l in (c.get("choices") or [])]
+        used = set(d.get("name") for d in data)
+        nm = next((n for n in names if n not in used),
+                  names[0] if names else "")
+        full = fd.get("full") or {}
+        item = {"name": nm}
+        # 先定「上限」（按这一项的满值），再让「数值」跟它 —— 反过来的话
+        # 数值会先取列区间的上限（200），比上限（100）还大（2026-10-26）。
+        if "max" in keys:
+            item["max"] = full.get(nm) or rng_of.get("max") or 0
+        if "val" in keys:
+            item["val"] = item.get("max") or rng_of.get("val") or 0
+        for c in cols:                       # 兜底：剩下没算的按列区间上限
+            if item.get(c["key"]) is None:
+                item[c["key"]] = rng_of.get(c["key"]) or 0
+        data.append(item)
+        self._fill_rows(key)
+
+    def _rows_del(self, key, idx):
+        data = self._rows_of(key)
+        fd = (self.rows.get(key) or {}).get("fd") or {}
+        if len(data) <= int(fd.get("min") or 0):
+            self.app.set_status("「%s」至少要 %s 项，不能再删了。"
+                                % (fd.get("label"), fd.get("min")))
+            return
+        if 0 <= idx < len(data):
+            del data[idx]
+            self._fill_rows(key)
 
     # ------------------------------------------------------------ 下拉浮窗
     def _bind_pop_tip(self, cb, key):
@@ -2063,6 +2281,15 @@ class PayloadManager(object):
         if not rec:
             return
         fd = rec["fd"]
+        if fd["kind"] == "rows":
+            n = len(self._rows_of(key))
+            lo, hi = fd.get("min") or 0, fd.get("max") or 0
+            if fd.get("fixed"):
+                rec["note"].configure(text="%d 项（行数由技能定，改值即可）" % n)
+            else:
+                rec["note"].configure(
+                    text="%d 项（%s~%s 项，✕ 删 / ＋ 加）" % (n, lo, hi))
+            return
         if fd["kind"] in ("int", "num"):
             rng = self._rng_of(fd)
             if not rng:
@@ -2196,6 +2423,38 @@ class PayloadManager(object):
                 cur[fd["key"]] = rng[1]
                 self._set_row_value(fd["key"])
                 self._row_note(fd["key"])
+        # 候选跟着变的**下拉**字段（战神：门派 → 那三个门派技能）
+        for fd in grp["fields"]:
+            if fd["kind"] != "choice" or not fd.get("choices_fn"):
+                continue
+            if fd.get("depends_on") != changed:
+                continue
+            self._reload_choices(fd["key"])
+        # 行数跟着变的 `rows` 字段（战神：技能 → 技能数值要几项）
+        for fd in grp["fields"]:
+            if fd["kind"] != "rows" or changed not in (fd.get("deps") or ()):
+                continue
+            fn = fd.get("rows_default")
+            try:
+                cur[fd["key"]] = list(fn(dict(cur))) if fn else []
+            except Exception:                    # noqa: BLE001
+                cur[fd["key"]] = []
+            self._fill_rows(fd["key"])
+
+    def _reload_choices(self, key):
+        """重设某个下拉的候选（依赖字段变了），选中的值不在新候选里就取第一项。"""
+        rec = self.rows.get(key)
+        if not rec or "cb" not in rec:
+            return
+        vals, labels = self._cand_pairs(rec["fd"])
+        rec["values"], rec["labels"] = vals, labels
+        rec["all_values"], rec["all_labels"] = list(vals), list(labels)
+        rec["cb"].configure(values=labels)
+        cur = self.picked.setdefault(self.fam, {})
+        if cur.get(key) not in vals:
+            cur[key] = vals[0] if vals else None
+        self._set_row_value(key)
+        self._row_note(key)
 
     def _current_value(self, key):
         """选中格子现在这一项的字段值（取第一个格子的）。"""
@@ -2267,6 +2526,15 @@ class PayloadManager(object):
     def _field_desc(self, fd, val, nm):
         """字段详情：技能读技能表的说明，召唤兽读档位/资质/描述，坐骑读移速。"""
         head = "%s = %s" % (fd["label"], nm if nm else val)
+        if fd["kind"] == "rows":
+            cols = " / ".join(c["label"] for c in (fd.get("cols") or []))
+            return "\n".join(x for x in (
+                "%s：%d 项" % (fd["label"], len(val or [])),
+                "每行填：%s。" % cols,
+                ("行数由技能定（技能一换就重算），只能改值。" if fd.get("fixed")
+                 else "在 %s~%s 项之间增删；属性名重复游戏会算两项但没意义。"
+                      % (fd.get("min"), fd.get("max"))),
+                "改完点「应用选中的内容」写到选中的格子。") if x)
         if fd["kind"] == "actor":
             body = self._actor_detail(val) or ("召唤兽 id %s" % val)
         elif fd["kind"] == "ride":
@@ -2300,12 +2568,19 @@ class PayloadManager(object):
 
     # ------------------------------------------------------------ 说明 / 提示
     def _item_line(self):
-        """当前家族第一格那件东西自己的详情（「物品就读物品的详情」）。"""
+        """当前家族第一格那件东西自己的详情（「物品就读物品的详情」）。
+
+        2026-10-26 川：「物品也不显示附加属性，有什么意义？」—— 除了 Data 表
+        的说明，还把**现在这件东西的实际内容**（精气的技能/属性项）写在最前，
+        不用去背包「内容」列里找。
+        """
         grp = self._fam()
         if not grp or not grp.get("items"):
             return ""
-        _slot, nm, iid, _cur = grp["items"][0]
+        _slot, nm, iid, cur = grp["items"][0]
         out = ["【本物品】%s（id=%s）" % (nm, iid)]
+        if cur:
+            out.append("现在：%s" % cur)
         d = self._data_desc(self.app._bag_kind(), iid)
         if d:
             # ⚠ 说明框没有滚动条，这里只取前三行（完整说明看背包页的悬停浮窗）。
@@ -9300,12 +9575,51 @@ class App(object):
         rf = ttk.Frame(mid)
         rf.pack(side="left", fill="both", expand=True, padx=(8, 0))
         ttk.Label(rf, text="选中阶的详情").pack(anchor="w")
-        txt = tk.Text(rf, width=44, height=13, wrap="word", relief="solid",
+        tbox = ttk.Frame(rf)
+        tbox.pack(fill="x")
+        txt = tk.Text(tbox, width=46, height=8, wrap="word", relief="solid",
                       borderwidth=1)
-        vs2 = ttk.Scrollbar(rf, orient="vertical", command=txt.yview)
+        vs2 = ttk.Scrollbar(tbox, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=vs2.set, state="disabled")
         vs2.pack(side="right", fill="y")
         txt.pack(side="left", fill="both", expand=True)
+
+        # ---- 明细：点数 / 属性 / 技能，一行一条，选中就能改 ----
+        # 2026-10-26 川：「经脉管理里面也是，属性和技能都不能改，还有什么意义？」
+        ttk.Label(rf, text="点数 / 属性 / 技能（选一行，改下面的框）").pack(
+            anchor="w", pady=(6, 2))
+        itbox = ttk.Frame(rf)
+        itbox.pack(fill="both", expand=True)
+        itv = ttk.Treeview(itbox, columns=("cat", "name", "cur", "max"),
+                           show="headings", height=6, selectmode="browse")
+        for c, w, t, an in (("cat", 40, "类", "center"),
+                            ("name", 116, "名称", "w"),
+                            ("cur", 92, "数值", "e"),
+                            ("max", 92, "上限", "e")):
+            itv.heading(c, text=t)
+            itv.column(c, width=w, anchor=an)
+        ivs = ttk.Scrollbar(itbox, orient="vertical", command=itv.yview)
+        itv.configure(yscrollcommand=ivs.set)
+        ivs.pack(side="right", fill="y")
+        itv.pack(side="left", fill="both", expand=True)
+
+        ef = ttk.Frame(rf)
+        ef.pack(fill="x", pady=(6, 0))
+        ttk.Label(ef, text="名称").pack(side="left")
+        var_nm = tk.StringVar()
+        cb_nm = ttk.Combobox(ef, textvariable=var_nm, width=13)
+        cb_nm.pack(side="left", padx=(2, 4))
+        ttk.Label(ef, text="值").pack(side="left")
+        var_cur = tk.StringVar()
+        ent_cur = ttk.Entry(ef, textvariable=var_cur, width=8)
+        ent_cur.pack(side="left", padx=(2, 4))
+        ttk.Label(ef, text="上限").pack(side="left")
+        var_max = tk.StringVar()
+        ent_max = ttk.Entry(ef, textvariable=var_max, width=8)
+        ent_max.pack(side="left", padx=(2, 4))
+
+        ef2 = ttk.Frame(rf)
+        ef2.pack(fill="x", pady=(4, 0))
 
         bar = ttk.Frame(body)
         bar.pack(fill="x", pady=(8, 0))
@@ -9320,7 +9634,11 @@ class App(object):
         self._jm_cb = cb
         self._jm_sum = var_sum
         self._jm_who = var_who
-        win._jm_vars = (var_who, var_sum)
+        self._jm_itv = itv
+        self._jm_nm = (var_nm, cb_nm)
+        self._jm_cur = (var_cur, ent_cur)
+        self._jm_max = (var_max, ent_max)
+        win._jm_vars = (var_who, var_sum, var_nm, var_cur, var_max)
 
         def who():
             """当前角色 —— **每次现取**（`Doc.save()` 会把整棵树换掉）。"""
@@ -9375,14 +9693,222 @@ class App(object):
                             nm, ("：" + help_) if help_ else ""))
             txt.configure(state="disabled")
 
-        def fill(keep=None):
-            """重填十行 + 概览（切角色 / 每次改完都调）。"""
+        def sel_item():
+            s = itv.selection()
+            return s[0] if s else None
+
+        def fmt(v):
+            if v is None:
+                return ""
+            return "%g" % float(v) if isinstance(v, float) else str(v)
+
+        _skv = {}
+
+        def skill_values():
+            """技能下拉候选（名字(id)）—— 只算一次，几百条排序不便宜。"""
+            if "v" not in _skv:
+                _skv["v"] = ["%s(%d)" % (n2, i2)
+                             for i2, n2 in sorted(jm.skill_names().items())
+                             if n2]
+            return _skv["v"]
+
+        def draw_items(act, slot, keep=None):
+            """明细表：点数 / 属性 / 技能各一条（选中就能在下面改）。"""
+            for i in itv.get_children():
+                itv.delete(i)
+            if act is None or slot is None:
+                return
+            try:
+                d = jm.info(act, slot)
+            except Exception as exc:                 # noqa: BLE001
+                print("经脉明细读不出来：%s" % exc)
+                return
+            for i, (nm, c, m) in enumerate(d["points"]):
+                itv.insert("", "end", iid="p%d" % i,
+                           values=("点数", nm, fmt(c), fmt(m)))
+            for i, (nm, c, m) in enumerate(d["attributes"]):
+                itv.insert("", "end", iid="a%d" % i,
+                           values=("属性", nm, fmt(c), fmt(m)))
+            for sid, nm, _h, vals, maxs in d["skill_rows"]:
+                itv.insert("", "end", iid="s%d" % sid,
+                           values=("技能", "%s(%d)" % (nm, sid),
+                                   ",".join(fmt(v) for v in vals) or "—",
+                                   ",".join(fmt(v) for v in maxs) or "—"))
+            rows = itv.get_children()
+            if not rows:
+                return
+            want = keep if keep in rows else rows[0]
+            itv.selection_set(want)
+            itv.see(want)
+            on_item()
+
+        def on_item(_e=None):
+            """选中明细里某一条 → 把它的名字/数值/上限填进编辑框。"""
+            iid = sel_item()
+            ac, slot = who(), sel_slot()
+            if not iid or ac is None or slot is None:
+                return
+            cat, key = iid[0], iid[1:]
+            try:
+                d = jm.info(ac, slot)
+            except Exception:                        # noqa: BLE001
+                return
+            if cat in ("p", "a"):
+                rows = d["points"] if cat == "p" else d["attributes"]
+                try:
+                    nm, c, m = rows[int(key)]
+                except (IndexError, ValueError):
+                    return
+                cb_nm.configure(
+                    values=list(jingmai.JM_POINT_NAMES if cat == "p"
+                                else jingmai.JM_ATTR_NAMES),
+                    state="readonly")
+                var_nm.set(nm)
+                var_cur.set(fmt(c))
+                var_max.set(fmt(m))
+                return
+            try:
+                sid = int(key)
+            except ValueError:
+                return
+            for s2, nm, _h, vals, maxs in d["skill_rows"]:
+                if s2 != sid:
+                    continue
+                cb_nm.configure(values=skill_values(), state="normal")
+                var_nm.set("%s(%d)" % (nm, sid))
+                var_cur.set(",".join(fmt(v) for v in vals))
+                var_max.set(",".join(fmt(v) for v in maxs))
+                break
+
+        def _num1(text, what="值"):
+            t = (text or "").strip()
+            if not t:
+                raise jingmai.JingmaiError("%s空着" % what)
+            try:
+                return float(t)
+            except ValueError:
+                raise jingmai.JingmaiError("%s要填数字：%s" % (what, t))
+
+        def _nums(text):
+            out = []
+            for seg in (text or "").replace("，", ",").split(","):
+                seg = seg.strip()
+                if not seg:
+                    continue
+                try:
+                    out.append(float(seg))
+                except ValueError:
+                    raise jingmai.JingmaiError("数值要填数字：%s" % seg)
+            return out
+
+        def _sid_of(text):
+            """技能名 / 编号 / 「名字(编号)」→ 技能 id。"""
+            t = (text or "").strip()
+            if not t:
+                raise jingmai.JingmaiError("技能名或编号空着")
+            if t.isdigit():
+                return int(t)
+            if t.endswith(")") and "(" in t:
+                tail = t.rsplit("(", 1)[1][:-1].strip()
+                if tail.isdigit():
+                    return int(tail)
+            inv = {}
+            for k, v in jm.skill_names().items():
+                inv.setdefault(v, k)
+            if t in inv:
+                return inv[t]
+            raise jingmai.JingmaiError("认不出技能「%s」—— 填名字或编号" % t)
+
+        def write_it():
+            """把编辑框写进存档对象（明细里选中的那条）。"""
+            iid = sel_item()
+            ac, slot = who(), sel_slot()
+            if not iid or ac is None or slot is None:
+                messagebox.showinfo("经脉", "先在右边明细里选一条。", parent=win)
+                return
+            cat, key = iid[0], iid[1:]
+            try:
+                if cat == "p":
+                    jm.set_pair(ac, slot, "points", int(key), var_nm.get(),
+                                _num1(var_cur.get(), "数值"),
+                                _num1(var_max.get(), "上限"))
+                    keep = "p" + key
+                elif cat == "a":
+                    jm.set_pair(ac, slot, "attributes", int(key), var_nm.get(),
+                                _num1(var_cur.get(), "数值"),
+                                _num1(var_max.get(), "上限"))
+                    keep = "a" + key
+                else:
+                    old = int(key)
+                    new = jm.set_skill(ac, slot, old, _sid_of(var_nm.get()),
+                                       _nums(var_cur.get()),
+                                       _nums(var_max.get()))
+                    keep = "s%d" % new
+            except Exception as exc:                 # noqa: BLE001
+                messagebox.showerror("经脉", human(str(exc)), parent=win)
+                return
+            self.mark_dirty()
+            fill(keep=slot, keep_item=keep)
+            self.set_status("经脉：写入了一条（还要保存才落盘）")
+
+        def add_it():
+            """加一条：按选中行的类别（没选就按这一阶的精气类型猜）。"""
+            ac, slot = who(), sel_slot()
+            if ac is None or slot is None:
+                messagebox.showinfo("经脉", "先在左边选一阶。", parent=win)
+                return
+            iid = sel_item()
+            if iid and iid[0] == "p":
+                kind = "points"
+            elif iid and iid[0] == "a":
+                kind = "attributes"
+            else:
+                try:
+                    kind = "points" if jm.info(ac, slot)["type"] == "圣者精气" \
+                        else "attributes"
+                except Exception:                    # noqa: BLE001
+                    kind = "attributes"
+            try:
+                i = jm.add_pair(ac, slot, kind)
+            except Exception as exc:                 # noqa: BLE001
+                messagebox.showerror("经脉", human(str(exc)), parent=win)
+                return
+            self.mark_dirty()
+            fill(keep=slot, keep_item=("p%d" if kind == "points" else "a%d") % i)
+            self.set_status("经脉：加了一条%s（数值默认 0，改下面的框再点写入）"
+                            % ("点数" if kind == "points" else "属性"))
+
+        def del_it():
+            """删掉明细里选中的那条。"""
+            iid = sel_item()
+            ac, slot = who(), sel_slot()
+            if not iid or ac is None or slot is None:
+                messagebox.showinfo("经脉", "先在右边明细里选一条。", parent=win)
+                return
+            cat, key = iid[0], iid[1:]
+            try:
+                if cat == "p":
+                    jm.del_pair(ac, slot, "points", int(key))
+                elif cat == "a":
+                    jm.del_pair(ac, slot, "attributes", int(key))
+                else:
+                    jm.del_skill(ac, slot, int(key))
+            except Exception as exc:                 # noqa: BLE001
+                messagebox.showerror("经脉", human(str(exc)), parent=win)
+                return
+            self.mark_dirty()
+            fill(keep=slot)
+            self.set_status("经脉：删了一条（品阶会跟着重算）")
+
+        def fill(keep=None, keep_item=None):
+            """重填十行 + 概览 + 明细（切角色 / 每次改完都调）。"""
             act = who()
             for i in tv.get_children():
                 tv.delete(i)
             if act is None:
                 var_sum.set("")
                 draw_detail(None)
+                draw_items(None, None)
                 return
             on, done, bad = jm.count(act)
             var_sum.set("已打通 %d/%d · 已萃化 %d · 走火入魔 %d"
@@ -9405,12 +9931,23 @@ class App(object):
                     prog, " · ".join(gain) or "—"))
             want = str(keep) if keep is not None else None
             rows = tv.get_children()
-            if want in rows:
-                tv.selection_set(want)
-                tv.see(want)
-            elif rows:
-                tv.selection_set(rows[0])
+            pick = want if want in rows else None
+            if pick is None:
+                # 默认选**第一个有精气的阶** —— 第一阶往往是空壳（打通了没
+                # 领悟精气），选中它右边的明细一片空白，看着像坏了。
+                for r in rows:
+                    v = tv.item(r, "values")
+                    if len(v) > 2 and v[2] not in ("—", ""):
+                        pick = r
+                        break
+            if pick is None and rows:
+                pick = rows[0]
+            if pick is not None:
+                tv.selection_set(pick)
+                tv.see(pick)
             draw_detail(int(tv.selection()[0]) if tv.selection() else None)
+            draw_items(act, int(tv.selection()[0]) if tv.selection() else None,
+                       keep=keep_item)
 
         def act_on(fn, label):
             """对选中阶执行一次写操作，然后刷新（选中保持）。"""
@@ -9478,6 +10015,18 @@ class App(object):
                 "%d 阶无精气）" % (self.sv.actor_name(ac), st["opened"],
                                    st["done"], st["filled"], st["empty"]))
 
+        b_w = fit_btn(ef2, text="写入这一项", command=write_it)
+        b_w.pack(side="left")
+        self._bind_tip(b_w,
+                       "把左边「名称 / 值 / 上限」写进明细里选中的那条。\n"
+                       "技能那条的「值 / 上限」是逗号分隔的多项（如 0.2,35），\n"
+                       "顺序跟游戏里 `val` 数组一致。")
+        fit_btn(ef2, text="加一项", command=add_it).pack(side="left",
+                                                        padx=(6, 0))
+        fit_btn(ef2, text="删这一项", command=del_it).pack(side="left",
+                                                          padx=(6, 0))
+        self._jm_item_btns = (b_w,)
+
         fit_btn(bar, text="打通", command=open_it).pack(side="left")
         fit_btn(bar, text="取消打通", command=close_it).pack(side="left",
                                                             padx=(6, 0))
@@ -9499,9 +10048,22 @@ class App(object):
                        "⚠ 没领悟精气的阶打通了也没有收益。")
         fit_btn(bar, text="关闭", command=win.destroy).pack(side="right")
 
-        tv.bind("<<TreeviewSelect>>", lambda e: draw_detail(sel_slot()))
+        def on_slot(_e=None):
+            s = sel_slot()
+            draw_detail(s)
+            draw_items(who(), s)
+
+        tv.bind("<<TreeviewSelect>>", on_slot)
+        itv.bind("<<TreeviewSelect>>", on_item)
         cb.bind("<<ComboboxSelected>>", lambda e: fill())
         self._jm_fill = fill
+        self._jm_write = write_it
+        self._jm_add = add_it
+        self._jm_del = del_it
+        self._jm_items = draw_items
+        # 选中明细某条 → 回填编辑框。测试里 `selection_set` 不一定派发
+        # `<<TreeviewSelect>>`（无焦点/未映射窗口），所以单独留一个可直调的口。
+        self._jm_on_item = on_item
         fill()
         center_win(win, self.root)
         esc_close(win)

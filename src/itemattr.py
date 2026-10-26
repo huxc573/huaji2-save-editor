@@ -559,6 +559,12 @@ SECT_IDS = tuple(range(1, 13))
 #: 仙人精气的远古技能池（脚本 `def 仙人精气` 里那份 list）
 XIANREN_SKILLS = (81, 89, 70, 82, 85, 59, 91, 98, 97, 93, 99, 124, 130,
                   135, 126)
+#: 远古技能名（`Game_Jingmai.skill_name` 那份表，与 `Skills` 表的名字不同）
+XIANREN_SKILL_NAMES = dict(zip(XIANREN_SKILLS,
+                               ("玉碎九渊", "风霜碎影", "天绅倒悬", "有凤来仪",
+                                "玉井天池", "秋江夜泊", "长河落日", "雾里看花",
+                                "月溉寒泉", "七星落雁", "叠翠浮青", "墨染青舟",
+                                "乾天一气", "醉渔唱晚", "青莲剑歌")))
 #: 符文的随机技能池（脚本 `rand(551..574)`）
 FUWEN_SKILL_RANGE = (551, 574)
 #: 角色的等级上限（脚本 `Config::Game::MAX_LEVEL_ACTOR = 155`）
@@ -607,6 +613,14 @@ ZHANSHEN_ATTRS = (("气血上限", 20, 200, 200), ("法力上限", 20, 100, 100)
 XIANREN_ATTRS = (("物理攻击", 1, 50, 50), ("物理防御", 1, 100, 100),
                  ("灵力", 1, 50, 50), ("法术防御", 1, 100, 100),
                  ("速度", 1, 50, 50))
+#: 家族各自的可选名字 + 满值表（脚本 `group` 的原样，编辑器只给这一支的候选：
+#: 游戏产不出「战神精气带物理防御」，别在编辑器里造出来）。
+#: ⚠ 不能合成一张「全七项」的表：灵力/物理攻击/速度在两支的满值不同
+#: （战神 30、仙人 50），合并会把整份属性写歪。
+ZHANSHEN_ATTR_NAMES = tuple(_r[0] for _r in ZHANSHEN_ATTRS)
+XIANREN_ATTR_NAMES = tuple(_r[0] for _r in XIANREN_ATTRS)
+ZHANSHEN_ATTR_FULL = {_r[0]: _r[3] for _r in ZHANSHEN_ATTRS}
+XIANREN_ATTR_FULL = {_r[0]: _r[3] for _r in XIANREN_ATTRS}
 #: 符文随机词条的五项属性（脚本 `[:体质,:魔力,:力量,:耐力,:敏捷]`）
 FUWEN_ATTR_KEYS = ("体质", "魔力", "力量", "耐力", "敏捷")
 
@@ -619,6 +633,24 @@ def _seed30(rnd):
     return int(rnd.random() * 1E30)
 
 
+def _seed_of(rnd, over):
+    """这一件的 seed：用户填了就用它，没填随机。
+
+    ⚠ 别经 float 中转：30 位数超出 double 的 53 位有效位，`int(float(x))`
+      会把尾巴改掉（虽然 seed 只当随机标记，但没必要留个假值）。
+    """
+    ov = (over or {}).get("seed")
+    if ov is None:
+        return _seed30(rnd)
+    try:
+        return int(ov)
+    except (TypeError, ValueError):
+        try:
+            return int(float(ov))
+        except (TypeError, ValueError):
+            return _seed30(rnd)
+
+
 def _pick_attrs(rnd, table, weights):
     """脚本里 `group.shuffle.first(rand_average(w))`：按权重定个数，再乱序取。
 
@@ -629,6 +661,72 @@ def _pick_attrs(rnd, table, weights):
     out = []
     for name, lo, hi, full in pool[:_weighted(rnd, weights)]:
         out.append([Sym(name), rnd.randint(lo, hi), full])
+    return out
+
+
+# --------------------------------------------------------------------------
+# 「可增删的行」字段（2026-10-26 川：1~3 项就给对应的框，别只说挑不了）
+# --------------------------------------------------------------------------
+def skill_label(sid):
+    """技能 id → 名字（查不到给「技能 186」这种）。"""
+    try:
+        import datatables
+        nm = datatables.name_map("Skills").get(int(sid))
+        if nm:
+            return nm
+    except Exception:                              # noqa: BLE001
+        pass
+    return XIANREN_SKILL_NAMES.get(int(sid)) or ("技能 %d" % int(sid))
+
+
+def _pair_cols(names, val_rng=(1, 100), max_rng=(1, 200)):
+    """属性行的三列：名字（下拉）/ 数值 / 上限。"""
+    return [{"key": "name", "label": "属性", "kind": "choice",
+             "choices": [(n, n) for n in names]},
+            {"key": "val", "label": "数值", "kind": "num", "rng": val_rng},
+            {"key": "max", "label": "上限", "kind": "num", "rng": max_rng}]
+
+
+def _pair_rows_default(names, full_of, n=3):
+    """属性行的默认内容：取前 `n` 个不重复的名字，值＝满值（「默认取最大」）。"""
+    out = []
+    for nm in list(names)[:n]:
+        out.append({"name": nm, "val": full_of.get(nm, 50),
+                    "max": full_of.get(nm, 50)})
+    return out
+
+
+def _zhanshen_skill_choices(cur):
+    """战神精气的技能候选：**只给当前门派那三个**（脚本 `skills[sect]`）。
+
+    做成两个独立下拉会选出「五庄观 + 龙宫技能」这种游戏里不存在的组合，
+    所以候选跟着门派走（`depends_on` + `choices_fn`）。
+    """
+    cur = cur or {}
+    sect = cur.get("sect")
+    try:
+        sect = int(sect)
+    except (TypeError, ValueError):
+        sect = sorted(ZHANSHEN_SKILLS)[0]
+    ids = ZHANSHEN_SKILLS.get(sect) or ZHANSHEN_SKILLS[sorted(ZHANSHEN_SKILLS)[0]]
+    return [(sid, "%s（%d）" % (skill_label(sid), sid)) for sid in ids]
+
+
+def _zhanshen_val_rows(cur):
+    """战神精气的「技能数值」行：行数＝脚本 `sdata[技能]` 的项数（1~2）。
+
+    `fixed=True` 的字段：能改值、不能增删（多一项少一项游戏读不出来）。
+    """
+    cur = cur or {}
+    try:
+        sid = int(cur.get("skill"))
+    except (TypeError, ValueError):
+        sid = 0
+    specs, maxes = ZHANSHEN_SDATA.get(sid, ((), ()))
+    out = []
+    for i, (lo, hi, is_int) in enumerate(specs):
+        out.append({"val": int(hi) if is_int else round(float(hi), 4),
+                    "max": maxes[i] if i < len(maxes) else hi})
     return out
 
 
@@ -675,19 +773,55 @@ def _tiancai(_item_id, rnd, over=None):
                                   "noup": bool(over.get("noup", False))}})
 
 
+def _attr_rows(rows, names, full_of, cap=None):
+    """界面给的行（`[{"name":…, "val":…, "max":…}, …]`）→ 游戏那份三元素数组。
+
+    名字不在 `names` 里就退回第一项（宁可写对一项，也别写个游戏不认的符号）；
+    行数最多 `cap` 项（脚本 `refresh_grade` 只按 1/2/3 项分档，多了没意义）。
+    """
+    out = []
+    for r in list(rows or [])[:cap or 3]:
+        r = r or {}
+        nm = str(r.get("name") or names[0])
+        if nm not in names:
+            nm = names[0]
+        try:
+            val = int(round(float(r.get("val") or 0)))
+        except (TypeError, ValueError):
+            val = 0
+        try:
+            mx = int(round(float(r.get("max") if r.get("max") is not None
+                                 else full_of.get(nm, 50))))
+        except (TypeError, ValueError):
+            mx = int(full_of.get(nm, 50))
+        out.append([Sym(nm), val, mx])
+    return out
+
+
 def _shengzhe(_item_id, rnd, over=None):
-    """圣者精气（脚本 `def 圣者精气`）：1~3 项属性，各带 50 上限。
+    """圣者精气（脚本 `def 圣者精气`）：1~3 项五维点数，各带 50 上限。
 
     ⚠ 它的属性值是**三档区间**里按权重挑一段再抽（`[1..20, 10..35,
       20..50][rand_average([35,30,25])]`），比战神/仙人精气的单区间多一层。
+    ⚠ 2026-10-26 川：「1~3 项，你就对应选项，给合适并且对应框不就行了？」
+      —— 项数与每项的名字/数值/上限都由界面 `rows` 字段给（`over["point"]`），
+      不再退化成「只能整份重抽」。
     """
+    rows = (over or {}).get("point")
+    # ⚠ 判「键在不在」而不是「列表空不空」：空列表＝用户就是要 0 项，
+    #   落到下面按游戏规则随机等于偷偷塞了一项（2026-10-26）。
+    if "point" in (over or {}) and isinstance(rows, (list, tuple)):
+        full = {n: 50 for n in SHENGZHE_ATTRS}
+        return ("圣者精气",
+                {"point": _attr_rows(rows, SHENGZHE_ATTRS, full, cap=3),
+                 "seed": _seed_of(rnd, over)})
     pool = list(SHENGZHE_ATTRS)
     rnd.shuffle(pool)
     point = []
     for name in pool[:_weighted(rnd, (75, 20, 5)) + 1]:
         lo, hi = ((1, 20), (10, 35), (20, 50))[_weighted(rnd, (35, 30, 25))]
         point.append([Sym(name), rnd.randint(lo, hi), 50])
-    return ("圣者精气", {"point": point, "seed": _seed30(rnd)})
+    return ("圣者精气", {"point": point, "seed": _seed_of(rnd, over)})
 
 
 def _zhanshen(_item_id, rnd, over=None):
@@ -698,37 +832,78 @@ def _zhanshen(_item_id, rnd, over=None):
     if sect not in ZHANSHEN_SKILLS:
         sect = sorted(ZHANSHEN_SKILLS)[0]
     sid = over.get("skill")
+    if sid is None:
+        sid = over.get("id")            # 老口径（`payload_fields` 曾用 "id"）
     sid = rnd.choice(ZHANSHEN_SKILLS[sect]) if sid is None else int(sid)
     specs, maxes = ZHANSHEN_SDATA.get(sid, ((), ()))
     val = []
-    for lo, hi, is_int in specs:
-        val.append(rnd.randint(int(lo), int(hi)) if is_int
-                   else round(rnd.uniform(lo, hi), 4))
+    rows = over.get("val")
+    rows = list(rows) if isinstance(rows, (list, tuple)) else []
+    for i, (lo, hi, is_int) in enumerate(specs):
+        cur = rows[i] if i < len(rows) and isinstance(rows[i], dict) else {}
+        raw = cur.get("val")
+        if raw is None:
+            v = rnd.randint(int(lo), int(hi)) if is_int \
+                else round(rnd.uniform(lo, hi), 4)
+        else:
+            try:
+                v = int(round(float(raw))) if is_int else round(float(raw), 4)
+            except (TypeError, ValueError):
+                v = int(lo) if is_int else round(float(lo), 4)
+        val.append(v)
+    # 上限（`max`）也允许改：跟着技能走的那张表是游戏给的「满值」，
+    # 想压到更低（改弱）或顶到更高都得能写。
+    mx = list(maxes)
+    for i in range(min(len(mx), len(rows))):
+        raw = (rows[i] or {}).get("max")
+        if raw is None:
+            continue
+        try:
+            mx[i] = int(round(float(raw))) if isinstance(maxes[i], int) \
+                else round(float(raw), 4)
+        except (TypeError, ValueError):
+            pass
+    if "attributes" in over:          # 空列表＝0 项，照写（别退回随机）
+        attributes = _attr_rows(over.get("attributes"), ZHANSHEN_ATTR_NAMES,
+                                ZHANSHEN_ATTR_FULL, cap=3)
+    else:
+        attributes = _pick_attrs(rnd, ZHANSHEN_ATTRS, (70, 25, 5))
     return ("战神精气", {"sect": sect,
-                         "skill": IntHash({sid: {"val": val,
-                                                 "max": list(maxes)}}),
-                         "attributes": _pick_attrs(rnd, ZHANSHEN_ATTRS,
-                                                   (70, 25, 5)),
-                         "seed": _seed30(rnd)})
+                         "skill": IntHash({sid: {"val": val, "max": mx}}),
+                         "attributes": attributes,
+                         "seed": _seed_of(rnd, over)})
 
 
 def _xianren(_item_id, rnd, over=None):
     """仙人精气（脚本 `def 仙人精气`）：一个远古技能 + 若干属性。
 
-    ⚠ 技能的 `val`/`max` 是**空数组**（脚本写死），别照着别的家族填数。
+    ⚠ 技能的 `val`/`max` 是**空数组**（脚本写死），别照着别的家族填数 ——
+      远古技能的效果全在 `Game_Jingmai.skill_help` 里写死，不吃数值。
     """
     over = over or {}
-    sid = over.get("id")
+    sid = over.get("skill")
+    if sid is None:
+        sid = over.get("id")
     sid = rnd.choice(XIANREN_SKILLS) if sid is None else int(sid)
+    if sid not in XIANREN_SKILLS:
+        sid = XIANREN_SKILLS[0]
+    if "attributes" in over:          # 同上：空数组就是 0 项
+        attributes = _attr_rows(over.get("attributes"), XIANREN_ATTR_NAMES,
+                                XIANREN_ATTR_FULL, cap=3)
+    else:
+        attributes = _pick_attrs(rnd, XIANREN_ATTRS, (70, 25, 5))
     return ("仙人精气", {"skills": IntHash({sid: {"val": [], "max": []}}),
-                         "attributes": _pick_attrs(rnd, XIANREN_ATTRS,
-                                                   (70, 25, 5)),
-                         "seed": _seed30(rnd)})
+                         "attributes": attributes,
+                         "seed": _seed_of(rnd, over)})
 
 
 def _benyuan(_item_id, rnd, over=None):
-    """本源（脚本 `def 本源精气`）—— 只有个随机 seed，最省事的一件。"""
-    return ("本源精气", {"seed": _seed30(rnd)})
+    """本源（脚本 `def 本源精气`）—— 只有个随机 seed，最省事的一件。
+
+    seed 是 `(rand * 1E30).to_i` 的随机标记（`learn` 里 `@seed = [seed + 角色id, 0]`），
+    改它等于换一条随机序列；界面上给个数值框，能填也能清空（清空＝随机）。
+    """
+    return ("本源精气", {"seed": _seed_of(rnd, over)})
 
 
 def _lingshi_book(_item_id, rnd, over=None):
@@ -1064,25 +1239,56 @@ def payload_spec(name, item_id):
             {"key": "noup", "label": "已满级", "kind": "choice",
              "choices": [(False, "否"), (True, "是")]}]
     if fn is _shengzhe:
-        # ⚠ 它的 `point` 是「几项属性」的**列表**（1~3 项、每项各带区间），
-        #   不是单个值 ⇒ 没法做成一个下拉，只能整份重抽。
-        return "圣者精气", []
+        # 1~3 项五维点数 —— 项数就是行数，每行三个框（属性 / 数值 / 上限）。
+        # 2026-10-26 川：「1~3 项，你就对应选项，给合适并且对应框不就行了？」
+        return "圣者精气", [
+            {"key": "point", "label": "点数提升", "kind": "rows", "min": 1,
+             "max": 3,
+             "cols": _pair_cols(SHENGZHE_ATTRS, (1, 50), (1, 50)),
+             "full": {n: 50 for n in SHENGZHE_ATTRS},
+             "rows_default": lambda _cur: _pair_rows_default(
+                 SHENGZHE_ATTRS, {n: 50 for n in SHENGZHE_ATTRS})},
+            {"key": "seed", "label": "随机 seed", "kind": "int"}]
     if fn is _zhanshen:
-        # ⚠ 只给「门派」：「门派技能」跟着门派走（每派 3 个），做成两个独立
-        #   下拉就能选出「五庄观 + 龙宫技能」这种不合法组合。
-        # ⚠ 门派名要写**真名**（`$sects` 不连号 0/1..13/20），写「门派 5」
-        #   等于让人猜（2026-10-26 川：精气的重抽管理不对）。
+        # 门派 → 门派技能（候选跟着门派走）→ 技能数值（行数＝sdata 项数）
+        # → 属性提升（1~3 项，行可增删）。
         return "战神精气", [
             {"key": "sect", "label": "门派", "kind": "choice",
              "choices": [(k, sect_name(k) or ("门派 %d" % k))
-                         for k in sorted(ZHANSHEN_SKILLS)]}]
+                         for k in sorted(ZHANSHEN_SKILLS)]},
+            {"key": "skill", "label": "门派技能", "kind": "choice",
+             "choices_fn": _zhanshen_skill_choices, "depends_on": "sect"},
+            {"key": "val", "label": "技能数值", "kind": "rows", "min": 0,
+             "max": 3, "fixed": True, "deps": ("skill",),
+             "cols": [{"key": "val", "label": "数值", "kind": "num"},
+                      {"key": "max", "label": "上限", "kind": "num"}],
+             "rows_default": _zhanshen_val_rows},
+            {"key": "attributes", "label": "属性提升", "kind": "rows",
+             "min": 0, "max": 3,
+             "cols": _pair_cols(ZHANSHEN_ATTR_NAMES, (1, 200), (1, 200)),
+             "full": dict(ZHANSHEN_ATTR_FULL),
+             "rows_default": lambda _cur: _pair_rows_default(
+                 ZHANSHEN_ATTR_NAMES, ZHANSHEN_ATTR_FULL)},
+            {"key": "seed", "label": "随机 seed", "kind": "int"}]
     if fn is _xianren:
-        return "仙人精气", [{"key": "id", "label": "远古技能", "kind": "skill",
-                             "pool": list(XIANREN_SKILLS)}]
+        # 远古技能（15 个里选）+ 属性提升（1~3 项）。
+        # ⚠ 技能没有数值可改：脚本写死空数组，效果全在 `skill_help` 里。
+        return "仙人精气", [
+            {"key": "skill", "label": "远古技能", "kind": "choice",
+             "choices": [(sid, "%s（%d）" % (XIANREN_SKILL_NAMES.get(
+                 sid, "技能"), sid)) for sid in XIANREN_SKILLS]},
+            {"key": "attributes", "label": "属性提升", "kind": "rows",
+             "min": 0, "max": 3,
+             "cols": _pair_cols(XIANREN_ATTR_NAMES, (1, 200), (1, 200)),
+             "full": dict(XIANREN_ATTR_FULL),
+             "rows_default": lambda _cur: _pair_rows_default(
+                 XIANREN_ATTR_NAMES, XIANREN_ATTR_FULL)},
+            {"key": "seed", "label": "随机 seed", "kind": "int"}]
     if fn is _benyuan:
         # ⚠ 家族名跟写档的 type 符号保持一致（物品名是「本源」、type 是
         #   `:本源精气`），省得界面上两个名字对不上。
-        return "本源精气", []
+        return "本源精气", [
+            {"key": "seed", "label": "随机 seed", "kind": "int"}]
     if fn is _lingshi_book:
         return "灵饰指南书", [
             {"key": "id", "label": "图样编号", "kind": "int",
@@ -1120,20 +1326,11 @@ def payload_spec(name, item_id):
 def payload_hint(name, item_id):
     """「一个字段都挑不了」的家族，说明**为什么**（空说明会被当成 bug）。
 
-    2026-10-26 川：「修复物品中，XX 精气的重抽管理」—— 原来四类精气里有
-    两类（圣者 / 本源）落到空字段，界面统一写「内容是游戏写死的」，其实
-    圣者精气的属性是**随机**出来的，写死两个字把「点一下就整份重来、项数
-    也会变」这个真影响藏起来了。
+    2026-10-26 川：「物品也不显示附加属性，有什么意义？」—— 四类精气现在
+    都铺出了完整字段（圣者/战神/仙人的属性行、战神的技能数值），这里只剩
+    真正写死的那几件（点化石 / 礼盒 / 树苗）。
     """
     fn = builder_for(name, item_id)
-    if fn is _shengzhe:
-        return ("圣者精气的内容是「1~3 项五维点数」，每项还在各自区间里随机 ——\n"
-                "没法拆成几个下拉。点「应用选中的内容」＝整份按游戏规则重来：\n"
-                "属性**项数也会变**（1~3 项），挑之前先想清楚。")
-    if fn is _benyuan:
-        return ("本源精气只有一份随机 seed，没有能挑的内容 ——\n"
-                "点「应用」只是换一份 seed（游戏里那阶走「本源」分支，\n"
-                "不加属性也不给技能）。")
     if fn is _qian_tree:
         return "摇钱树树苗只有一份随机 seed，没有能挑的内容。"
     if fn is _dianhua:

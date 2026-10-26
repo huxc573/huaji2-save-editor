@@ -504,28 +504,121 @@ def main():
     #  不出来（值在复合 Hash 里，payload_fields 一律跳过）；
     #  ③ 圣者/本源落到空字段时统一谎称「内容是游戏写死的」—— 把「点一下就整份
     #  重来、项数都会变」这个真影响藏起来了。
+    #  ④ 2026-10-26 川再加一条：「1~3 项，你就对应选项，给合适并且对应框不
+    #  就行了？附加技能也是一个道理，不然你修改器还没游戏原本显示的全」——
+    #  于是四类精气的复合内容全部铺成 `kind="rows"`：每行＝属性/数值/上限三个
+    #  框、能增能删；战神的技能候选跟着门派现算，技能数值的行数由脚本定死。
+    _t141, _f141 = itemattr.payload_spec("圣者精气", 141)
+    _pf141 = [f for f in _f141 if f["key"] == "point"]
+    check("圣者精气：点数项是「可增删的行」（1~3 项就给 1~3 行框）",
+          bool(_pf141) and _pf141[0]["kind"] == "rows"
+          and (_pf141[0]["min"], _pf141[0]["max"]) == (1, 3),
+          "%r" % ([f.get("kind") for f in _f141],))
+    check("圣者精气：每行三列＝属性 / 数值 / 上限",
+          bool(_pf141) and [c["key"] for c in _pf141[0]["cols"]]
+          == ["name", "val", "max"],
+          "%r" % ([c["key"] for c in _pf141[0]["cols"]] if _pf141 else None,))
+    check("圣者精气：属性候选是五维、满值表全是 50（换名字带上限）",
+          bool(_pf141)
+          and [v for v, _ in _pf141[0]["cols"][0]["choices"]]
+          == list(itemattr.SHENGZHE_ATTRS)
+          and set(_pf141[0]["full"].values()) == {50},
+          "%r" % (_pf141[0]["full"] if _pf141 else None,))
     _t142, _f142 = itemattr.payload_spec("战神精气", 142)
     _sf = [f for f in _f142 if f["key"] == "sect"]
     check("战神精气：门派下拉是真门派名（不是「门派 N」）",
           bool(_sf) and "门派 " not in _sf[0]["choices"][0][1],
           "%r" % (_sf[0]["choices"][:3] if _sf else None,))
+    _skf = [f for f in _f142 if f["key"] == "skill"]
+    check("战神精气：技能候选跟着门派现算（选不出跨门派组合）",
+          bool(_skf) and callable(_skf[0].get("choices_fn"))
+          and _skf[0].get("depends_on") == "sect"
+          and set(v for v, _ in _skf[0]["choices_fn"]({"sect": 6}))
+          == set(itemattr.ZHANSHEN_SKILLS[6]),
+          "%r" % ([v for v, _ in _skf[0]["choices_fn"]({"sect": 6})]
+                  if _skf else None,))
+    _vf = [f for f in _f142 if f["key"] == "val"]
+    check("战神精气：技能数值是一组行（能改值、不能增删）",
+          bool(_vf) and _vf[0]["kind"] == "rows"
+          and _vf[0].get("fixed") is True
+          and _vf[0].get("deps") == ("skill",),
+          "%r" % (_vf[0].get("deps") if _vf else None,))
+    _two = [s for s, (sp, _mx) in itemattr.ZHANSHEN_SDATA.items()
+            if len(sp) == 2]
+    if _two:
+        check("战神精气：技能数值行数＝脚本 sdata 项数（两项的技能给两行）",
+              len(_vf[0]["rows_default"]({"skill": _two[0]}))
+              == len(itemattr.ZHANSHEN_SDATA[_two[0]][0]),
+              "%r" % (_two[0],))
+    _af = [f for f in _f142 if f["key"] == "attributes"]
+    check("战神精气：属性提升的行可增删（脚本 70% 是 0 项，所以 min=0）",
+          bool(_af) and _af[0]["kind"] == "rows"
+          and (_af[0]["min"], _af[0]["max"]) == (0, 3),
+          "%r" % ((_af[0]["min"], _af[0]["max"]) if _af else None,))
+    check("战神精气：属性候选只给脚本 group 那五项（不掺物理/法术防御）",
+          bool(_af) and [v for v, _ in _af[0]["cols"][0]["choices"]]
+          == list(itemattr.ZHANSHEN_ATTR_NAMES),
+          "%r" % ([v for v, _ in _af[0]["cols"][0]["choices"]]
+                  if _af else None,))
+    _xaf = itemattr.payload_spec("仙人精气", 143)[1][1]
+    check("同名属性的满值按家族取（战神灵力 30 / 仙人灵力 50）",
+          bool(_af) and _af[0]["full"].get("灵力") == 30
+          and _xaf["full"].get("灵力") == 50,
+          "%r / %r" % (_af[0]["full"].get("灵力") if _af else None,
+                       _xaf["full"].get("灵力")))
     _t143, _f143 = itemattr.payload_spec("仙人精气", 143)
-    check("仙人精气能挑「当前技能」",
-          [f["key"] for f in _f143] == ["id"], "%r" % (_f143,))
-    for _nm, _id, _kw in (("圣者精气", 141, "随机"), ("本源", 144, "seed")):
+    check("仙人精气：技能 + 属性提升 + seed 三个字段都在",
+          [f["key"] for f in _f143] == ["skill", "attributes", "seed"],
+          "%r" % ([f["key"] for f in _f143],))
+    check("仙人精气的技能下拉是真技能名（不是「技能 91」）",
+          bool(_f143) and "技能 " not in _f143[0]["choices"][0][1],
+          "%r" % (_f143[0]["choices"][:2] if _f143 else None,))
+    for _nm, _id in (("圣者精气", 141), ("战神精气", 142),
+                     ("仙人精气", 143), ("本源", 144)):
         _h = itemattr.payload_hint(_nm, _id)
-        check("%s 的空字段说明写清真原因（含「%s」）" % (_nm, _kw),
-              _kw in _h and "写死" not in _h, _h.splitlines()[0][:36])
+        check("%s 不再谎称「内容写死、只能整份重抽」" % _nm,
+              "写死" not in _h, _h[:30])
     probe6 = [s for s in g.empty_slots("Items")
               if s not in (probe, probe2, probe3, ref_slot)][0]
     try:
         g.add_item("Items", probe6, 143, 1, clone_like=False)
-        g.set_payload("Items", probe6, over={"id": 91}, force=True)
+        g.set_payload("Items", probe6, over={
+            "skill": 91,
+            "attributes": [{"name": "物理防御", "val": 40, "max": 100}]},
+            force=True)
         _pf = g.payload_fields(_item_of(g, "Items", probe6))
         check("仙人精气的当前技能能从存档里读回来（id 91）",
-              _pf.get("id") == 91, "%r" % (_pf,))
+              _pf.get("skill") == 91, "%r" % (_pf,))
+        check("仙人精气的属性提升读成行（每行 名字/数值/上限）",
+              _pf.get("attributes") == [{"name": "物理防御", "val": 40,
+                                         "max": 100}],
+              "%r" % (_pf.get("attributes"),))
+        _sum = g.payload_summary(_item_of(g, "Items", probe6))
+        check("摘要把技能名写出来（不再只有一个 id）",
+              "技能·" in _sum, _sum)
+        g.set_payload("Items", probe6, over={"id": 91}, force=True)
+        check("旧的 over={\"id\": …} 写法仍然认（别的调用点还在用）",
+              g.payload_fields(_item_of(g, "Items", probe6)).get("skill")
+              == 91)
+        # 战神：属性给什么就写什么，摘要把每项的数值都摊开
+        g.clear_slot("Items", probe6)
+        g.add_item("Items", probe6, 142, 1, clone_like=False)
+        _sid = itemattr.ZHANSHEN_SKILLS[6][0]
+        g.set_payload("Items", probe6, over={
+            "sect": 6, "skill": _sid,
+            "attributes": [{"name": "气血上限", "val": 120, "max": 200},
+                           {"name": "灵力", "val": 12, "max": 30}]},
+            force=True)
+        _sum = g.payload_summary(_item_of(g, "Items", probe6))
+        check("战神精气摘要写全每项属性（气血上限 120/200、灵力 12/30）",
+              "气血上限 120/200" in _sum and "灵力 12/30" in _sum, _sum)
+        g.set_payload("Items", probe6, over={
+            "sect": 6, "skill": _sid, "attributes": []}, force=True)
+        _pf = g.payload_fields(_item_of(g, "Items", probe6))
+        check("给空列表就写 0 项（不白送属性）",
+              _pf.get("attributes") == [], "%r" % (_pf.get("attributes"),))
     except Exception as e:
-        check("仙人精气的当前技能能从存档里读回来（id 91）", False,
+        check("仙人/战神精气的复合内容能读能写", False,
               "%s: %s" % (type(e).__name__, e))
     g.clear_slot("Items", probe6)
 

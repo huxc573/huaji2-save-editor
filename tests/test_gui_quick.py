@@ -995,6 +995,45 @@ def main():
             root.update()
         app.g.clear_slot("Items", _yx)
 
+        # ---- 2026-10-26 川：精气别只说「属性 2 项」，要逐项给框 ------------
+        say("重抽管理：精气逐项给框（门派技能 / 技能数值 / 属性提升）…")
+        _jq = [s for s in app.g.empty_slots("Items") if s != _yx][0]
+        app.g.add_item("Items", _jq, 142, 1, clone_like=False)   # 战神精气
+        app.mark_dirty()
+        app.var_bag_page.set(page_of(_jq))
+        app.fill_party()
+        root.update()
+        app.tv_pack.selection_set("s%d" % _jq)
+        _wq = app.open_payload_manager()
+        root.update()
+        check("背包里选中的战神精气 → 认出「战神精气」家族",
+              _wq is not None and "战神精气" in _wq.groups,
+              "%r" % (list(_wq.groups) if _wq is not None else None,))
+        if _wq is not None and "战神精气" in _wq.groups:
+            _wq.fam = "战神精气"
+            _wq._sync_fields()
+            root.update()
+            check("字段铺开：门派 / 技能 / 技能数值 / 属性提升 / seed",
+                  list(_wq.rows) == ["sect", "skill", "val", "attributes",
+                                     "seed"],
+                  "%r" % (list(_wq.rows),))
+            _n = len(_wq.rows["attributes"]["subs"])
+            _wq._rows_add("attributes")
+            root.update()
+            check("「＋ 加一项」给属性提升加一行（默认取满值 200/200）",
+                  len(_wq.rows["attributes"]["subs"]) == _n + 1
+                  and "200" in _wq.rows["attributes"]["subs"][-1][
+                      "vars"][2].get(),
+                  "%d → %d" % (_n, len(_wq.rows["attributes"]["subs"])))
+            _wq.apply()
+            root.update()
+            _jsum = app.g.payload_summary(app.g._item_node("Items", _jq))
+            check("应用后摘要逐项写出属性数值（气血上限 200/200）",
+                  "气血上限 200/200" in _jsum, _jsum)
+            _wq.close()
+            root.update()
+        app.g.clear_slot("Items", _jq)
+
         # ---- 2026-10-08 川：重抽管理里「封印坐骑」候选是空的 -----------------
         #  根因：坐骑 id(256~263) 在 Actors 表里有名字但**不是召唤兽**，
         #  旧代码走 kind="actor" → 被 is_baby_entry 筛掉 ⇒ 0 项。
@@ -2552,6 +2591,82 @@ def main():
         else:
             check("点「萃取完成」写进存档对象", False,
                   "存档里没有领悟过精气的阶")
+        # ---- 明细编辑（2026-10-26 川：「属性和技能都不能改，还有什么意义？」）
+        _itv = getattr(app, "_jm_itv", None)
+        _nmv, _nmw = getattr(app, "_jm_nm", (None, None))
+        _curv, _curw = getattr(app, "_jm_cur", (None, None))
+        _maxv, _maxw = getattr(app, "_jm_max", (None, None))
+        check("经脉窗口有明细表 + 名称/值/上限三个编辑框",
+              None not in (_itv, _nmv, _curv, _maxv),
+              type(_itv).__name__)
+        if _withT and _itv is not None:
+            _s = _withT[0]
+            app._jm_fill(keep=_s)
+            root.update()
+            _d0 = _jmobj.info(_act, _s)
+            _cats = [_itv.item(i, "values")[0] for i in _itv.get_children()]
+            check("明细把点数/属性/技能逐项列出来（不是只说「属性 2 项」）",
+                  len(_cats) == (len(_d0["points"]) + len(_d0["attributes"])
+                                 + len(_d0["skill_rows"])),
+                  "%r" % (_cats,))
+            _n0 = len(_d0["attributes"])
+            app._jm_add()                      # 没选属性行 → 按精气类型猜
+            root.update()
+            _d1 = _jmobj.info(_act, _s)
+            check("「加一项」真的加进存档对象（属性 +1）",
+                  len(_d1["attributes"]) == _n0 + 1,
+                  "%d → %d" % (_n0, len(_d1["attributes"])))
+            _ai = [i for i in _itv.get_children() if i.startswith("a")]
+            if _ai:
+                _itv.selection_set(_ai[-1])
+                app._jm_on_item()
+                root.update()
+                check("选中属性行会把名字/值/上限回填到编辑框",
+                      bool(_nmv.get()) and _maxv.get() != "",
+                      "%s / %s / %s" % (_nmv.get(), _curv.get(),
+                                        _maxv.get()))
+                _nmv.set("气血上限")
+                _curv.set("42")
+                _maxv.set("66")
+                app._jm_write()
+                root.update()
+                _d2 = _jmobj.info(_act, _s)
+                _row = [r for r in _d2["attributes"] if r[0] == "气血上限"]
+                check("「写入这一项」把数值/上限写进去（42/66）",
+                      bool(_row) and _row[0][1] == 42 and _row[0][2] == 66,
+                      "%r" % (_d2["attributes"],))
+                _shown = [_itv.item(i, "values") for i in _itv.get_children()
+                          if i.startswith("a")]
+                check("明细表跟着刷新（不再是 0/0）",
+                      any(str(v[2]) == "42" and str(v[3]) == "66"
+                          for v in _shown),
+                      "%r" % (_shown,))
+            _sk = [i for i in _itv.get_children() if i.startswith("s")]
+            if _sk:
+                _sid0 = int(_sk[0][1:])
+                _itv.selection_set(_sk[0])
+                app._jm_on_item()
+                root.update()
+                _curv.set("0.3")
+                _maxv.set("0.5")
+                app._jm_write()
+                root.update()
+                _d3 = _jmobj.info(_act, _s)
+                _sr = [r for r in _d3["skill_rows"] if r[0] == _sid0]
+                check("技能的数值/上限也能改（0.3/0.5）",
+                      bool(_sr) and _sr[0][3] == [0.3] and _sr[0][4] == [0.5],
+                      "%r" % (_sr[0][3:] if _sr else None,))
+            _ai = [i for i in _itv.get_children() if i.startswith("a")]
+            if _ai:
+                _n1 = len(_jmobj.info(_act, _s)["attributes"])
+                _itv.selection_set(_ai[-1])
+                app._jm_on_item()
+                app._jm_del()
+                root.update()
+                check("「删这一项」删得掉（属性 -1）",
+                      len(_jmobj.info(_act, _s)["attributes"]) == _n1 - 1,
+                      "%d → %d" % (_n1, len(
+                          _jmobj.info(_act, _s)["attributes"])))
         [_b for _b in _jbtns if _b.cget("text") == "一键全通"][0].invoke()
         root.update()
         _on = _jmobj.count(_act)[0]

@@ -1398,16 +1398,81 @@ class GameEditor(object):
             out[kk] = M.value_of(vv)
         # ⚠ 精气的技能藏在**复合 Hash** 里（`{技能id => {val:, max:}}`），上面那条
         #   「复合值不给挑」会把整块跳过 ⇒「重抽管理」里仙人精气的「远古技能」
-        #   永远回填不出当前值（`_current_value("id")` 读不到），一打开窗口就
-        #   默认成候选第一项（81 玉碎九渊），点「应用」把所有仙人精气改成同一个技能
-        #   （2026-10-26 川：精气的重抽管理不对）。这里把技能 id 单独取出来。
-        if _t in ("战神精气", "仙人精气"):
-            hv = _deref(hash_get(d, "skill" if _t == "战神精气" else "skills"))
+        #   永远回填不出当前值，一打开窗口就默认成候选第一项（81 玉碎九渊），
+        #   点「应用」把所有仙人精气改成同一个技能（2026-10-26 川：精气的重抽
+        #   管理不对）。这里把技能 id 与它的数值、以及属性/点数行都读出来。
+        if _t in ("圣者精气", "战神精气", "仙人精气", "本源精气"):
+            out.update(self._jingqi_fields(_t, d))
+        return out
+
+    def _jingqi_fields(self, typ, d):
+        """四类精气的复合内容 → 界面能直接回填的字段。
+
+        * `point` / `attributes` → `[{"name":…, "val":…, "max":…}, …]`
+        * `skill` → 技能 id；`val` → `[{"val":…, "max":…}, …]`（只有战神有）
+        * `seed` 上面的循环已经读出来了（标量），这里不重复
+        """
+        out = {}
+
+        def rows(key):
+            return self._pair_rows(hash_get(d, key))
+
+        if typ == "圣者精气":
+            out["point"] = rows("point")
+        elif typ == "战神精气":
+            out["attributes"] = rows("attributes")
+            hv = _deref(hash_get(d, "skill"))
             if isinstance(hv, M.HashNode) and hv.pairs:
                 kv = M.value_of(_deref(hv.pairs[0][0]))
                 if isinstance(kv, int):
-                    out["id"] = kv
+                    out["skill"] = kv
+                out["val"] = self._skill_val_rows(hv.pairs[0][1])
+        elif typ == "仙人精气":
+            out["attributes"] = rows("attributes")
+            hv = _deref(hash_get(d, "skills"))
+            if isinstance(hv, M.HashNode) and hv.pairs:
+                kv = M.value_of(_deref(hv.pairs[0][0]))
+                if isinstance(kv, int):
+                    out["skill"] = kv
         return out
+
+    @staticmethod
+    def _pair_rows(node):
+        """`[[名, 当前, 满值], …]` → `[{"name":…, "val":…, "max":…}, …]`。"""
+        arr = _deref(node)
+        out = []
+        if isinstance(arr, M.ArrayNode):
+            for row in arr.items:
+                r = _deref(row)
+                if not isinstance(r, M.ArrayNode) or len(r.items) < 3:
+                    continue
+                nm = M.value_of(_deref(r.items[0]))
+                if isinstance(nm, bytes):
+                    nm = nm.decode("utf-8", "replace")
+                out.append({"name": nm,
+                            "val": M.value_of(_deref(r.items[1])),
+                            "max": M.value_of(_deref(r.items[2]))})
+        return out
+
+    @staticmethod
+    def _skill_val_rows(node):
+        """`{val: […], max: […]}` → `[{"val":…, "max":…}, …]`（同一位置配对）。"""
+        v = _deref(node)
+        vals, maxs = [], []
+        if isinstance(v, M.HashNode):
+            for k, x in v.pairs:
+                key = M.value_of(_deref(k))
+                if isinstance(key, bytes):
+                    key = key.decode("utf-8", "replace")
+                arr = _deref(x)
+                lst = [M.value_of(_deref(i)) for i in arr.items] \
+                    if isinstance(arr, M.ArrayNode) else []
+                if key == "val":
+                    vals = lst
+                elif key == "max":
+                    maxs = lst
+        return [{"val": vals[i], "max": maxs[i] if i < len(maxs) else None}
+                for i in range(len(vals))]
 
     #: 运行时内容的 `:type` → 内部家族键（用来渲染“内容”列）。
     #: **游戏写的是中文符号，工具现在也写中文**（`itemattr` 直接给游戏符号）；
@@ -1562,19 +1627,37 @@ class GameEditor(object):
         if kind == "tiancai":
             return "天材地宝→%s 档（上限 %s）" % (dv("lv"), dv("limit"))
         if kind == "jingqi":
-            # 四类精气：本源只有 seed；圣者是属性点；战神/仙人各带一个技能。
+            # 四类精气：本源只有 seed；圣者是五维点数；战神/仙人各带一个技能。
+            # 2026-10-26 川：「物品也不显示附加属性，有什么意义？」—— 原来
+            # 只写「属性 2 项」，等于把游戏里点开就看到的数值藏了。现在按
+            # 「技能·万剑归一 20% ；属性 气血上限 120/200、灵力 12/30」写全。
+            parts = []
             hold = "skill" if t == "战神精气" else \
                 ("skills" if t == "仙人精气" else None)
             hv = _deref(hash_get(d, hold)) if (d is not None and hold) else None
-            kid = None
             if isinstance(hv, M.HashNode) and hv.pairs:
                 kv = M.value_of(_deref(hv.pairs[0][0]))
-                kid = kv if isinstance(kv, int) else None
-            if kid is not None:
-                return "%s→技能·%s" % (t, self._name_map("Skills").get(kid, kid))
-            pl = _deref(hash_get(d, "point")) if d is not None else None
-            n = len(pl.items) if isinstance(pl, M.ArrayNode) else 0
-            return "%s%s" % (t, ("→属性 %d 项" % n) if n else "")
+                if isinstance(kv, int):
+                    nm = itemattr.XIANREN_SKILL_NAMES.get(kv) or \
+                        self._name_map("Skills").get(kv) or kv
+                    seg = "技能·%s" % nm
+                    vals = [r for r in self._skill_val_rows(hv.pairs[0][1])
+                            if r.get("val") is not None]
+                    if vals:
+                        seg += " " + "/".join("%g" % float(r["val"])
+                                              if isinstance(r["val"], float)
+                                              else str(r["val"])
+                                              for r in vals)
+                    parts.append(seg)
+            for key, label in (("point", "点数"), ("attributes", "属性")):
+                if d is None:
+                    break
+                rows = self._pair_rows(hash_get(d, key))
+                if rows:
+                    parts.append("%s %s" % (label, "、".join(
+                        "%s %s/%s" % (r["name"], r["val"], r["max"])
+                        for r in rows)))
+            return "%s→%s" % (t, "；".join(parts)) if parts else t
         if kind == "peach":
             return "蟠桃→%s 年" % dv("year")
         if kind == "fuwen":

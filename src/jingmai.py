@@ -45,6 +45,16 @@ JM_REMOTE_SKILLS = {81: "玉碎九渊", 89: "风霜碎影", 70: "天绅倒悬",
                     91: "长河落日", 98: "雾里看花", 97: "月溉寒泉",
                     93: "七星落雁", 99: "叠翠浮青", 124: "墨染青舟",
                     130: "乾天一气", 135: "醉渔唱晚", 126: "青莲剑歌"}
+#: `@points` 的名字空间（脚本 `圣者精气` 的 `group`）
+JM_POINT_NAMES = ("体质", "魔力", "力量", "耐力", "敏捷")
+#: `@attributes` 的名字空间（`Game_Jingmai#init` 那条注释列的就是这七个）
+JM_ATTR_NAMES = ("气血上限", "法力上限", "物理攻击", "物理防御", "灵力",
+                 "法术防御", "速度")
+#: 属性 → 满值（两张家族表里同名取大的那个）
+JM_ATTR_FULL = {"气血上限": 200, "法力上限": 100, "物理攻击": 50,
+                "物理防御": 100, "灵力": 50, "法术防御": 100, "速度": 50}
+#: 五维点数的满值（`圣者精气` 每项恒 50）
+JM_POINT_FULL = 50
 
 def _type_cn(sym):
     """符号名 → 中文（`'战神精气'`）；空值给空串。"""
@@ -214,6 +224,11 @@ class Jingmai(object):
 
     def _skills(self, ji):
         """`@skills` → `[(技能id, 名字, 效果)]`。"""
+        return [(sid, nm, help_) for sid, nm, help_, _v, _m in
+                self.skill_rows_of(ji)]
+
+    def skill_rows_of(self, ji):
+        """`@skills` → `[(技能id, 名字, 效果, [数值…], [上限…])]`（编辑用）。"""
         h = _deref(ivar(ji, "@skills"))
         out = []
         if not isinstance(h, M.HashNode):
@@ -222,15 +237,19 @@ class Jingmai(object):
         for k, v in h.pairs:
             sid = get_int(k, 0)
             vv = _deref(v)
-            val = []
+            val, mx = [], []
             if isinstance(vv, M.HashNode):
                 for k2, v2 in vv.pairs:
-                    if M.value_of(_deref(k2)) == "val":
-                        a = _deref(v2)
-                        if isinstance(a, M.ArrayNode):
-                            val = [_num(x) for x in a.items]
+                    key = M.value_of(_deref(k2))
+                    a = _deref(v2)
+                    lst = [_num(x) for x in a.items] \
+                        if isinstance(a, M.ArrayNode) else []
+                    if key == "val":
+                        val = lst
+                    elif key == "max":
+                        mx = lst
             out.append((sid, names.get(sid) or ("技能 %d" % sid),
-                        _skill_help(sid, val)))
+                        _skill_help(sid, val), val, mx))
         return out
 
     def skill_names(self):
@@ -248,21 +267,25 @@ class Jingmai(object):
         return names
 
     def grade(self, ji):
-        """`Game_Jingmai#refresh_grade` 的品阶（整数）。"""
+        """`Game_Jingmai#refresh_grade` 的品阶（整数）。
+
+        ⚠ `_pairs()` 返回 4 元组（名字, 当前, 满值, 原节点），别按 3 个解包
+          —— 空数组时循环不执行，一加项就 `ValueError: too many values`。
+        """
         t = _type_cn(M.value_of(_deref(ivar(ji, "@type"))))
         pts = self._pairs(ji, "points")
         ats = self._pairs(ji, "attributes")
-        full = lambda rows: sum(50 for _n, c, m in rows if c == m)   # noqa: E731
+        full = lambda rows: sum(50 for _n, c, m, _r in rows if c == m)  # noqa: E731
         if t == "圣者精气":
             g = (0, 10, 30, 60)[min(len(pts), 3)]
-            g += sum(c / 10.0 * 30 for _n, c, _m in pts)
+            g += sum(c / 10.0 * 30 for _n, c, _m, _r in pts)
             g += full(pts)
         elif t == "战神精气":
             g = (0, 20, 40)[min(len(ats), 2)]
-            g += sum(c / m * 100 if m else 0 for _n, c, m in ats)
+            g += sum(c / m * 100 if m else 0 for _n, c, m, _r in ats)
             g += full(pts)
         elif t == "仙人精气":
-            g = 500 + sum(c / m * 100 if m else 0 for _n, c, m in ats)
+            g = 500 + sum(c / m * 100 if m else 0 for _n, c, m, _r in ats)
             g += full(pts)
         elif t == "本源精气":
             g = 9999
@@ -294,7 +317,9 @@ class Jingmai(object):
             "points": [(n, c, m) for n, c, m, _r in self._pairs(ji, "points")],
             "attributes": [(n, c, m)
                            for n, c, m, _r in self._pairs(ji, "attributes")],
-            "skills": self._skills(ji),
+            "skills": [(sid, nm, h) for sid, nm, h, _v, _m in
+                       self.skill_rows_of(ji)],
+            "skill_rows": self.skill_rows_of(ji),
         }
 
     def sect_name(self, sect_id):
@@ -392,6 +417,168 @@ class Jingmai(object):
         if hit:
             self._touch(actor, ji)
         return hit, tot
+
+    # -------------------------------------------------- 点数 / 属性 条目编辑
+    @staticmethod
+    def _sym(name):
+        return M.SymbolNode(str(name))
+
+    @staticmethod
+    def _iv_of(kind):
+        return "@points" if kind == "points" else "@attributes"
+
+    def _arr(self, actor, ji, kind):
+        """`@points` / `@attributes` 的数组（没有就补一个空数组）。"""
+        iv = self._iv_of(kind)
+        arr = _deref(ivar(ji, iv))
+        if not isinstance(arr, M.ArrayNode):
+            arr = M.ArrayNode([])
+            ensure_ivar(ji, iv, arr)
+        return arr
+
+    def names_of(self, kind):
+        """这一类的名字空间（点数＝五维、属性＝七个属性名）。"""
+        return JM_POINT_NAMES if kind == "points" else JM_ATTR_NAMES
+
+    def full_of(self, kind, name):
+        """某一项的满值（界面上「上限」的默认值）。"""
+        if kind == "points":
+            return JM_POINT_FULL
+        return JM_ATTR_FULL.get(str(name), 100)
+
+    def set_pair(self, actor, slot, kind, index, name=None, cur=None, mx=None):
+        """改第 `index` 项（`kind` = `"points"` / `"attributes"`）。
+
+        只改传进来的那几样；名字必须是这一类认得的（写个别的符号游戏算不出来）。
+        """
+        ji = self.node(actor, slot)
+        arr = self._arr(actor, ji, kind)
+        i = int(index)
+        if not 0 <= i < len(arr.items):
+            raise JingmaiError("这一阶没有第 %d 项" % (i + 1))
+        r = _deref(arr.items[i])
+        if not isinstance(r, M.ArrayNode) or len(r.items) < 3:
+            raise JingmaiError("第 %d 项的格式不认识（不是 [名字, 数值, 上限]）"
+                               % (i + 1))
+        if name:
+            nm = str(name)
+            if nm not in self.names_of(kind):
+                raise JingmaiError("「%s」不是%s认的名字（可选：%s）" % (
+                    nm, "点数" if kind == "points" else "属性",
+                    "、".join(self.names_of(kind))))
+            r.items[0] = self._sym(nm)
+        if cur is not None:
+            r.items[1] = _num_node(r.items[1], cur)
+        if mx is not None:
+            r.items[2] = _num_node(r.items[2], mx)
+        self._touch(actor, ji)
+        return i
+
+    def add_pair(self, actor, slot, kind, name=None, cur=None, mx=None):
+        """加一项（返回新下标）。名字不给就取第一个还没用过的。
+
+        `cur` / `mx` 不给就取那一项的满值 —— 「加一条」默认是满的（跟界面
+        其它地方「默认取最大」一个口径），要低自己改。
+        """
+        ji = self.node(actor, slot)
+        arr = self._arr(actor, ji, kind)
+        names = self.names_of(kind)
+        used = set()
+        for row in arr.items:
+            r = _deref(row)
+            if isinstance(r, M.ArrayNode) and r.items:
+                used.add(_type_cn(M.value_of(_deref(r.items[0]))))
+        nm = str(name or next((n for n in names if n not in used), names[0]))
+        if nm not in names:
+            raise JingmaiError("「%s」不是这一类认的名字" % nm)
+        full = int(mx if mx is not None else self.full_of(kind, nm))
+        val = int(full if cur is None else cur)
+        arr.items.append(M.ArrayNode([self._sym(nm), int_node(val),
+                                      int_node(full)]))
+        self._touch(actor, ji)
+        return len(arr.items) - 1
+
+    def del_pair(self, actor, slot, kind, index):
+        """删一项（`refresh_grade` 按项数分档，删了品阶会跟着降）。"""
+        ji = self.node(actor, slot)
+        arr = self._arr(actor, ji, kind)
+        i = int(index)
+        if not 0 <= i < len(arr.items):
+            raise JingmaiError("这一阶没有第 %d 项" % (i + 1))
+        del arr.items[i]
+        self._touch(actor, ji)
+
+    # ------------------------------------------------------------ 技能编辑
+    def _skill_hash(self, actor, ji):
+        h = _deref(ivar(ji, "@skills"))
+        if not isinstance(h, M.HashNode):
+            h = M.HashNode([], default=None)
+            ensure_ivar(ji, "@skills", h)
+        return h
+
+    @staticmethod
+    def _num_like(v, like=0):
+        """按「像不像整数」写节点：`1` 用 Int，`0.15` 用 Float。"""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return int_node(0)
+        if isinstance(v, int) or (isinstance(v, float) and v == int(v)):
+            return int_node(int(f))
+        return M.FloatNode(round(f, 4), repr(round(f, 4)).encode("ascii"))
+
+    def _skill_node(self, vals, maxes):
+        """`{val: […], max: […]}`（键是符号 `:val` / `:max`）。"""
+        return M.HashNode([
+            (self._sym("val"),
+             M.ArrayNode([self._num_like(v) for v in (vals or [])])),
+            (self._sym("max"),
+             M.ArrayNode([self._num_like(v) for v in (maxes or [])])),
+        ], default=None)
+
+    def set_skill(self, actor, slot, old_sid, new_sid, vals=None, maxes=None):
+        """改这一阶的技能（换 id 时连键一起换；数值/上限按 `vals` / `maxes`）。"""
+        ji = self.node(actor, slot)
+        h = self._skill_hash(actor, ji)
+        old_sid, new_sid = int(old_sid), int(new_sid)
+        idx = None
+        for i, (k, _v) in enumerate(h.pairs):
+            if get_int(k, -1) == old_sid:
+                idx = i
+                break
+        if idx is None:
+            raise JingmaiError("这一阶没有技能 %d" % old_sid)
+        if new_sid != old_sid:
+            for i, (k, _v) in enumerate(h.pairs):
+                if i != idx and get_int(k, -1) == new_sid:
+                    raise JingmaiError("这一阶已经有技能 %d 了" % new_sid)
+        h.pairs[idx] = (int_node(new_sid), self._skill_node(vals, maxes))
+        self._touch(actor, ji)
+        return new_sid
+
+    def add_skill(self, actor, slot, sid, vals=None, maxes=None):
+        """加一个技能（一个阶可以挂多个；`Game_JMGroup#skills` 会合并）。"""
+        ji = self.node(actor, slot)
+        h = self._skill_hash(actor, ji)
+        sid = int(sid)
+        for k, _v in h.pairs:
+            if get_int(k, -1) == sid:
+                raise JingmaiError("这一阶已经有技能 %d 了" % sid)
+        h.pairs.append((int_node(sid), self._skill_node(vals, maxes)))
+        self._touch(actor, ji)
+        return sid
+
+    def del_skill(self, actor, slot, sid):
+        """删一个技能。"""
+        ji = self.node(actor, slot)
+        h = self._skill_hash(actor, ji)
+        sid = int(sid)
+        for i, (k, _v) in enumerate(h.pairs):
+            if get_int(k, -1) == sid:
+                del h.pairs[i]
+                self._touch(actor, ji)
+                return
+        raise JingmaiError("这一阶没有技能 %d" % sid)
 
     def open_all(self, actor):
         """十阶全部打通（不碰精气 / 萃取）。返回新打通了几个。"""
