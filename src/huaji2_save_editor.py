@@ -6923,6 +6923,16 @@ class App(object):
     def sync_editor(self):
         """sv 变了（载入/保存）就重建 GameEditor。"""
         self.g = game.GameEditor(self.sv) if self.sv else None
+        if self.g is not None:
+            # ⚠ 旧版本工具把「清空的格子」写成 `键 => nil`，游戏读档时会
+            #   `NoMethodError`（界面只显示「读取失败！」）⇒ 载入即自愈。
+            try:
+                n = self.g.prune_nil_slots()
+            except Exception:
+                n = 0
+            if n:
+                self.set_status("清掉 %d 个非法空格（旧工具写的 nil，游戏读到会"
+                                "「读取失败」）；保存一次即写干净。" % n)
 
     def export_report(self):
         if not self.doc:

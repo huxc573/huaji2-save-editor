@@ -1328,6 +1328,38 @@ def main():
                   all(s < gS.page_count("warehouse") * game.PACK_PAGE_SIZE
                       for s in used))
 
+    # ---------------- 2026-10-26：清空的格子**不能留 `键 => nil`** ----------
+    # 川的档读不出来就是这个：旧版工具把搬空/清空的格子写成 nil，`@items` 里
+    # 留了 12 对，游戏读档后 `each_all_item{|item| item[0].equip? }` 直接
+    # `NoMethodError: undefined method '[]' for nil`，界面只显示「读取失败！」。
+    def nils_of(h):
+        return [M.value_of(save._deref(k)) for k, v in h.pairs
+                if isinstance(save._deref(v), M.NilNode)]
+
+    hit = gS.container("Items")
+    slot_probe = sorted(snapS())[0]
+    gS.clear_slot("pack", slot_probe)
+    check("清空格子＝删掉这一对（键消失，不留 nil）",
+          gS._pair_index(hit, slot_probe) < 0, slot_probe)
+    check("清空后容器里没有 nil 值", nils_of(hit) == [], nils_of(hit))
+    check("清空后这一格查不到内容", gS._slot_node_of(hit, slot_probe) is None)
+    check("清空不减少页数", len(gS.bag("pack")) >= 0, len(gS.bag("pack")))
+
+    # 剪切到仓库：源格同样要"键消失"
+    if snapS():
+        src_cut = sorted(snapS())[-1]
+        gS.move_slots("pack", [src_cut], dst="warehouse", target=0)
+        check("剪切搬走的那一格键被删掉",
+              gS._pair_index(hit, src_cut) < 0, src_cut)
+        check("剪切后容器里没有 nil 值", nils_of(hit) == [], nils_of(hit))
+
+    # 自愈：手工塞一个 nil 进去，`prune_nil_slots()` 必须清掉
+    hit.pairs.append((M.IntNode(99999), M.NilNode()))
+    check("塞进去的 nil 能被扫出来", bool(nils_of(hit)), nils_of(hit))
+    pruned = gS.prune_nil_slots()
+    check("prune_nil_slots 清掉 %d 个 nil 后一个不剩" % pruned,
+          pruned >= 1 and nils_of(hit) == [], pruned)
+
     # 落盘重开：仓库与背包内容都要一致（整档重写别坏结构）
     want_pk, want_wh = snapS("pack"), snapS("warehouse")
     pages_before = [len(gS.bag("pack", p)) for p in range(4)]

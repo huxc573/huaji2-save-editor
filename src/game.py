@@ -877,11 +877,39 @@ class GameEditor(object):
             self.sync_security_item(iid)
         return count
 
-    def clear_slot(self, kind, slot):
-        """清空格子（把值置 nil，游戏就当它空的；不需要删对象）。
+    def prune_nil_slots(self):
+        r"""把槽位表里 `键 => nil` 的**非法空格**删掉，返回清掉的对数。
 
-        置 nil 后游戏自己的 `has_vacancy?` 就会把这个槽当空的，
-        而且不减少对象个数 —— 少踩一个“编号错位”的坑。
+        ⚠ 为什么必须清：游戏读档后 `$game_system.update?` →
+          `$game_party.each_all_item{|item| item[0].equip? }`，遇到 nil 就是
+          `NoMethodError: undefined method '[]' for nil`，异常被 `load_game`
+          的 rescue 吞掉 ⇒ 界面只显示「读取失败！」。
+          2026-10-26 川的档正是这样读不出来的（旧版本工具把清空的格子写成
+          nil，`@items` 里留了 12 个）。游戏自己写的档里**空格一律是
+          "键不存在"**（10-06/10-07/10-13/10-25 五份实测 0 个 nil）。
+
+        载入时自动跑一遍，旧档也能自愈（下次保存就写干净）。
+        """
+        n = 0
+        for kind in ("Items", "Weapons", "Armors", "warehouse"):
+            try:
+                h = self.container(kind)
+            except Exception:
+                continue
+            bad = [i for i, (_k, v) in enumerate(h.pairs)
+                   if isinstance(_deref(v), M.NilNode)]
+            for i in reversed(bad):
+                del h.pairs[i]
+            n += len(bad)
+        if n:
+            self.doc.mark_structural()
+        return n
+
+    def clear_slot(self, kind, slot):
+        """清空格子（**删掉这一对**，游戏就当它空的；对象本身不用管）。
+
+        ⚠ 别写 nil：游戏遍历 `@items` 时遇到 nil 会 `NoMethodError`，
+          读完档直接「读取失败！」（见 `_drop_slot`）。
         """
         h = self.container(kind)
         i = self._pair_index(h, slot)
@@ -891,7 +919,7 @@ class GameEditor(object):
         iid = -1
         if isinstance(arr, M.ArrayNode) and arr.items:
             iid = get_int(ivar(_deref(arr.items[0]), "@id"), -1)
-        h.pairs[i] = (h.pairs[i][0], nil_node())
+        del h.pairs[i]
         self.doc.mark_structural()
         if self._is_sec_kind(kind) and iid >= 0:
             self.sync_security_item(iid)
@@ -1000,9 +1028,12 @@ class GameEditor(object):
     def _put_slot(self, h, slot, value):
         """写回某一槽的值；没有这一对就**按槽号顺序**插进去。
 
-        ⚠ 老档里被清空的格子**键还留着**（值是 nil）—— 那种只换值、不加键，
-        免得凭空多出一对把后面的 `@N` 编号整体挪位。
+        `value=None` ＝**把这一对删掉**（空格在游戏里就是"键不存在"）——
+        见 `_drop_slot` 的注释，别写 nil。
         """
+        if value is None:
+            self._drop_slot(h, slot)
+            return
         i = self._pair_index(h, slot)
         if i >= 0:
             h.pairs[i] = (h.pairs[i][0], value)
@@ -1014,6 +1045,21 @@ class GameEditor(object):
                 pos = j
                 break
         h.pairs.insert(pos, (int_node(slot), value))
+
+    def _drop_slot(self, h, slot):
+        r"""空出一格 ＝ **删掉这一对**，绝不能写 `nil`。
+
+        ⚠ 2026-10-26 川的档读不出来，就是这里写 nil 造成的：`@items` 里留了
+          12 对 `键 => nil`，游戏 `update_grade` 里
+          `$game_party.each_all_item{|item| item[0].equip? }` 直接
+          `NoMethodError: undefined method '[]' for nil`，读完档立刻抛异常
+          （`load_game` 里被 rescue 吞掉，界面只显示「读取失败！」）。
+          查了 10-06 / 10-07 / 10-13 / 10-25 五份游戏自己写的档：`@items`
+          里**从来没出现过 nil 值**，空格一律是"这个键没有"。
+        """
+        i = self._pair_index(h, slot)
+        if i >= 0:
+            del h.pairs[i]
 
     def move_slots(self, src, slots, dst=None, target=None, copy=False):
         """把 `src` 里这些格子整格搬到 `dst` 的第 `target` 格起（或复制过去）。
@@ -1049,14 +1095,11 @@ class GameEditor(object):
             old_t = {t: self._slot_node_of(h2, t) for t in tgt}
             for s, t in zip(slots, tgt):
                 v = old_s[s]
-                if v is None:
-                    self._put_slot(h2, t, nil_node())
-                else:
-                    self._put_slot(h2, t, clone_node(v) if copy else v)
+                self._put_slot(h2, t, None if v is None else
+                               (clone_node(v) if copy else v))
             if not copy:                       # 目标区原来的东西回到源格
                 for t, s in zip(tgt, slots):
-                    v = old_t[t]
-                    self._put_slot(h1, s, nil_node() if v is None else v)
+                    self._put_slot(h1, s, old_t[t])
         else:
             limit = self.page_count(dst) * PACK_PAGE_SIZE
             free, s = [], target
@@ -1070,10 +1113,9 @@ class GameEditor(object):
                     % (dict(SRCS).get(dst, dst), target, len(free), n))
             for s, t in zip(slots, free):
                 v = self._slot_node_of(h1, s)
-                self._put_slot(h2, t, clone_node(v) if copy else
-                               (nil_node() if v is None else v))
+                self._put_slot(h2, t, clone_node(v) if copy else v)
                 if not copy:
-                    self._put_slot(h1, s, nil_node())
+                    self._put_slot(h1, s, None)
             tgt = free
         self.doc.mark_structural()
         if copy and self._is_sec_kind(src):
@@ -1173,7 +1215,7 @@ class GameEditor(object):
                     self.doc.set_value(_deref(arr.items[1]), left)
                     heads.append((key, (s, arr)))
                 else:
-                    self._put_slot(h, s, nil_node())
+                    self._put_slot(h, s, None)   # 空出来＝删掉这对，别写 nil
                 merged += 1
         moved = 0
         if compact:
@@ -1186,7 +1228,7 @@ class GameEditor(object):
             for tgt, s in zip(range(lo, hi), alive):
                 if tgt != s:
                     self._put_slot(h, tgt, self._slot_node_of(h, s))
-                    self._put_slot(h, s, nil_node())
+                    self._put_slot(h, s, None)   # 同上：空格＝删键
                     moved += 1
         if moved or merged:
             self.doc.mark_structural()
