@@ -925,6 +925,95 @@ def main():
               "%r" % (app.g.machine_ids(),))
         check("操作记录里有东西", "读取本机" in app.txt_machine.get("1.0", "end"),
               app.txt_machine.get("1.0", "end").splitlines()[:1])
+        # ---- 2026-10-26 川：复制 / 剪切 / 粘贴（Ctrl+C/X/V）+ Delete + Ctrl+E ----
+        say("背包：复制 / 剪切 / 粘贴、Delete 清空、Ctrl+E 改数量…")
+        _fill3 = [r[0] for r in app.g.bag("pack") if r[3]][:3]
+        _emp3 = [s for s in app.g.empty_slots("pack") if s not in _fill3][:4]
+        if _fill3 and len(_emp3) >= 4:
+            _s0 = _fill3[0]
+            app.var_bag_page.set(page_of(_s0))
+            app.fill_party()
+            root.update()
+            _r0 = app.g.slot_info("pack", _s0)
+            app.pack_select([_s0])
+            app.bag_copy(False)
+            check("Ctrl+C 记下选中的格子",
+                  getattr(app, "_bag_clip", None)
+                  == {"src": "pack", "slots": [_s0], "cut": False},
+                  "%r" % (getattr(app, "_bag_clip", None),))
+            app.pack_select([_emp3[0]])
+            app.bag_paste()
+            root.update()
+            _r1 = app.g.slot_info("pack", _emp3[0])
+            check("Ctrl+V 复制到空格（原格还在）",
+                  _r1 is not None and _r1[0] == _r0[0]
+                  and app.g.slot_info("pack", _s0) is not None,
+                  "%r → %r" % (_r0, _r1))
+            app.pack_select([_s0])
+            app.bag_copy(True)
+            app.pack_select([_emp3[1]])
+            app.bag_paste()
+            root.update()
+            check("Ctrl+X 剪切后原格清空、剪贴板清空",
+                  app.g.slot_info("pack", _s0) is None
+                  and app.g.slot_info("pack", _emp3[1]) is not None
+                  and getattr(app, "_bag_clip", None) is None,
+                  "%r / %r" % (app.g.slot_info("pack", _s0),
+                               app.g.slot_info("pack", _emp3[1])))
+            app.pack_select([_emp3[1]])       # 还回原位，别影响后面的用例
+            app.bag_copy(True)
+            app.pack_select([_s0])
+            app.bag_paste()
+            root.update()
+            check("剪切后能搬回原位",
+                  app.g.slot_info("pack", _s0) is not None, "%r" % (_s0,))
+            app.pack_select(_fill3[1:3] or [_s0])   # 多选整批
+            app.bag_copy(False)
+            check("多选也能复制（整批进剪贴板）",
+                  len(getattr(app, "_bag_clip", {}).get("slots") or []) >= 1,
+                  "%r" % (getattr(app, "_bag_clip", None),))
+            app.pack_select([_emp3[2]])
+            app.bag_paste()                   # 粘一件进去，好测改数量
+            root.update()
+            app.pack_select([_emp3[2]])
+            app._bag_clear_key()              # Delete
+            root.update()
+            check("Delete 清空本格", app.g.slot_info("pack", _emp3[2]) is None,
+                  "%r" % (app.g.slot_info("pack", _emp3[2]),))
+            app.pack_select([_emp3[0]])
+            app.bag_count_dialog()
+            root.update()
+            _cw = [w for w in app.root.winfo_children()
+                   if isinstance(w, tk.Toplevel) and w.winfo_exists()
+                   and "改数量" in (w.title() or "")]
+            check("Ctrl+E 弹出「改数量」窗口", bool(_cw), "%d 个" % len(_cw))
+            if _cw:
+                _ents = [w for w in walk(_cw[0])
+                         if w.winfo_class() == "TEntry"]
+                _node = app.g._item_node("pack", _emp3[0])
+                _lim = app.g.stack_limit(_node) if _node is not None else 1
+                check("数量默认值＝这件东西的叠加上限",
+                      bool(_ents) and _ents[0].get() == str(_lim),
+                      "%r / 上限 %s" % ([e.get() for e in _ents], _lim))
+                if _ents:
+                    _ents[0].delete(0, "end")
+                    _ents[0].insert(0, "7")
+                _ok = [w for w in walk(_cw[0]) if w.winfo_class() == "TButton"
+                       and w.cget("text") == "确定"]
+                if _ok:
+                    _ok[0].invoke()
+                root.update()
+                check("对话框确定后数量改了",
+                      (app.g.slot_info("pack", _emp3[0]) or (0, 0))[1] == 7,
+                      "%r" % (app.g.slot_info("pack", _emp3[0]),))
+            for _s in _emp3:
+                try:
+                    app.g.clear_slot("pack", _s)
+                except Exception:                       # noqa: BLE001
+                    pass
+            app.fill_party()
+            root.update()
+
         say("背包“内容”列 + 重抽内容…")
         egg_slot = None
         for r in app.g.bag("Items"):
@@ -1017,6 +1106,10 @@ def main():
                   list(_wq.rows) == ["sect", "skill", "val", "attributes",
                                      "seed"],
                   "%r" % (list(_wq.rows),))
+            # 上限 3 项（模板自带可能就是 3 项）—— 先腾出位置再加
+            while len(_wq.rows["attributes"]["subs"]) >= 3:
+                _wq._rows_del("attributes", 0)
+                root.update()
             _n = len(_wq.rows["attributes"]["subs"])
             _wq._rows_add("attributes")
             root.update()
@@ -1025,6 +1118,15 @@ def main():
                   and "200" in _wq.rows["attributes"]["subs"][-1][
                       "vars"][2].get(),
                   "%d → %d" % (_n, len(_wq.rows["attributes"]["subs"])))
+            _wq._rows_add("attributes")        # 一直加到满，再加就该加不动
+            while len(_wq.rows["attributes"]["subs"]) < 3:
+                _wq._rows_add("attributes")
+                root.update()
+            _wq._rows_add("attributes")
+            root.update()
+            check("属性提升最多 3 项（满了「＋ 加一项」不再长行）",
+                  len(_wq.rows["attributes"]["subs"]) == 3,
+                  "%d 行" % len(_wq.rows["attributes"]["subs"]))
             _wq.apply()
             root.update()
             _jsum = app.g.payload_summary(app.g._item_node("Items", _jq))
@@ -2609,13 +2711,41 @@ def main():
                   len(_cats) == (len(_d0["points"]) + len(_d0["attributes"])
                                  + len(_d0["skill_rows"])),
                   "%r" % (_cats,))
+            # 两类都先删到 3 项以内 —— 真档的阶可能已经满了（游戏模板自带 3 项），
+            # 满了再点「加一项」会被拒、还要弹窗。
+            while len(_jmobj.info(_act, _s)["attributes"]) >= 3:
+                _jmobj.del_pair(_act, _s, "attributes", 0)
+            while len(_jmobj.info(_act, _s)["points"]) >= 3:
+                _jmobj.del_pair(_act, _s, "points", 0)
+            # 属性一条都没有的阶（圣者）就退而验点数
+            if not _jmobj.info(_act, _s)["attributes"]:
+                _jmobj.add_pair(_act, _s, "attributes", name="气血上限")
+            app._jm_fill(keep=_s)
+            root.update()
+            _d0 = _jmobj.info(_act, _s)
+            _ai_pre = [i for i in _itv.get_children() if i.startswith("a")]
+            _itv.selection_set(_ai_pre[-1])     # 选中属性行 ⇒ 加的一定是属性
+            app._jm_on_item()
+            root.update()
             _n0 = len(_d0["attributes"])
-            app._jm_add()                      # 没选属性行 → 按精气类型猜
+            app._jm_add()
             root.update()
             _d1 = _jmobj.info(_act, _s)
             check("「加一项」真的加进存档对象（属性 +1）",
                   len(_d1["attributes"]) == _n0 + 1,
                   "%d → %d" % (_n0, len(_d1["attributes"])))
+            # 满 3 项之后再点就该被拒（2026-10-26 川：「我怎么能无限加？」）
+            while len(_jmobj.info(_act, _s)["attributes"]) < 3:
+                _jmobj.add_pair(_act, _s, "attributes")
+            try:
+                _jmobj.add_pair(_act, _s, "attributes")
+                _capped = False
+            except Exception:                  # noqa: BLE001
+                _capped = True
+            app._jm_fill(keep=_s)
+            root.update()
+            check("属性和点数最多 3 项，满了就拒绝（游戏按项数算品阶）",
+                  _capped, "第 4 项被拒" if _capped else "第 4 项竟然加上了")
             _ai = [i for i in _itv.get_children() if i.startswith("a")]
             if _ai:
                 _itv.selection_set(_ai[-1])
@@ -2625,37 +2755,60 @@ def main():
                       bool(_nmv.get()) and _maxv.get() != "",
                       "%s / %s / %s" % (_nmv.get(), _curv.get(),
                                         _maxv.get()))
-                _nmv.set("气血上限")
+                check("上限框只读（2026-10-26 川：「上限应该不可调只显示吧？」）",
+                      str(_maxw.cget("state")) == "readonly",
+                      str(_maxw.cget("state")))
+                _nmv.set("法术防御")     # 别跟已有的「气血上限」重名
                 _curv.set("42")
-                _maxv.set("66")
                 app._jm_write()
                 root.update()
                 _d2 = _jmobj.info(_act, _s)
-                _row = [r for r in _d2["attributes"] if r[0] == "气血上限"]
-                check("「写入这一项」把数值/上限写进去（42/66）",
-                      bool(_row) and _row[0][1] == 42 and _row[0][2] == 66,
+                _row = [r for r in _d2["attributes"] if r[0] == "法术防御"]
+                check("「写入这一项」只写数值，上限由名字定（42/100）",
+                      bool(_row) and _row[0][1] == 42 and _row[0][2] == 100,
                       "%r" % (_d2["attributes"],))
+                # 换名字 ⇒ 上限立刻跟着换（灵力 50），超上限的数值一起压下来
+                _itv.selection_set([i for i in _itv.get_children()
+                                    if i.startswith("a")][-1])
+                app._jm_on_item()
+                root.update()
+                _nmv.set("灵力")
+                app._jm_name_pick()            # ＝在下拉里选「灵力」
+                root.update()
+                check("换属性名就把上限刷成那一项的满值（灵力 50）",
+                      _maxv.get() in ("50", "50.0"), _maxv.get())
+                _curv.set("999")               # 超上限 → 写入时压回 50
+                app._jm_write()
+                root.update()
+                _d2 = _jmobj.info(_act, _s)
+                _row = [r for r in _d2["attributes"] if r[0] == "灵力"]
+                check("数值超过上限会回落到上限（999 → 50）",
+                      bool(_row) and _row[0][1] == 50, "%r" % (_row,))
                 _shown = [_itv.item(i, "values") for i in _itv.get_children()
                           if i.startswith("a")]
-                check("明细表跟着刷新（不再是 0/0）",
-                      any(str(v[2]) == "42" and str(v[3]) == "66"
+                check("明细表跟着刷新（灵力 50/50）",
+                      any(v[1] == "灵力" and str(v[2]) == "50"
                           for v in _shown),
                       "%r" % (_shown,))
             _sk = [i for i in _itv.get_children() if i.startswith("s")]
             if _sk:
                 _sid0 = int(_sk[0][1:])
+                _maxs_before = next(
+                    (list(r[4]) for r in _jmobj.info(_act, _s)["skill_rows"]
+                     if r[0] == _sid0), [])
                 _itv.selection_set(_sk[0])
                 app._jm_on_item()
                 root.update()
                 _curv.set("0.3")
-                _maxv.set("0.5")
                 app._jm_write()
                 root.update()
                 _d3 = _jmobj.info(_act, _s)
                 _sr = [r for r in _d3["skill_rows"] if r[0] == _sid0]
-                check("技能的数值/上限也能改（0.3/0.5）",
-                      bool(_sr) and _sr[0][3] == [0.3] and _sr[0][4] == [0.5],
-                      "%r" % (_sr[0][3:] if _sr else None,))
+                check("技能的数值能改（0.3），上限沿用存档里那份",
+                      bool(_sr) and _sr[0][3] == [0.3]
+                      and _sr[0][4] == _maxs_before,
+                      "%r / %r" % (_sr[0][3:] if _sr else None,
+                                   _maxs_before))
             _ai = [i for i in _itv.get_children() if i.startswith("a")]
             if _ai:
                 _n1 = len(_jmobj.info(_act, _s)["attributes"])

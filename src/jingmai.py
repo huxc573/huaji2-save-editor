@@ -55,6 +55,11 @@ JM_ATTR_FULL = {"气血上限": 200, "法力上限": 100, "物理攻击": 50,
                 "物理防御": 100, "灵力": 50, "法术防御": 100, "速度": 50}
 #: 五维点数的满值（`圣者精气` 每项恒 50）
 JM_POINT_FULL = 50
+#: 一阶里 `@points` / `@attributes` 最多几项。
+#: ⚠ 不是随便定的：`refresh_grade` 用 `[0, 10, 30, 60][项数]`、`[0, 20, 40][项数]`
+#:   查表，多一项就 `nil`，`nil + 数` 在游戏里直接崩（2026-10-26 川：「我怎么能
+#:   无限加？」）。游戏自己产出也最多 3 项（圣者 `+1` → 1~3、战神/仙人 0~2）。
+MAX_PAIRS = 3
 
 def _type_cn(sym):
     """符号名 → 中文（`'战神精气'`）；空值给空串。"""
@@ -450,6 +455,12 @@ class Jingmai(object):
         """改第 `index` 项（`kind` = `"points"` / `"attributes"`）。
 
         只改传进来的那几样；名字必须是这一类认得的（写个别的符号游戏算不出来）。
+
+        ⚠ **上限不接受外部指定**（`mx` 只为兼容老调用留着、一律忽略）：它由
+          名字决定（`full_of`），换名字就跟着换；数值超过上限压回上限。
+          游戏 `refresh_grade` 拿 `值 / 上限` 算品阶、`attributes()` 又把值
+          原样加进面板 —— 写超了是真生效，所以必须夹紧
+          （2026-10-26 川：「上限应该不可调只显示」「设置超过上限，居然也可以生效」）。
         """
         ji = self.node(actor, slot)
         arr = self._arr(actor, ji, kind)
@@ -460,6 +471,7 @@ class Jingmai(object):
         if not isinstance(r, M.ArrayNode) or len(r.items) < 3:
             raise JingmaiError("第 %d 项的格式不认识（不是 [名字, 数值, 上限]）"
                                % (i + 1))
+        nm = _type_cn(M.value_of(_deref(r.items[0])))
         if name:
             nm = str(name)
             if nm not in self.names_of(kind):
@@ -467,21 +479,34 @@ class Jingmai(object):
                     nm, "点数" if kind == "points" else "属性",
                     "、".join(self.names_of(kind))))
             r.items[0] = self._sym(nm)
-        if cur is not None:
-            r.items[1] = _num_node(r.items[1], cur)
-        if mx is not None:
-            r.items[2] = _num_node(r.items[2], mx)
+        full = int(self.full_of(kind, nm))
+        val = _num(r.items[1]) if cur is None else cur
+        try:
+            val = int(round(float(val)))
+        except (TypeError, ValueError):
+            val = 0
+        r.items[1] = _num_node(r.items[1], max(0, min(val, full)))
+        r.items[2] = _num_node(r.items[2], full)
         self._touch(actor, ji)
         return i
 
     def add_pair(self, actor, slot, kind, name=None, cur=None, mx=None):
         """加一项（返回新下标）。名字不给就取第一个还没用过的。
 
-        `cur` / `mx` 不给就取那一项的满值 —— 「加一条」默认是满的（跟界面
-        其它地方「默认取最大」一个口径），要低自己改。
+        `cur` 不给就取那一项的满值 —— 「加一条」默认是满的（跟界面其它地方
+        「默认取最大」一个口径），要低自己改。`mx` 同上：忽略，上限按名字取。
+
+        ⚠ **项数卡在 `MAX_PAIRS`（= 3）**：游戏 `refresh_grade` 里
+          `[0, 10, 30, 60][@points.length]` / `[0, 20, 40][@attributes.length]`
+          是按项数查表的，**多一项就下标越界 → 返回 nil → `nil + 数` 直接崩**。
+          界面原来不卡，能一直加（2026-10-26 川：「我怎么能无限加？」）。
         """
         ji = self.node(actor, slot)
         arr = self._arr(actor, ji, kind)
+        if len(arr.items) >= MAX_PAIRS:
+            raise JingmaiError(
+                "游戏里%s最多 %d 项（品阶按 1/2/3 项分档，再多会算不出品阶）"
+                % ("点数" if kind == "points" else "属性", MAX_PAIRS))
         names = self.names_of(kind)
         used = set()
         for row in arr.items:
@@ -491,9 +516,13 @@ class Jingmai(object):
         nm = str(name or next((n for n in names if n not in used), names[0]))
         if nm not in names:
             raise JingmaiError("「%s」不是这一类认的名字" % nm)
-        full = int(mx if mx is not None else self.full_of(kind, nm))
-        val = int(full if cur is None else cur)
-        arr.items.append(M.ArrayNode([self._sym(nm), int_node(val),
+        full = int(self.full_of(kind, nm))
+        try:
+            val = int(round(float(full if cur is None else cur)))
+        except (TypeError, ValueError):
+            val = full
+        arr.items.append(M.ArrayNode([self._sym(nm),
+                                      int_node(max(0, min(val, full))),
                                       int_node(full)]))
         self._touch(actor, ji)
         return len(arr.items) - 1
@@ -528,12 +557,25 @@ class Jingmai(object):
         return M.FloatNode(round(f, 4), repr(round(f, 4)).encode("ascii"))
 
     def _skill_node(self, vals, maxes):
-        """`{val: […], max: […]}`（键是符号 `:val` / `:max`）。"""
+        """`{val: […], max: […]}`（键是符号 `:val` / `:max`）。
+
+        ⚠ 上限（`max`）是脚本给的满值、界面上只读；**数值超上限就压回来**
+          —— 否则「伤害 +120%」这种游戏产不出的组合也能写进去
+          （2026-10-26 川：「设置超过上限，居然也可以生效，而不是回落到上限」）。
+        """
+        vals = list(vals or [])
+        maxes = list(maxes or [])
+        for i in range(min(len(vals), len(maxes))):
+            try:
+                if float(vals[i]) > float(maxes[i]):
+                    vals[i] = maxes[i]
+            except (TypeError, ValueError):
+                pass
         return M.HashNode([
             (self._sym("val"),
-             M.ArrayNode([self._num_like(v) for v in (vals or [])])),
+             M.ArrayNode([self._num_like(v) for v in vals])),
             (self._sym("max"),
-             M.ArrayNode([self._num_like(v) for v in (maxes or [])])),
+             M.ArrayNode([self._num_like(v) for v in maxes])),
         ], default=None)
 
     def set_skill(self, actor, slot, old_sid, new_sid, vals=None, maxes=None):

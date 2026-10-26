@@ -679,12 +679,18 @@ def skill_label(sid):
     return XIANREN_SKILL_NAMES.get(int(sid)) or ("技能 %d" % int(sid))
 
 
-def _pair_cols(names, val_rng=(1, 100), max_rng=(1, 200)):
-    """属性行的三列：名字（下拉）/ 数值 / 上限。"""
+def _pair_cols(names, val_rng=(1, 100)):
+    """属性行的三列：名字（下拉）/ 数值 / 上限（**只显示**）。
+
+    ⚠ 上限不是自由值：它由**属性名**决定（`*_ATTR_FULL`，气血上限 200、
+      灵力 30…），游戏 `refresh_grade` 拿 `值 / 上限` 算品阶。所以这一列
+      给 `kind="const"`（只读），值由字段的 `full` 表按名字取 ——
+      2026-10-26 川：「上限应该不可调只显示吧？」
+    """
     return [{"key": "name", "label": "属性", "kind": "choice",
              "choices": [(n, n) for n in names]},
             {"key": "val", "label": "数值", "kind": "num", "rng": val_rng},
-            {"key": "max", "label": "上限", "kind": "num", "rng": max_rng}]
+            {"key": "max", "label": "上限", "kind": "const"}]
 
 
 def _pair_rows_default(names, full_of, n=3):
@@ -778,6 +784,11 @@ def _attr_rows(rows, names, full_of, cap=None):
 
     名字不在 `names` 里就退回第一项（宁可写对一项，也别写个游戏不认的符号）；
     行数最多 `cap` 项（脚本 `refresh_grade` 只按 1/2/3 项分档，多了没意义）。
+
+    ⚠ **上限一律按名字取 `full_of`，不认界面上那个 `max`**；数值超过上限
+      就压回上限（2026-10-26 川：「我设置超过上限，居然也可以生效，而不是
+      回落到上限」—— 游戏 `refresh_grade` 直接拿 `值 / 上限` 算，`attributes()`
+      又把值原样加进面板，写超了是真生效）。
     """
     out = []
     for r in list(rows or [])[:cap or 3]:
@@ -786,15 +797,14 @@ def _attr_rows(rows, names, full_of, cap=None):
         if nm not in names:
             nm = names[0]
         try:
+            mx = int(round(float(full_of.get(nm, 50))))
+        except (TypeError, ValueError):
+            mx = 50
+        try:
             val = int(round(float(r.get("val") or 0)))
         except (TypeError, ValueError):
             val = 0
-        try:
-            mx = int(round(float(r.get("max") if r.get("max") is not None
-                                 else full_of.get(nm, 50))))
-        except (TypeError, ValueError):
-            mx = int(full_of.get(nm, 50))
-        out.append([Sym(nm), val, mx])
+        out.append([Sym(nm), max(0, min(val, mx)), mx])
     return out
 
 
@@ -850,19 +860,18 @@ def _zhanshen(_item_id, rnd, over=None):
                 v = int(round(float(raw))) if is_int else round(float(raw), 4)
             except (TypeError, ValueError):
                 v = int(lo) if is_int else round(float(lo), 4)
+        # ⚠ 上限是脚本 `sdata` 定的（技能满值），超了就压回去 —— 别写「120%」这种
+        #   游戏产不出的数值（2026-10-26 川：「设置超过上限，居然也可以生效」）。
+        if i < len(maxes):
+            try:
+                cap = maxes[i]
+                v = min(v, cap) if isinstance(cap, int) else min(float(v), float(cap))
+            except (TypeError, ValueError):
+                pass
         val.append(v)
-    # 上限（`max`）也允许改：跟着技能走的那张表是游戏给的「满值」，
-    # 想压到更低（改弱）或顶到更高都得能写。
+    # 上限就是脚本 `sdata[技能]` 那组，**不认界面写的值**
+    # （2026-10-26 川：「上限应该不可调只显示吧？」）。
     mx = list(maxes)
-    for i in range(min(len(mx), len(rows))):
-        raw = (rows[i] or {}).get("max")
-        if raw is None:
-            continue
-        try:
-            mx[i] = int(round(float(raw))) if isinstance(maxes[i], int) \
-                else round(float(raw), 4)
-        except (TypeError, ValueError):
-            pass
     if "attributes" in over:          # 空列表＝0 项，照写（别退回随机）
         attributes = _attr_rows(over.get("attributes"), ZHANSHEN_ATTR_NAMES,
                                 ZHANSHEN_ATTR_FULL, cap=3)
@@ -1244,7 +1253,7 @@ def payload_spec(name, item_id):
         return "圣者精气", [
             {"key": "point", "label": "点数提升", "kind": "rows", "min": 1,
              "max": 3,
-             "cols": _pair_cols(SHENGZHE_ATTRS, (1, 50), (1, 50)),
+             "cols": _pair_cols(SHENGZHE_ATTRS, (1, 50)),
              "full": {n: 50 for n in SHENGZHE_ATTRS},
              "rows_default": lambda _cur: _pair_rows_default(
                  SHENGZHE_ATTRS, {n: 50 for n in SHENGZHE_ATTRS})},
@@ -1261,11 +1270,11 @@ def payload_spec(name, item_id):
             {"key": "val", "label": "技能数值", "kind": "rows", "min": 0,
              "max": 3, "fixed": True, "deps": ("skill",),
              "cols": [{"key": "val", "label": "数值", "kind": "num"},
-                      {"key": "max", "label": "上限", "kind": "num"}],
+                      {"key": "max", "label": "上限", "kind": "const"}],
              "rows_default": _zhanshen_val_rows},
             {"key": "attributes", "label": "属性提升", "kind": "rows",
              "min": 0, "max": 3,
-             "cols": _pair_cols(ZHANSHEN_ATTR_NAMES, (1, 200), (1, 200)),
+             "cols": _pair_cols(ZHANSHEN_ATTR_NAMES, (1, 200)),
              "full": dict(ZHANSHEN_ATTR_FULL),
              "rows_default": lambda _cur: _pair_rows_default(
                  ZHANSHEN_ATTR_NAMES, ZHANSHEN_ATTR_FULL)},
@@ -1279,7 +1288,7 @@ def payload_spec(name, item_id):
                  sid, "技能"), sid)) for sid in XIANREN_SKILLS]},
             {"key": "attributes", "label": "属性提升", "kind": "rows",
              "min": 0, "max": 3,
-             "cols": _pair_cols(XIANREN_ATTR_NAMES, (1, 200), (1, 200)),
+             "cols": _pair_cols(XIANREN_ATTR_NAMES, (1, 200)),
              "full": dict(XIANREN_ATTR_FULL),
              "rows_default": lambda _cur: _pair_rows_default(
                  XIANREN_ATTR_NAMES, XIANREN_ATTR_FULL)},

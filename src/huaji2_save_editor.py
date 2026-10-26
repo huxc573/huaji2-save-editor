@@ -2043,6 +2043,16 @@ class PayloadManager(object):
                         self._rows_choice(it, cc, w, vv, ll, kk, ii))
                 sub["widgets"][c["key"]] = cb
                 sub["vars"].append(var)
+            elif c["kind"] == "const":
+                # 上限这类「由别的列决定、只给人看」的格子：只读 Entry（跟别的
+                # 框一样齐，但点不进去）。2026-10-26 川：「上限应该不可调只显示吧？」
+                var = tk.StringVar()
+                var.set(self._const_text(rec["fd"], item, c))
+                ent = ttk.Entry(fr, textvariable=var, width=c.get("width", 7),
+                                state="readonly")
+                ent.pack(side="left", padx=(0, 4))
+                sub["widgets"][c["key"]] = ent
+                sub["vars"].append(var)
             else:
                 var = tk.StringVar()
                 v = item.get(c["key"])
@@ -2065,45 +2075,69 @@ class PayloadManager(object):
         #   current() 返回 -1（2026-10-26 经脉窗口踩过一次）。
         rec["vars"].extend(sub["vars"])
 
-    def _rows_choice(self, item, col, cb, vals, labels, key=None, idx=None):
-        """行里的属性下拉换值：名字换了，「上限」也跟着那一项的满值走。
+    @staticmethod
+    def _const_text(fd, item, col):
+        """只读格子显示什么：**上限按名字取 `full`**（规则满值），没表就退回原值。
 
-        只在「上限还是旧名字的满值」（＝用户没手动改过）时才跟，免得把人家
-        特意压低的数值顶回去。
+        为什么不显示存档里那个 `max`：上限不可改，写回时一律按名字算，
+        显示规则值才跟保存后的结果一致（旧存档里可能有被写歪的数）。
+        """
+        nm = item.get("name")
+        full = (fd or {}).get("full") or {}
+        if nm in full:
+            return "%g" % full[nm]
+        v = item.get(col["key"])
+        return "" if v is None else ("%g" % v if isinstance(v, float) else str(v))
+
+    @staticmethod
+    def _set_entry(w, text):
+        """给（可能是 readonly 的）Entry 换文字：临时放开 state 再写回去。"""
+        if w is None or not hasattr(w, "delete"):
+            return
+        try:
+            st = w.cget("state")
+        except Exception:                            # noqa: BLE001
+            st = "normal"
+        if st == "readonly":
+            w.configure(state="normal")
+        w.delete(0, "end")
+        w.insert(0, str(text))
+        if st == "readonly":
+            w.configure(state="readonly")
+
+    def _rows_choice(self, item, col, cb, vals, labels, key=None, idx=None):
+        """行里的属性下拉换值：名字换了，「上限」**立刻**跟着那一项的满值走。
+
+        上限是只读的（`kind="const"`，由名字决定），所以这里无条件重设 ——
+        2026-10-26 川：「切换属性没有刷新对应属性的上限」。数值原来按旧上限
+        填的（气血 200/200 → 法术防御），换完名会变成「200/100」，一起压下来。
         """
         txt = cb.get()
         if txt not in labels:
             return
         new = vals[labels.index(txt)]
-        old = item.get(col["key"])
         item[col["key"]] = new
         fd = (self.rows.get(key) or {}).get("fd") or {}
         full = fd.get("full") or {}
-        if full and item.get("max") is not None \
-                and item.get("max") == full.get(old) and full.get(new):
-            # ⚠ 先刷控件再写 item：Entry 的 trace 会在 delete/insert 之间把
-            #   `item["max"]` pop 掉（读到空串），反序会 KeyError。
-            rec = self.rows.get(key) or {}
-            subs = rec.get("subs") or []
-            w = subs[idx]["widgets"].get("max") \
-                if idx is not None and 0 <= idx < len(subs) else None
-            if w is not None and hasattr(w, "delete"):
-                w.delete(0, "end")
-                w.insert(0, str(full[new]))
-            item["max"] = full[new]
-            # 数值原来按旧上限填的（比如气血 200/200 → 法术防御），换了名
-            # 之后会变成「200/100」这种超上限的组合 → 一起压下来。
-            try:
-                over = float(item.get("val") or 0) > float(item["max"])
-            except (TypeError, ValueError):
-                over = False
-            if over:
-                w2 = subs[idx]["widgets"].get("val") \
-                    if idx is not None and 0 <= idx < len(subs) else None
-                if w2 is not None and hasattr(w2, "delete"):
-                    w2.delete(0, "end")
-                    w2.insert(0, str(item["max"]))
-                item["val"] = item["max"]
+        mx = full.get(new)
+        if mx is None:
+            mx = item.get("max")
+        rec = self.rows.get(key) or {}
+        subs = rec.get("subs") or []
+        sub = subs[idx] if idx is not None and 0 <= idx < len(subs) else None
+        if mx is None:
+            return
+        item["max"] = mx
+        if sub:
+            self._set_entry(sub["widgets"].get("max"), "%g" % mx)
+        try:
+            over = float(item.get("val") or 0) > float(mx)
+        except (TypeError, ValueError):
+            over = False
+        if over:
+            item["val"] = mx
+            if sub:
+                self._set_entry(sub["widgets"].get("val"), "%g" % mx)
 
     def _rows_num(self, item, col, var):
         txt = (var.get() or "").strip()
@@ -2114,16 +2148,27 @@ class PayloadManager(object):
             v = float(txt)
         except ValueError:
             return
-        item[col["key"]] = int(v) if v == int(v) else v
+        v = int(v) if v == int(v) else v
+        item[col["key"]] = v
+        # 数值填超上限就当场压回来，别等保存（2026-10-26 川：「设置超过上限，
+        # 居然也可以生效，而不是回落到上限」）。
+        if col["key"] == "val" and item.get("max") is not None:
+            try:
+                if float(v) > float(item["max"]):
+                    item["val"] = item["max"]
+                    var.set("%g" % item["max"])
+            except (TypeError, ValueError):
+                pass
 
     def _rows_add(self, key):
         fd = (self.rows.get(key) or {}).get("fd") or {}
         data = self._rows_of(key)
         if len(data) >= int(fd.get("max") or 99):
+            self.app.set_status("「%s」最多 %s 项（游戏按项数算品阶）。"
+                                % (fd.get("label"), fd.get("max")))
             return
         cols = fd.get("cols") or []
         keys = [c["key"] for c in cols]
-        rng_of = {c["key"]: (c.get("rng") or (0, 0))[1] for c in cols}
         names = [v for c in cols if c["kind"] == "choice"
                  for v, _l in (c.get("choices") or [])]
         used = set(d.get("name") for d in data)
@@ -2131,15 +2176,16 @@ class PayloadManager(object):
                   names[0] if names else "")
         full = fd.get("full") or {}
         item = {"name": nm}
-        # 先定「上限」（按这一项的满值），再让「数值」跟它 —— 反过来的话
-        # 数值会先取列区间的上限（200），比上限（100）还大（2026-10-26）。
+        # 上限按名字取满值；数值默认也取满值（「加一条默认是满的」）
         if "max" in keys:
-            item["max"] = full.get(nm) or rng_of.get("max") or 0
+            item["max"] = full.get(nm) or next(
+                ((c.get("rng") or (0, 0))[1] for c in cols
+                 if c["key"] == "max"), 0)
         if "val" in keys:
-            item["val"] = item.get("max") or rng_of.get("val") or 0
+            item["val"] = item.get("max") or 0
         for c in cols:                       # 兜底：剩下没算的按列区间上限
-            if item.get(c["key"]) is None:
-                item[c["key"]] = rng_of.get(c["key"]) or 0
+            if item.get(c["key"]) is None and c["kind"] != "const":
+                item[c["key"]] = (c.get("rng") or (0, 0))[1] or 0
         data.append(item)
         self._fill_rows(key)
 
@@ -2872,6 +2918,18 @@ class App(object):
         except Exception:                       # noqa: BLE001
             pass
 
+    @staticmethod
+    def _combo_dropped(w):
+        """下拉弹层是不是正开着（`ttk::combobox::PopdownWindow` 可见）。
+
+        ⚠ 弹层是 Tcl 侧建的、**不在 Python 的 widget 树里**，所以只能问 Tcl。
+        """
+        try:
+            pop = w.tk.call("ttk::combobox::PopdownWindow", w)
+            return bool(int(w.tk.call("winfo", "ismapped", pop)))
+        except Exception:                       # noqa: BLE001
+            return False
+
     def _combo_step(self, w, d):
         """把 `w` 的当前值在 `values` 里挪 `d` 位（到顶/到底就停，不循环）。
 
@@ -2879,7 +2937,12 @@ class App(object):
         换页签刷一页之类）。回调返回 `"break"` 吃掉事件。
         ⚠ 单独拆成一个方法是为了**能直接测** —— 键盘事件在无焦点的窗口上
           `event_generate` 根本不派发（实测 widget 级/class 级绑定都不进）。
+        ⚠ **弹层开着时不动手**：那时 ↑/↓ 是「在列表里上下选」，一改值就变成
+          「越过目标」—— 2026-10-26 川「明明选的力量，写入后却变成了魔力」
+          （力量 / 魔力在五维里正好挨着）。这里只吃掉按键，值交给点选。
         """
+        if self._combo_dropped(w):
+            return "break"
         try:
             vals = list(w.cget("values"))
         except Exception:                       # noqa: BLE001
@@ -3959,6 +4022,7 @@ class App(object):
         self.tv_pack.pack(fill="both", expand=True)
         self.tv_pack.bind("<<TreeviewSelect>>", lambda e: self.bag_pick())
         self.tv_pack.bind("<Double-1>", lambda e: self.bag_edit())
+        self._bind_bag_keys()
         self.tv_pack.bind("<Motion>", self._bag_tip_motion, add="")
         self.tv_pack.bind("<Leave>", self._tip_hide, add="")
         # 右键菜单（移动到 / 复制到 / 整理本页）+ 拖动换格（2026-10-08 川）
@@ -9002,6 +9066,152 @@ class App(object):
     def _bag_src_cn(self):
         return "背包" if self._bag_src() == "pack" else "仓库"
 
+    # ---------------------------------------------- 复制 / 剪切 / 粘贴（2026-10-26 川）
+    def bag_copy(self, cut=False):
+        """Ctrl+C / Ctrl+X：把选中的格子放进**应用内剪贴板**（多选整批）。
+
+        只记「哪个容器 + 哪些槽号」，不复制节点 —— 粘贴时才按当时的存档现取
+        （`move_slots` 自己会深拷贝），所以中途改过内容也照最新那份走。
+        """
+        if not self.g:
+            return "break"
+        slots = self._bag_slots(quiet=True)
+        if not slots:
+            self.set_status("先在列表里选格子（可多选）再复制。")
+            return "break"
+        self._bag_clip = {"src": self._bag_src(), "slots": list(slots),
+                          "cut": bool(cut)}
+        self.set_status("已%s %d 格（%s）—— 选好目标格后按 Ctrl+V"
+                        % ("剪切" if cut else "复制", len(slots),
+                           self._bag_sel_names(slots)))
+        return "break"
+
+    def bag_paste(self):
+        """Ctrl+V：把剪贴板里的格子贴到**当前选中的那一格**起。
+
+        落点规则全交给 `move_slots`：同容器＝对调（多格保持相对顺序），
+        跨容器＝从目标格起找空格放、放不下整批不动。剪切粘贴成功后剪贴板清空。
+        """
+        if not self.g:
+            return "break"
+        clip = getattr(self, "_bag_clip", None)
+        if not clip:
+            self.set_status("剪贴板是空的：先 Ctrl+C / Ctrl+X 复制几格。")
+            return "break"
+        target = self._bag_slot(quiet=True)
+        if target is None:
+            self.set_status("先在目标位置选一格，再按 Ctrl+V。")
+            return "break"
+        try:
+            n, used = self.g.move_slots(clip["src"], clip["slots"],
+                                        dst=self._bag_src(), target=target,
+                                        copy=not clip["cut"])
+        except Exception as e:                      # noqa: BLE001
+            messagebox.showerror("粘贴失败", human(str(e)), parent=self.root)
+            return "break"
+        if clip["cut"]:
+            self._bag_clip = None
+        self.mark_dirty()
+        self.fill_party()
+        self.pack_select(used)
+        self.set_status("已粘贴 %d 格到槽 %s（%s）"
+                        % (n, "、".join(str(s) for s in used[:6]),
+                           "剪切" if clip["cut"] else "复制"))
+        return "break"
+
+    def bag_count_dialog(self):
+        """Ctrl+E：改数量。默认填**这件东西的叠加上限**，多选一次改整批。"""
+        slots = self._bag_slots(quiet=True)
+        if not slots or not self.g:
+            self.set_status("先选格子再改数量。")
+            return
+        src = self._bag_src()
+        top = 1
+        try:
+            it = self.g._item_node(src, slots[0])
+            if it is not None:
+                top = int(self.g.stack_limit(it) or 1)
+        except Exception:                            # noqa: BLE001
+            pass
+        win = tk.Toplevel(self.root)
+        win.title("改数量")
+        win.transient(self.root)
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="%d 格：%s" % (len(slots), self._bag_sel_names(slots)),
+                  justify="left", wraplength=380).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(f, text="数量").grid(row=1, column=0, sticky="e",
+                                     pady=(10, 0), padx=(0, 6))
+        var_n = tk.StringVar(value=str(top))
+        ent = ttk.Entry(f, textvariable=var_n, width=12)
+        ent.grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="上限 %d（这件东西最多叠这么多）" % top,
+                  foreground="#888").grid(row=2, column=0, columnspan=2,
+                                         sticky="w", pady=(6, 0))
+        rowf = ttk.Frame(f)
+        rowf.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        def ok(_e=None):
+            try:
+                n = int(var_n.get() or "0", 0)
+            except ValueError:
+                messagebox.showinfo("提示", "数量要填整数。", parent=win)
+                return
+            done, bad = [], []
+            for slot in slots:
+                try:
+                    done.append((slot, self.g.set_count(src, slot, n)))
+                except Exception as e:               # noqa: BLE001
+                    bad.append((slot, human(str(e))))
+            win.destroy()
+            if not done:
+                messagebox.showerror("改数量失败", "一格都没改成。",
+                                     parent=self.root)
+                return
+            self.mark_dirty()
+            self.fill_party()
+            self.pack_select([s for s, _ in done])
+            self.set_status("数量改成 %d（%d 格%s）"
+                            % (n, len(done),
+                               "，%d 格跳过" % len(bad) if bad else ""))
+
+        fit_btn(rowf, text="确定", command=ok).pack(side="right")
+        fit_btn(rowf, text="取消", command=win.destroy).pack(
+            side="right", padx=(0, 6))
+        win.bind("<Return>", ok)
+        center_win(win, self.root)
+        esc_close(win)
+        ent.focus_set()                 # ⚠ 必须在 esc_close 之后
+        ent.selection_range(0, "end")
+
+    def _bind_bag_keys(self):
+        """背包/仓库列表的快捷键：Ctrl+C / Ctrl+X / Ctrl+V / Del / Ctrl+E。
+
+        ⚠ 只绑在 `tv_pack` 上（不是 root）：焦点在输入框里时 Ctrl+C 还得是
+          「复制文字」，不能被抢。
+        """
+        pairs = [("<Control-c>", lambda e: self.bag_copy(False)),
+                 ("<Control-C>", lambda e: self.bag_copy(False)),
+                 ("<Control-x>", lambda e: self.bag_copy(True)),
+                 ("<Control-X>", lambda e: self.bag_copy(True)),
+                 ("<Control-v>", lambda e: self.bag_paste()),
+                 ("<Control-V>", lambda e: self.bag_paste()),
+                 ("<Delete>", lambda e: self._bag_clear_key()),
+                 ("<Control-e>", lambda e: self._bag_count_key()),
+                 ("<Control-E>", lambda e: self._bag_count_key())]
+        for seq, fn in pairs:
+            self.tv_pack.bind(seq, fn)
+
+    def _bag_clear_key(self):
+        if self._bag_slots(quiet=True):
+            self.bag_clear()
+        return "break"
+
+    def _bag_count_key(self):
+        self.bag_count_dialog()
+        return "break"
+
     def bag_menu(self, event):
         """物品列表右键菜单：移动到 / 复制到 / 整理本页 / 改数量 / 清空。"""
         if not self.g:
@@ -9016,14 +9226,20 @@ class App(object):
         n = len(self.tv_pack.selection())
         tag = "（%d 格）" % n if n > 1 else ""
         m = tk.Menu(self.root, tearoff=0)
-        m.add_command(label="移动到…" + tag, command=self.bag_move_dialog)
-        m.add_command(label="复制到…" + tag,
-                      command=lambda: self.bag_move_dialog(copy=True))
+        # 2026-10-26 川：「复制到…/移动到…太难用了，直接改成复制、移动、粘贴，
+        # 并且支持 Ctrl+C/X/V，Delete 清空本格，Ctrl+E 弹窗改数量（默认上限）。」
+        m.add_command(label="复制" + tag + "　Ctrl+C",
+                      command=lambda: self.bag_copy(False))
+        m.add_command(label="剪切" + tag + "　Ctrl+X",
+                      command=lambda: self.bag_copy(True))
+        m.add_command(label="粘贴到本格　Ctrl+V", command=self.bag_paste)
         m.add_separator()
         m.add_command(label="整理本页…", command=self.bag_arrange_dialog)
         m.add_separator()
-        m.add_command(label="改数量…" + tag, command=self.bag_set_count)
-        m.add_command(label="清空" + (tag or "这格"), command=self.bag_clear)
+        m.add_command(label="改数量…" + tag + "　Ctrl+E",
+                      command=self.bag_count_dialog)
+        m.add_command(label="清空" + (tag or "这格") + "　Del",
+                      command=self.bag_clear)
         try:
             m.tk_popup(event.x_root, event.y_root)
         finally:
@@ -9615,7 +9831,9 @@ class App(object):
         ent_cur.pack(side="left", padx=(2, 4))
         ttk.Label(ef, text="上限").pack(side="left")
         var_max = tk.StringVar()
-        ent_max = ttk.Entry(ef, textvariable=var_max, width=8)
+        # 上限**只能看不能改**：它由名称决定（`jingmai.full_of`），改名前会自动
+        # 跟着换（2026-10-26 川：「上限应该不可调只显示吧？」）。
+        ent_max = ttk.Entry(ef, textvariable=var_max, width=8, state="readonly")
         ent_max.pack(side="left", padx=(2, 4))
 
         ef2 = ttk.Frame(rf)
@@ -9829,20 +10047,29 @@ class App(object):
             cat, key = iid[0], iid[1:]
             try:
                 if cat == "p":
+                    # 上限不传：由名称决定（`jingmai.set_pair` 里按 full_of 写），
+                    # 数值超了那边会压回上限。
                     jm.set_pair(ac, slot, "points", int(key), var_nm.get(),
-                                _num1(var_cur.get(), "数值"),
-                                _num1(var_max.get(), "上限"))
+                                _num1(var_cur.get(), "数值"))
                     keep = "p" + key
                 elif cat == "a":
                     jm.set_pair(ac, slot, "attributes", int(key), var_nm.get(),
-                                _num1(var_cur.get(), "数值"),
-                                _num1(var_max.get(), "上限"))
+                                _num1(var_cur.get(), "数值"))
                     keep = "a" + key
                 else:
                     old = int(key)
-                    new = jm.set_skill(ac, slot, old, _sid_of(var_nm.get()),
-                                       _nums(var_cur.get()),
-                                       _nums(var_max.get()))
+                    # 上限只读 ⇒ 沿用存档里这个技能原本的 max（换技能了就用新
+                    # 技能的），别信编辑框里那个（它只是显示）。
+                    try:
+                        _rows2 = jm.info(ac, slot)["skill_rows"]
+                    except Exception:            # noqa: BLE001
+                        _rows2 = []
+                    _sid_new = _sid_of(var_nm.get())
+                    _maxs = next((list(r[4]) for r in _rows2
+                                  if r[0] == (_sid_new if _sid_new != old
+                                              else old)), [])
+                    new = jm.set_skill(ac, slot, old, _sid_new,
+                                       _nums(var_cur.get()), _maxs)
                     keep = "s%d" % new
             except Exception as exc:                 # noqa: BLE001
                 messagebox.showerror("经脉", human(str(exc)), parent=win)
@@ -9875,8 +10102,9 @@ class App(object):
                 return
             self.mark_dirty()
             fill(keep=slot, keep_item=("p%d" if kind == "points" else "a%d") % i)
-            self.set_status("经脉：加了一条%s（数值默认 0，改下面的框再点写入）"
-                            % ("点数" if kind == "points" else "属性"))
+            self.set_status("经脉：加了一条%s（默认满值，最多 %d 项）"
+                            % ("点数" if kind == "points" else "属性",
+                               getattr(jingmai, "MAX_PAIRS", 3)))
 
         def del_it():
             """删掉明细里选中的那条。"""
@@ -10053,8 +10281,33 @@ class App(object):
             draw_detail(s)
             draw_items(who(), s)
 
+        def on_name_pick(_e=None):
+            """换了名称 → 上限立刻跟着那一项走（上限只读，不给手填）。
+
+            2026-10-26 川：「切换属性没有刷新对应属性的上限」。技能那条名字是
+            自由文本（名字 / 编号都能填），算不出上限，跳过。
+            """
+            iid = sel_item()
+            if not iid or iid[0] not in ("p", "a"):
+                return
+            kind = "points" if iid[0] == "p" else "attributes"
+            try:
+                full = jm.full_of(kind, var_nm.get())
+            except Exception:                    # noqa: BLE001
+                return
+            if full is None:
+                return
+            var_max.set(fmt(full))
+            try:
+                if float(var_cur.get() or 0) > float(full):
+                    var_cur.set(fmt(full))
+            except ValueError:
+                pass
+
         tv.bind("<<TreeviewSelect>>", on_slot)
         itv.bind("<<TreeviewSelect>>", on_item)
+        cb_nm.bind("<<ComboboxSelected>>", on_name_pick)
+        self._jm_name_pick = on_name_pick
         cb.bind("<<ComboboxSelected>>", lambda e: fill())
         self._jm_fill = fill
         self._jm_write = write_it
