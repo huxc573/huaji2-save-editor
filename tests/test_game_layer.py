@@ -19,6 +19,7 @@ import datatables  # noqa: E402
 import paths  # noqa: E402
 import game  # noqa: E402
 import itemattr  # noqa: E402
+import jingmai  # noqa: E402
 import marshal_ruby as M  # noqa: E402
 import rides  # noqa: E402
 import save  # noqa: E402
@@ -497,6 +498,36 @@ def main():
         check("走存档这条路也一样（摘要是「成长 0.02/0.02」）", False,
               "%s: %s" % (type(e).__name__, e))
     g.clear_slot("Items", probe5)
+
+    # ---------------- 2026-10-26：四类精气的「重抽管理」（川报）
+    #  ① 战神精气的门派下拉显示成「门派 3」；② 战神/仙人精气的当前技能回填
+    #  不出来（值在复合 Hash 里，payload_fields 一律跳过）；
+    #  ③ 圣者/本源落到空字段时统一谎称「内容是游戏写死的」—— 把「点一下就整份
+    #  重来、项数都会变」这个真影响藏起来了。
+    _t142, _f142 = itemattr.payload_spec("战神精气", 142)
+    _sf = [f for f in _f142 if f["key"] == "sect"]
+    check("战神精气：门派下拉是真门派名（不是「门派 N」）",
+          bool(_sf) and "门派 " not in _sf[0]["choices"][0][1],
+          "%r" % (_sf[0]["choices"][:3] if _sf else None,))
+    _t143, _f143 = itemattr.payload_spec("仙人精气", 143)
+    check("仙人精气能挑「当前技能」",
+          [f["key"] for f in _f143] == ["id"], "%r" % (_f143,))
+    for _nm, _id, _kw in (("圣者精气", 141, "随机"), ("本源", 144, "seed")):
+        _h = itemattr.payload_hint(_nm, _id)
+        check("%s 的空字段说明写清真原因（含「%s」）" % (_nm, _kw),
+              _kw in _h and "写死" not in _h, _h.splitlines()[0][:36])
+    probe6 = [s for s in g.empty_slots("Items")
+              if s not in (probe, probe2, probe3, ref_slot)][0]
+    try:
+        g.add_item("Items", probe6, 143, 1, clone_like=False)
+        g.set_payload("Items", probe6, over={"id": 91}, force=True)
+        _pf = g.payload_fields(_item_of(g, "Items", probe6))
+        check("仙人精气的当前技能能从存档里读回来（id 91）",
+              _pf.get("id") == 91, "%r" % (_pf,))
+    except Exception as e:
+        check("仙人精气的当前技能能从存档里读回来（id 91）", False,
+              "%s: %s" % (type(e).__name__, e))
+    g.clear_slot("Items", probe6)
 
     # ---------------- v0.4.4：@attr 的“外层键必须是字符串”，否则游戏读不到
     #  游戏脚本：$item_obj.data[:data][:id]；而 item.data 读的是 @attr["data"]
@@ -1522,6 +1553,70 @@ def main():
         rdsS2 = rides.Rides(game.GameEditor(svS2))
         check("坐骑技能清空能落盘、重开一致",
               rdsS2.skills(rdsS2.of(svS2.actors()[0][1])[0][1]) == [])
+
+    # ================= 经脉（2026-10-26 川：角色增加经脉管理）
+    # 同样**重建** SaveDoc（前面存过盘，旧节点全失效）。
+    print("\n---- 经脉（十阶 / 打通 / 萃取 / 数值拉满）----")
+    sv = save.SaveDoc(copy)
+    g = game.GameEditor(sv)
+    jm = jingmai.Jingmai(g)
+    aJ = sv.actors()[0][1]
+    rowsJ = jm.of(aJ)
+    check("十阶经脉都在", len(rowsJ) == jingmai.JM_SLOTS == 10,
+          "%d 阶" % len(rowsJ))
+    dJ = jm.info(aJ, 0)
+    check("阶字段齐全（状态/精气/门派/进度/品阶/点数/属性/技能）",
+          all(k in dJ for k in ("enabled", "type_cn", "sect_cn", "progress_pct",
+                                "result_cn", "grade", "points", "attributes",
+                                "skills")), "%r" % dJ["result_cn"])
+    check("阶名是罗马数字（Game_Jingmai 界面那套）",
+          jingmai.JM_SLOT_CN[0] == "Ⅰ" and jingmai.JM_SLOT_CN[9] == "Ⅹ")
+    check("结果文案照 @result",
+          jingmai.JM_RESULT_CN == {0: "萃取中", 1: "萃化完成", 2: "走火入魔"})
+    # 打通 / 取消
+    jm.set_enabled(aJ, 9, True)
+    check("打通最后一阶", jm.info(aJ, 9)["enabled"])
+    jm.set_enabled(aJ, 9, False)
+    check("取消打通", not jm.info(aJ, 9)["enabled"])
+    jm.set_enabled(aJ, 9, True)
+    # 有精气的阶（真档第 Ⅳ 阶是战神精气）—— 完成它
+    withT = [i for i, _n in jm.of(aJ) if jm.info(aJ, i)["type"]]
+    check("存档里有领悟过精气的阶", bool(withT), "第 %r 阶" % withT)
+    if withT:
+        s = withT[0]
+        jm.set_result(aJ, s, 1)
+        d1 = jm.info(aJ, s)
+        check("设为萃化完成会把进度写满",
+              d1["result"] == 1 and d1["progress"] >= 1.0,
+              "%s / %s%%" % (d1["result_cn"], d1["progress_pct"]))
+        jm.set_result(aJ, s, 0)
+        check("重置回萃取中", jm.info(aJ, s)["result"] == 0)
+        jm.set_result(aJ, s, 1)
+        hit, tot = jm.max_values(aJ, s)
+        d2 = jm.info(aJ, s)
+        check("数值拉满（点数与属性都到满值）",
+              all(c == m for _n, c, m in d2["points"] + d2["attributes"]),
+              "%d/%d 项" % (hit, tot))
+        check("拉满后重算品阶（照 refresh_grade）",
+              d2["grade"] >= 0, "品阶 %d" % d2["grade"])
+        grp = jm.group(aJ)
+        check("改完把 @save_points / @save_attributes 清空（游戏读的是它们）",
+              save.ivar(grp, "@save_points") is not None
+              and M.value_of(save.ivar(grp, "@save_points")) is None)
+    # 一键全通
+    st = jm.complete_all(aJ)
+    on, done, bad = jm.count(aJ)
+    check("一键全通：十阶全打通", on == 10, "已打通 %d" % on)
+    check("一键全通：有精气的都萃化完成、无精气的照实报数",
+          done == len(withT) and st["empty"] == 10 - len(withT),
+          "完成 %d / 空壳 %d" % (done, st["empty"]))
+    sv.doc.save()
+    sv2 = save.SaveDoc(copy)
+    jm2 = jingmai.Jingmai(game.GameEditor(sv2))
+    aJ2 = sv2.actors()[0][1]
+    on2, done2, _bad2 = jm2.count(aJ2)
+    check("经脉能落盘、重开一致（10 阶全通）", (on2, done2) == (10, len(withT)),
+          "%r" % ((on2, done2),))
 
     shutil.rmtree(WORK, ignore_errors=True)
     print("\n==== 通过 %d, 失败 %d ====" % (OK[0], OK[1]))

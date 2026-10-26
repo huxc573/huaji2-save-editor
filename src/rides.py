@@ -550,6 +550,28 @@ class Rides(object):
             return new
         elif isinstance(node, M.ObjNode):
             new = M.ObjNode(node.cls)
+        elif isinstance(node, M.StructNode):
+            # RPG:: 结构体（模板里偶尔夹一个），克隆方式与 ObjNode 一致
+            new = M.StructNode(node.cls)
+            memo[key] = new
+            new.ivars = [(k, Rides._clone(v, memo, pending))
+                         for k, v in node.ivars]
+            return new
+        elif isinstance(node, M.ModuleNode):        # 必须排在 ClassNode 前
+            new = M.ModuleNode(node.name)
+        elif isinstance(node, M.ClassNode):
+            # 'c' / 'm'：模板里出现的是 RPG::Weapon 这类**类本身**，只带名字
+            new = M.ClassNode(node.name)
+        elif isinstance(node, M.UserDefNode):
+            new = M.UserDefNode(node.cls, node.data)   # 二进制原样搬
+        elif isinstance(node, M.UserMarshalNode):
+            new = M.UserMarshalNode(node.cls)
+            memo[key] = new
+            new.inner = (Rides._clone(node.inner, memo, pending)
+                         if node.inner is not None else None)
+            return new
+        elif isinstance(node, M.ExtNode):
+            new = M.ExtNode()
         else:
             raise RidesError("坐骑模板里有不认识的节点 %r" % type(node).__name__)
         memo[key] = new

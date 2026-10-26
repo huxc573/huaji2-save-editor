@@ -2507,9 +2507,65 @@ def main():
               and "全员拉满" in app.var_status.get(),
               app.var_status.get()[:40])
         del dialogs[dlg_mark:]       # 本段自造的不算数
+        _dlg0 = len(dialogs)         # 经脉段只看这之后有没有弹错误框
 
-        check("全程没弹出错误框", not [d for d in dialogs if d[0] == "error"],
-              "%r" % ([d[1][0] for d in dialogs if d[0] == "error"][:3],))
+        # ---- 经脉（2026-10-26 川：角色增加经脉管理功能）
+        say("角色页：经脉管理…")
+        app.nb.select(app.tab_actor)
+        root.update()
+        _btns_a = [w.cget("text") for w in walk(app.tab_actor)
+                   if w.winfo_class() == "TButton"]
+        check("角色页有「经脉管理…」按钮", "经脉管理…" in _btns_a,
+              "、".join(_btns_a[:6]))
+        app.jingmai_dialog()
+        root.update()
+        _jwin = getattr(app, "_jm_win", None)
+        _jtv = getattr(app, "_jm_tv", None)
+        _kids = _jtv.get_children() if _jtv is not None else ()
+        check("经脉窗口十阶全列出来", _jwin is not None and len(_kids) == 10,
+              "%d 行" % len(_kids))
+        check("概览报「已打通 x/10」", "已打通" in app._jm_sum.get(),
+              app._jm_sum.get())
+        _jmobj = app.jm_ed()
+        _act = app.current_actor()
+        _txt = app._jm_text.get("1.0", "end").strip()
+        check("详情框有内容（选中即显示）", bool(_txt),
+              _txt.splitlines()[0] if _txt else "")
+        _jbtns = [w for w in walk(_jwin) if w.winfo_class() == "TButton"]
+        _jnm = [w.cget("text") for w in _jbtns]
+        check("经脉窗口按钮齐",
+              all(t in _jnm for t in ("打通", "取消打通", "萃取完成",
+                                      "重置萃取", "数值拉满", "一键全通")),
+              "、".join(_jnm))
+        _withT = [i for i, _n in _jmobj.of(_act)
+                  if _jmobj.info(_act, i)["type"]]
+        if _withT:
+            _s = _withT[0]
+            _jtv.selection_set(str(_s))
+            app._jm_fill(keep=_s)
+            root.update()
+            [_b for _b in _jbtns if _b.cget("text") == "萃取完成"][0].invoke()
+            root.update()
+            check("点「萃取完成」写进存档对象",
+                  _jmobj.info(_act, _s)["result"] == 1,
+                  _jmobj.info(_act, _s)["result_cn"])
+        else:
+            check("点「萃取完成」写进存档对象", False,
+                  "存档里没有领悟过精气的阶")
+        [_b for _b in _jbtns if _b.cget("text") == "一键全通"][0].invoke()
+        root.update()
+        _on = _jmobj.count(_act)[0]
+        check("点「一键全通」十阶全打通", _on == 10, "已打通 %d" % _on)
+        check("一键全通的确认文案点名「无精气的阶是空壳」",
+              "空壳" in getattr(app, "_jm_all_text", ""),
+              "…" + getattr(app, "_jm_all_text", "")[-24:])
+        _jwin.destroy()
+        root.update()
+
+        check("全程没弹出错误框",
+              not [d for d in dialogs[_dlg0:] if d[0] == "error"],
+              "%r" % ([d[1][0] for d in dialogs[_dlg0:]
+                       if d[0] == "error"][:3],))
     except SystemExit:
         pass
     except Exception:

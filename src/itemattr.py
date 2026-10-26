@@ -36,6 +36,15 @@
 import random
 
 from tables import baby_aptitude as _BA
+from tables import sect as _sect
+
+
+def sect_name(sect_id):
+    """门派 id → 名字（`$sects`，不连号：0、1..13、20）。"""
+    try:
+        return _sect.sect_name(int(sect_id))
+    except (TypeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -1061,9 +1070,12 @@ def payload_spec(name, item_id):
     if fn is _zhanshen:
         # ⚠ 只给「门派」：「门派技能」跟着门派走（每派 3 个），做成两个独立
         #   下拉就能选出「五庄观 + 龙宫技能」这种不合法组合。
+        # ⚠ 门派名要写**真名**（`$sects` 不连号 0/1..13/20），写「门派 5」
+        #   等于让人猜（2026-10-26 川：精气的重抽管理不对）。
         return "战神精气", [
             {"key": "sect", "label": "门派", "kind": "choice",
-             "choices": [(k, "门派 %d" % k) for k in sorted(ZHANSHEN_SKILLS)]}]
+             "choices": [(k, sect_name(k) or ("门派 %d" % k))
+                         for k in sorted(ZHANSHEN_SKILLS)]}]
     if fn is _xianren:
         return "仙人精气", [{"key": "id", "label": "远古技能", "kind": "skill",
                              "pool": list(XIANREN_SKILLS)}]
@@ -1103,6 +1115,32 @@ def payload_spec(name, item_id):
     if fn is _qian_tree:
         return "摇钱树树苗", []
     return None, []
+
+
+def payload_hint(name, item_id):
+    """「一个字段都挑不了」的家族，说明**为什么**（空说明会被当成 bug）。
+
+    2026-10-26 川：「修复物品中，XX 精气的重抽管理」—— 原来四类精气里有
+    两类（圣者 / 本源）落到空字段，界面统一写「内容是游戏写死的」，其实
+    圣者精气的属性是**随机**出来的，写死两个字把「点一下就整份重来、项数
+    也会变」这个真影响藏起来了。
+    """
+    fn = builder_for(name, item_id)
+    if fn is _shengzhe:
+        return ("圣者精气的内容是「1~3 项五维点数」，每项还在各自区间里随机 ——\n"
+                "没法拆成几个下拉。点「应用选中的内容」＝整份按游戏规则重来：\n"
+                "属性**项数也会变**（1~3 项），挑之前先想清楚。")
+    if fn is _benyuan:
+        return ("本源精气只有一份随机 seed，没有能挑的内容 ——\n"
+                "点「应用」只是换一份 seed（游戏里那阶走「本源」分支，\n"
+                "不加属性也不给技能）。")
+    if fn is _qian_tree:
+        return "摇钱树树苗只有一份随机 seed，没有能挑的内容。"
+    if fn is _dianhua:
+        return "点化石的内容写死（无级别限制），没有能挑的字段。"
+    if fn is _gift_box:
+        return "礼盒内容是固定五面旗，没有能挑的字段。"
+    return ""
 
 
 def _book_kind(name):

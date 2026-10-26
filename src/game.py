@@ -1396,6 +1396,17 @@ class GameEditor(object):
             if isinstance(vv, (M.HashNode, M.ArrayNode)):
                 continue                     # 复合值（元宵 value / 上限表）不给界面挑
             out[kk] = M.value_of(vv)
+        # ⚠ 精气的技能藏在**复合 Hash** 里（`{技能id => {val:, max:}}`），上面那条
+        #   「复合值不给挑」会把整块跳过 ⇒「重抽管理」里仙人精气的「远古技能」
+        #   永远回填不出当前值（`_current_value("id")` 读不到），一打开窗口就
+        #   默认成候选第一项（81 玉碎九渊），点「应用」把所有仙人精气改成同一个技能
+        #   （2026-10-26 川：精气的重抽管理不对）。这里把技能 id 单独取出来。
+        if _t in ("战神精气", "仙人精气"):
+            hv = _deref(hash_get(d, "skill" if _t == "战神精气" else "skills"))
+            if isinstance(hv, M.HashNode) and hv.pairs:
+                kv = M.value_of(_deref(hv.pairs[0][0]))
+                if isinstance(kv, int):
+                    out["id"] = kv
         return out
 
     #: 运行时内容的 `:type` → 内部家族键（用来渲染“内容”列）。

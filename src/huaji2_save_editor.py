@@ -63,6 +63,7 @@ import doctree   # noqa: E402
 import nodetext   # noqa: E402
 import fieldnames   # noqa: E402
 import itemattr   # noqa: E402
+import jingmai   # noqa: E402
 import rides     # noqa: E402
 import save    # noqa: E402
 from tables import sect   # noqa: E402
@@ -1760,11 +1761,22 @@ class PayloadManager(object):
         fields = grp["fields"] if grp else []
         if not fields:
             self.b_focus = None
-            self.set_desc("「%s」的内容是游戏写死的，挑不了具体值 ——\n"
+            # 空字段有两种：内容写死（礼盒/点化石）与**整份随机**（圣者精气 /
+            # 本源 / 摇钱树苗）。别再统一写「游戏写死的」—— 圣者精气点一下
+            # 属性项数都会变，那句话把真影响藏了（2026-10-26 川）。
+            hint = ""
+            if grp and grp.get("items"):
+                _s, nm0, iid0, _c = grp["items"][0]
+                try:
+                    hint = itemattr.payload_hint(nm0, iid0) or ""
+                except Exception:                    # noqa: BLE001
+                    hint = ""
+            self.set_desc((hint + "\n\n" if hint else
+                           "「%s」没有能挑的字段 ——\n" % self.fam) +
                           "直接点「应用选中的内容」（或「随机重抽」）按游戏规则\n"
                           "生成一份即可。\n\n字段：%s"
-                          % (self.fam, "、".join(sorted(
-                              self._fields_of_first())) or "（无）"))
+                          % ("、".join(sorted(self._fields_of_first()))
+                             or "（无）"))
             return
         self._seed_fields(fields)
         for fd in fields:
@@ -3373,6 +3385,19 @@ class App(object):
                        "⚠ 修炼等级是游戏**战斗时现读**的，升级不改任何属性 ——\n"
                        "改完保存、回游戏重开就生效。\n"
                        "上限：角色 <90 级 20 级，≥90 级 25 级。")
+        # 「经脉管理…」（2026-10-26 川）：紧挨着修炼按钮 —— 同属「角色身上那些
+        # 不写 @attr 的成长线」。⚠ 别在左栏新起一行（竖向 pack，多一行就多一分
+        # 被裁的风险），所以并进 xlrow。
+        btn_jm = fit_btn(xlrow, text="经脉管理…",
+                         command=lambda: self.jingmai_dialog())
+        btn_jm.pack(side="left", padx=(6, 0))
+        self._bind_tip(btn_jm,
+                       "十阶经脉：打通 / 萃取进度 / 萃化完成 / 走火入魔。\n"
+                       "只有「萃化完成」的阶才生效（点数加到五维、\n"
+                       "属性加到气血上限/物攻那些）。\n"
+                       "⚠ 打通但没领悟精气的阶是空壳，加不了属性；\n"
+                       "精气要用游戏里的精气物品去领悟，工具不凭空造。\n"
+                       "窗口里还有「一键全通」（十阶全打通 + 有精气的都拉满）。")
 
         bar = ttk.Frame(left)
         bar.pack(fill="x", pady=(4, 0))
@@ -9185,7 +9210,303 @@ class App(object):
             % (n_a, n_i, detail, note),
             parent=parent)
 
-    # ---- 拖动：物品列表（换格/对调）
+    # ================================================== 经脉（@attr.@经脉）
+    def jm_ed(self):
+        """经脉助手（jingmai.Jingmai）—— 换存档后重建一次。"""
+        if getattr(self, "_jm_src", None) is not self.g \
+                or not hasattr(self, "_jm_obj"):
+            self._jm_obj = jingmai.Jingmai(self.g) if self.g is not None else None
+            self._jm_src = self.g
+        return self._jm_obj
+
+    def jingmai_dialog(self, actor=None):
+        """经脉管理：十阶经脉的打通 / 精气 / 萃取进度 / 数值，一个窗口全给。
+
+        2026-10-26 川：「角色增加经脉管理功能」。
+
+        机制（`Game_JMGroup` / `Game_Jingmai`）：
+          * 每阶三步不可跳：**打通**（enabled）→ **领悟精气**（吃精气物品，
+            写 type/points/attributes/skills）→ **萃取**（progress 到 1 ⇒
+            result=1 生效；极小概率 result=2 走火入魔，数值变负）；
+          * 只有 `enabled 且 result != 0` 的阶才生效 —— **打通但没领悟精气的
+            阶是空壳**，加不了任何属性，界面上必须让人一眼看出来；
+          * 工具**不凭空造精气**（那要照脚本现生一份，塞五个字段，少一样就崩），
+            所以这里只做「管理」：打通、改结果、改进度、把点数/属性拉到满值。
+
+        ⚠ 改完是直接写进存档对象的（跟「门派技能」勾选一样），还要点主窗口的
+          「保存修改」(Ctrl+S) 才落盘。
+        """
+        tk, ttk = self.tk, self.ttk
+        if not self.g or not self.sv:
+            return
+        jm = self.jm_ed()
+        if jm is None:
+            return
+        actors = list(self.sv.actors())
+        if not actors:
+            messagebox.showinfo("经脉", "这本存档里没有角色。", parent=self.root)
+            return
+        cur = actor if actor is not None else self.current_actor()
+        idx0 = 0
+        labels = ["%s (#%d)" % (self.sv.actor_name(a), aid) for aid, a in actors]
+        for i, (_aid, a) in enumerate(actors):
+            if a is cur:
+                idx0 = i
+                break
+
+        win = tk.Toplevel(self.root)
+        win.title("经脉管理")
+        win.transient(self.root)
+        body = ttk.Frame(win, padding=10)
+        body.pack(fill="both", expand=True)
+
+        head = ttk.Frame(body)
+        head.pack(fill="x")
+        ttk.Label(head, text="角色：").pack(side="left")
+        var_who = tk.StringVar(value=labels[idx0])
+        cb = ttk.Combobox(head, textvariable=var_who, values=labels,
+                          state="readonly", width=18)
+        cb.current(idx0)
+        cb.pack(side="left")
+        var_sum = tk.StringVar()
+        ttk.Label(head, textvariable=var_sum, foreground="#888").pack(
+            side="left", padx=10)
+
+        ttk.Label(body, justify="left", foreground="#888",
+                  text="每阶三步：打通 → 领悟精气 → 萃取。只有「萃化完成 / "
+                       "走火入魔」的阶才生效（点数加到五维、属性加到气血上限等）。\n"
+                       "⚠ 打通了但没领悟精气的阶是空壳，加不了任何属性 —— "
+                       "精气得用游戏里的圣者/战神/仙人/本源精气，工具不凭空造。"
+                  ).pack(anchor="w", pady=(6, 4))
+
+        mid = ttk.Frame(body)
+        mid.pack(fill="both", expand=True)
+        cols = ("slot", "state", "type", "sect", "prog", "gain")
+        tv = ttk.Treeview(mid, columns=cols, show="headings", height=10,
+                          selectmode="browse")
+        for c, w, t, an in (("slot", 46, "阶", "center"),
+                            ("state", 82, "状态", "w"),
+                            ("type", 88, "精气", "w"),
+                            ("sect", 80, "门派", "w"),
+                            ("prog", 64, "进度", "e"),
+                            ("gain", 190, "收益", "w")):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor=an)
+        vs = ttk.Scrollbar(mid, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vs.set)
+        vs.pack(side="left", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+
+        rf = ttk.Frame(mid)
+        rf.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        ttk.Label(rf, text="选中阶的详情").pack(anchor="w")
+        txt = tk.Text(rf, width=44, height=13, wrap="word", relief="solid",
+                      borderwidth=1)
+        vs2 = ttk.Scrollbar(rf, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vs2.set, state="disabled")
+        vs2.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+
+        bar = ttk.Frame(body)
+        bar.pack(fill="x", pady=(8, 0))
+
+        # 留给测试：直接取控件 / 函数，不用翻 Tk 控件树
+        # ⚠ `textvariable` 的 StringVar 必须留一个 Python 引用 —— 只挂在控件上的
+        #   变量会被 GC 掉，Combobox 立刻变成「空值 + current() = -1」
+        #   （2026-10-26 踩过：窗口一开角色下拉就是空的）。
+        self._jm_win = win
+        self._jm_tv = tv
+        self._jm_text = txt
+        self._jm_cb = cb
+        self._jm_sum = var_sum
+        self._jm_who = var_who
+        win._jm_vars = (var_who, var_sum)
+
+        def who():
+            """当前角色 —— **每次现取**（`Doc.save()` 会把整棵树换掉）。"""
+            acts = list(self.sv.actors())
+            i = cb.current()
+            if i < 0:                       # 变量没绑上（不该发生）就当第一个
+                i = 0
+            return acts[i][1] if 0 <= i < len(acts) else None
+
+        def sel_slot():
+            s = tv.selection()
+            return int(s[0]) if s else None
+
+        def draw_detail(slot):
+            act = who()
+            txt.configure(state="normal")
+            txt.delete("1.0", "end")
+            if act is None or slot is None:
+                txt.configure(state="disabled")
+                return
+            try:
+                d = jm.info(act, slot)
+            except Exception as exc:                 # noqa: BLE001
+                txt.insert("end", human(str(exc)))
+                txt.configure(state="disabled")
+                return
+            head1 = "%s  %s" % (d["slot_cn"], d["type_cn"])
+            if d["sect_cn"]:
+                head1 += " · %s" % d["sect_cn"]
+            txt.insert("end", head1 + "\n")
+            txt.insert("end", "状态：%s%s　品阶 %d\n" % (
+                "" if d["enabled"] else "未打通 · ", d["result_cn"], d["grade"]))
+            if not d["type"]:
+                txt.insert("end", "\n这一阶还没领悟精气（打通了也没有收益）。\n")
+            else:
+                txt.insert("end", "萃取进度：%s%%\n" % d["progress_pct"])
+                if d["points"]:
+                    txt.insert("end", "\n点数提升\n")
+                    for nm, c, m in d["points"]:
+                        txt.insert("end", "　%s  %s / %s%s\n" % (
+                            nm, c, m, "　(满)" if c == m else ""))
+                if d["attributes"]:
+                    txt.insert("end", "\n属性提升\n")
+                    for nm, c, m in d["attributes"]:
+                        txt.insert("end", "　%s  %s / %s%s\n" % (
+                            nm, c, m, "　(满)" if c == m else ""))
+                if d["skills"]:
+                    txt.insert("end", "\n%s\n" % (
+                        "远古技能" if d["type"] == "仙人精气" else "强化技能"))
+                    for sid, nm, help_ in d["skills"]:
+                        txt.insert("end", "　%s%s\n" % (
+                            nm, ("：" + help_) if help_ else ""))
+            txt.configure(state="disabled")
+
+        def fill(keep=None):
+            """重填十行 + 概览（切角色 / 每次改完都调）。"""
+            act = who()
+            for i in tv.get_children():
+                tv.delete(i)
+            if act is None:
+                var_sum.set("")
+                draw_detail(None)
+                return
+            on, done, bad = jm.count(act)
+            var_sum.set("已打通 %d/%d · 已萃化 %d · 走火入魔 %d"
+                        % (on, jingmai.JM_SLOTS, done, bad))
+            for slot, _n in jm.of(act):
+                d = jm.info(act, slot)
+                prog = "%s%%" % d["progress_pct"] if d["type"] else "—"
+                gain = []
+                if d["points"]:
+                    gain.append("点数 %d" % len(d["points"]))
+                if d["attributes"]:
+                    gain.append("属性 %d" % len(d["attributes"]))
+                if d["skills"]:
+                    gain.append("技能 %d" % len(d["skills"]))
+                state = d["result_cn"] if d["enabled"] else "未打通"
+                if d["enabled"] and d["result"] == 1:
+                    state = "✔ 萃化完成"
+                tv.insert("", "end", iid=str(slot), values=(
+                    d["slot_cn"], state, d["type_cn"], d["sect_cn"] or "",
+                    prog, " · ".join(gain) or "—"))
+            want = str(keep) if keep is not None else None
+            rows = tv.get_children()
+            if want in rows:
+                tv.selection_set(want)
+                tv.see(want)
+            elif rows:
+                tv.selection_set(rows[0])
+            draw_detail(int(tv.selection()[0]) if tv.selection() else None)
+
+        def act_on(fn, label):
+            """对选中阶执行一次写操作，然后刷新（选中保持）。"""
+            slot = sel_slot()
+            ac = who()
+            if slot is None or ac is None:
+                messagebox.showinfo("经脉", "先在左边选一阶。", parent=win)
+                return
+            try:
+                ret = fn(ac, slot)
+            except Exception as exc:                 # noqa: BLE001
+                messagebox.showerror("经脉", human(str(exc)), parent=win)
+                return
+            self.mark_dirty()
+            fill(keep=slot)
+            self.set_status("%s：%s %s" % (
+                self.sv.actor_name(ac), jingmai.JM_SLOT_CN[slot] if
+                slot < len(jingmai.JM_SLOT_CN) else slot + 1, label))
+            return ret
+
+        def open_it():
+            return act_on(lambda a, s: jm.set_enabled(a, s, True), "已打通")
+
+        def close_it():
+            return act_on(lambda a, s: jm.set_enabled(a, s, False), "已取消打通")
+
+        def done_it():
+            return act_on(lambda a, s: jm.set_result(a, s, 1), "已设为萃化完成")
+
+        def reset_it():
+            return act_on(lambda a, s: jm.set_result(a, s, 0), "已重置为萃取中")
+
+        def max_it():
+            def f(a, s):
+                hit, tot = jm.max_values(a, s)
+                return "%d/%d 项拉满" % (hit, tot)
+            return act_on(f, "数值拉满")
+
+        def all_it():
+            """一键全通：十阶打通 + 有精气的萃化完成 + 数值拉满。"""
+            ac = who()
+            if ac is None:
+                return
+            empty = [d["slot_cn"] for _i, n in jm.of(ac)
+                     for d in [jm.info(ac, _i)] if not d["type"]]
+            text = ("把 %s 的十阶经脉**全部打通**，已经领悟了精气的阶直接"
+                    "萃化完成、点数与属性拉到满值。\n\n" % self.sv.actor_name(ac))
+            if empty:
+                text += ("⚠ 这 %d 阶还没领悟精气（%s）：打通了也是空壳，"
+                         "不会加任何属性 —— 精气要用游戏里的圣者/战神/仙人/"
+                         "本源精气去领悟。\n\n" % (len(empty), "、".join(empty)))
+            text += "改完还要点主窗口的「保存修改」(Ctrl+S) 才写进存档。\n\n确定？"
+            self._jm_all_text = text          # 留给测试断言文案
+            if not self.confirm("一键全通", text, parent=win):
+                return
+            try:
+                st = jm.complete_all(ac)
+            except Exception as exc:                 # noqa: BLE001
+                messagebox.showerror("经脉", human(str(exc)), parent=win)
+                return
+            self.mark_dirty()
+            fill(keep=sel_slot())
+            self.set_status(
+                "%s：一键全通（新打通 %d 阶、萃化 %d 阶、拉满 %d 项；"
+                "%d 阶无精气）" % (self.sv.actor_name(ac), st["opened"],
+                                   st["done"], st["filled"], st["empty"]))
+
+        fit_btn(bar, text="打通", command=open_it).pack(side="left")
+        fit_btn(bar, text="取消打通", command=close_it).pack(side="left",
+                                                            padx=(6, 0))
+        fit_btn(bar, text="萃取完成", command=done_it).pack(side="left",
+                                                            padx=(6, 0))
+        fit_btn(bar, text="重置萃取", command=reset_it).pack(side="left",
+                                                            padx=(6, 0))
+        b_max = fit_btn(bar, text="数值拉满", command=max_it)
+        b_max.pack(side="left", padx=(6, 0))
+        self._bind_tip(b_max,
+                       "把这一阶「点数提升 / 属性提升」的当前值全部写成满值。\n"
+                       "走火入魔（数值被乘成负数）的那一阶，点它也是一次修好。\n"
+                       "⚠ 只改这一阶；十阶一起改用右边的「一键全通」。")
+        b_all = fit_btn(bar, text="一键全通", command=all_it)
+        b_all.pack(side="left", padx=(10, 0))
+        self._bind_tip(b_all,
+                       "十阶**全部打通**，并把手上有精气的阶直接萃化完成、\n"
+                       "点数与属性拉到满值（会弹确认框，写明改动范围）。\n"
+                       "⚠ 没领悟精气的阶打通了也没有收益。")
+        fit_btn(bar, text="关闭", command=win.destroy).pack(side="right")
+
+        tv.bind("<<TreeviewSelect>>", lambda e: draw_detail(sel_slot()))
+        cb.bind("<<ComboboxSelected>>", lambda e: fill())
+        self._jm_fill = fill
+        fill()
+        center_win(win, self.root)
+        esc_close(win)
+
+
     def _pack_drag_start(self, event):
         self._drag_row = self.tv_pack.identify_row(event.y) or None
         self._drag_xy = (event.x, event.y)
