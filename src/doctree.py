@@ -26,6 +26,7 @@ import os
 import shutil
 import sys
 import time
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -58,6 +59,36 @@ def parse_bytes(raw):
             gc.enable()
 
 
+def _read_zlib_plain(path):
+    r"""认出「只 zlib 压缩、没 AES 加密」的**半成品存档**，返回明文；不是就 None。
+
+    ⚠ 2026-10-28 川的档：游戏存盘是「先把明文写进 save.rvdata2，再调 native
+    原地加密覆盖」。那次明文写完、加密还没跑，进程就没了（游戏闪退），留下
+    一个 78 9c 开头的明文。读档时 `DIFFILE save.rvdata2 -> Logs/Temp/save.temp
+    (62455->62448)` 把明文当密文解，于是 `Marshal.load` 拿到乱码、报
+    `format version 4.8 required; 150.179 given`（`150.179` 就是乱码前两字节），
+    界面上只显示「读取失败！」。
+
+    这种档的内容**是完好的**（解压出来就是正常 marshal），按 V2.201 重新加密
+    写回就能读。所以这里认出来，别让工具也跟着打不开 —— 认出来之后
+    `v201=True`，一保存就会加密，游戏立刻能读。
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    if data[:1] != b"\x78":          # zlib 头：78 01 / 78 9c / 78 da
+        return None
+    try:
+        raw = zlib.decompressobj().decompress(data)
+    except Exception:
+        return None
+    if raw[:2] != b"\x04\x08":       # 解出来得是 marshal 4.8
+        return None
+    return raw
+
+
 class Doc(object):
     """一份存档 / 数据文件。"""
 
@@ -82,8 +113,16 @@ class Doc(object):
         self.path = path
         self.plain = codec.looks_like_marshal(path)
         self.v201 = False
+        self.zlib_plain = False        # 「只压缩没加密」的半成品（见 _read_zlib_plain）
+        zraw = None if self.plain else _read_zlib_plain(path)
         if self.plain:
             self.raw = open(path, "rb").read()
+        elif zraw is not None:
+            # 游戏存盘写到一半留下的明文档：内容完好、只是没加密。
+            # ⚠ 保存时必须按 v201 加密写回 —— 原样写明文游戏永远读不回来。
+            self.raw = zraw
+            self.v201 = True
+            self.zlib_plain = True
         else:
             # 先试内测版 V2.201 通道（AES-128-ECB+Zlib，纯 Python、不需要宿主）；
             # 认出来就记进 self.v201 —— 保存时必须按同一种格式写回去。
@@ -128,7 +167,10 @@ class Doc(object):
     def summary(self):
         lines = []
         lines.append("文件      : %s" % self.path)
-        lines.append("形态      : %s" % ("明文 Marshal" if self.plain else "密文（已解密）"))
+        lines.append("形态      : %s" % (
+            "明文 Marshal" if self.plain else
+            "明文 zlib（未加密的半成品，保存会加密写回）"
+            if getattr(self, "zlib_plain", False) else "密文（已解密）"))
         lines.append("大小      : %d 字节" % len(self.raw))
         lines.append("顶层对象数: %d" % len(self.objects))
         for i, obj in enumerate(self.objects):

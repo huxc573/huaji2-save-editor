@@ -84,6 +84,34 @@ def main():
     check(h3.pairs[1][0].name == 'b' and h3.pairs[2][1].items[0].value == 1,
           "变宽后后续字段仍然正确（区间补丁生效）")
 
+    print("\n== Doc：只压缩、没加密的半成品档 ==")
+    # 2026-10-28 川的档：游戏存盘是「先写明文进 save.rvdata2，再 native 原地
+    # 加密覆盖」。明文写完、加密没跑进程就没了（闪退）⇒ 游戏读档按密文解，
+    # 只显示「读取失败！」。这种档内容完好，工具必须能打开、且保存时自动加密。
+    import zlib
+    fd, half = tempfile.mkstemp(suffix=".rvdata2")
+    os.close(fd)
+    try:
+        open(half, "wb").write(zlib.compress(buf))
+        dh = doctree.Doc(half)
+        check(dh.raw == buf, "明文档能打开且内容一致")
+        check(getattr(dh, "zlib_plain", False) is True, "被认成 zlib_plain")
+        check(dh.v201 is True, "保存按 V2.201 加密（不原样写明文）")
+        dh.save(backup=False)
+        body = open(half, "rb").read()
+        check(body[:1] != b"\x78" and len(body) % 16 == 0,
+              "保存后是密文且 16 字节对齐（头=%s 长=%d）"
+              % (body[:2].hex(), len(body)))
+        dh2 = doctree.Doc(half)
+        check(dh2.v201 is True and not getattr(dh2, "zlib_plain", False),
+              "加密档按正常 V2.201 打开")
+        check(dh2.raw == buf, "重封装后内容一字未变")
+    finally:
+        try:
+            os.remove(half)
+        except OSError:
+            pass
+
     print("\n== Doc：打开明文文件 ==")
     p = plaintext_sample()
     if not p:

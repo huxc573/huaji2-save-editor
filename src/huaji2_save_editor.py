@@ -6933,6 +6933,11 @@ class App(object):
             if n:
                 self.set_status("清掉 %d 个非法空格（旧工具写的 nil，游戏读到会"
                                 "「读取失败」）；保存一次即写干净。" % n)
+            # ⚠ 游戏存盘是「先写明文、再 native 原地加密」，中途闪退就留下明文档；
+            #   游戏读档按密文解 ⇒ 只显示「读取失败！」。这种档内容完好，保存即修好。
+            if getattr(self.doc, "zlib_plain", False):
+                self.set_status("⚠ 这个档「只压缩没加密」（游戏存盘时闪退留下的）——"
+                                "内容完好，点【保存】就会加密写回，游戏即可读取。")
 
     def export_report(self):
         if not self.doc:
