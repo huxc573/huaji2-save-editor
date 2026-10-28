@@ -2066,6 +2066,81 @@ def main():
                   [(r["lv"], r["exp"]) for r in app.g.practice(_tgt)])
             app.sv.set_actor_field(_tgt, "@level", _lv0)
 
+        # ---------------- 2026-10-28：辅助技能（顺序＝游戏内 门派→辅助→修炼→经脉）---
+        # 8 项 `@sect_data[:辅助]`，值是裸等级；⚠ 加成要生效还得在
+        # `party.hash[:fuzhu]` 名单里（脚本 8 处生效点全是 include? 判断）。
+        say("辅助技能（角色页）…")
+        _btns_a2 = [str(w.cget("text")) for w in walk(app.tab_actor)
+                    if w.winfo_class() == "TButton"]
+        check("「角色」页有「辅助技能…」按钮",
+              "辅助技能…" in _btns_a2, "、".join(_btns_a2))
+        _ord3 = [t for t in _btns_a2
+                 if t in ("辅助技能…", "修炼管理…", "经脉管理…")]
+        check("三个入口的顺序＝游戏内（辅助 → 修炼 → 经脉）",
+              _ord3 == ["辅助技能…", "修炼管理…", "经脉管理…"],
+              "、".join(_ord3))
+        _az = app.current_actor()
+        if _az is not None:
+            app.assist_dialog()
+            root.update()
+            _wz = getattr(app, "_assist_win", None)
+            _iz = getattr(app, "_assist_items", None) or []
+            check("辅助技能窗口建得起来（8 项）",
+                  _wz is not None and _wz.winfo_exists() and len(_iz) == 8,
+                  len(_iz))
+            check("8 项顺序＝游戏内页签顺序",
+                  [it[1] for it in _iz] == [s[1] for s in game.ASSIST_SKILLS],
+                  [it[1] for it in _iz])
+            _aw = app._assist_who()
+            _ar = app.g.assist(_aw)
+            check("满级那一列取自技能备注 lv（40~80）",
+                  [it[3].get() for it in _iz] == ["/ %d" % r["max"] for r in _ar],
+                  [it[3].get() for it in _iz])
+            _fb2 = [w for w in walk(_wz) if w.winfo_class() == "TButton"
+                    and str(w.cget("text")) == "一键满级"]
+            if _fb2:
+                _fb2[0].invoke()
+                root.update()
+                check("「一键满级」按每项自己的满级填",
+                      all(it[2].get() == str(r["max"])
+                          for it, r in zip(_iz, _ar)),
+                      [it[2].get() for it in _iz])
+            _sb2 = [w for w in walk(_wz) if w.winfo_class() == "TButton"
+                    and str(w.cget("text")) == "保存"]
+            if _sb2:
+                _sb2[0].invoke()
+                root.update()
+                _ar2 = app.g.assist(_aw)
+                check("保存后 8 项都到满级",
+                      all(r["lv"] == r["max"] for r in _ar2),
+                      [(r["lv"], r["max"]) for r in _ar2])
+                check("保存后 8 项都在 party.hash[:fuzhu] 里（不然加成不生效）",
+                      all(r["on"] for r in _ar2), [r["on"] for r in _ar2])
+            # 全员拉满：跳过巨小蛙，其余角色 8 项满级 + 全部在名单里
+            dialogs.clear()
+            app.assist_max_all()
+            root.update()
+            _atxt = getattr(app, "_assist_all_text", "") or ""
+            check("确认窗点名「满级」和 fuzhu 名单",
+                  "满级" in _atxt and "fuzhu" in _atxt,
+                  _atxt.replace("\n", " | ")[:80])
+            _bad2 = []
+            for _i, _a in app.sv.actors():
+                if game.get_int(game.ivar(_a, "@actor_id"), -1) in \
+                        game.PRACTICE_SKIP_IDS:
+                    continue
+                try:
+                    _rows_a = app.g.assist(_a)
+                except KeyError:
+                    continue
+                for _r in _rows_a:
+                    if _r["lv"] != _r["max"] or not _r["on"]:
+                        _bad2.append("%s/%s=%s/%s on=%s"
+                                     % (app.sv.actor_name(_a), _r["name"],
+                                        _r["lv"], _r["max"], _r["on"]))
+            check("跳过巨小蛙，其余角色 8 项全满级且都在名单里",
+                  not _bad2, _bad2[:4])
+
         # ---------------- 保存前拦「存档已被游戏改过」--------------------
         # 川 2026-10-08：游戏里存了档、这边忘了重新载入，一保存就丢进度。
         say("过期档保存拦截…")

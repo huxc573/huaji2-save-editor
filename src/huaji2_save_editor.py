@@ -3713,9 +3713,25 @@ class App(object):
         xlrow = ttk.Frame(g2)
         xlrow.grid(row=len(save.SaveDoc.ATTR_FIELDS) // 4, column=4,
                    columnspan=4, sticky="w", padx=(10, 0))
+        # ⚠ 顺序照**游戏内**那个角色技能窗口：门派 → 辅助 → 修炼 → 经脉
+        #   （`Window_Actor_Skill#create_btns` 的 @btns[0..3]）。门派技能在这里
+        #   是下面那块勾选清单、没有按钮，所以这一行从「辅助」开始。
+        # 「辅助技能…」（2026-10-28 川）：8 项 `@sect_data[:辅助]`。
+        #   ⚠ 加成要生效还得在 `party.hash[:fuzhu]` 名单里，窗口里会自动补。
+        btn_fz = fit_btn(xlrow, text="辅助技能…",
+                         command=lambda: self.assist_dialog())
+        btn_fz.pack(side="left")
+        self._bind_tip(btn_fz,
+                       "强身术/冥想/健身/养生/狩猎/逃离/变化之术/中药医理 共 8 项，\n"
+                       "等级直接填（各自满级 40~80，见窗口里那一列）。\n"
+                       "窗口里可以切角色，还有「全员拉满」（所有角色一次拉满，\n"
+                       "跳过巨小蛙）。\n"
+                       "⚠ 加成要生效必须同时在 party.hash[:fuzhu] 名单里 ——\n"
+                       "工具在等级 >0 时会自动补进去，不用手动开。\n"
+                       "改完保存、回游戏重开即生效（加成是战斗/面板现读的）。")
         btn_xl = fit_btn(xlrow, text="修炼管理…",
                          command=lambda: self.practice_dialog())
-        btn_xl.pack(side="left")
+        btn_xl.pack(side="left", padx=(6, 0))
         self._bind_tip(btn_xl,
                        "一个窗口改这个角色的**人物修炼(A) + 召唤兽修炼(B)**，\n"
                        "等级直接填（0~25）。窗口里可以切角色。\n"
@@ -9449,6 +9465,241 @@ class App(object):
         except Exception:                            # noqa: BLE001
             return None
         return actors[i][1] if 0 <= i < len(actors) else None
+
+    # ============================================ 辅助技能（@sect_data[:辅助]）
+    def assist_dialog(self, actor=None):
+        """辅助技能管理：8 项等级 + 「全员拉满」。
+
+        按钮位置跟着**游戏内**的角色技能窗口（门派 → 辅助 → 修炼 → 经脉）。
+        数据是 `@sect_data[:辅助]`（`{键 => 整数等级}`），满级由
+        `Data_Skills` 备注的 `lv = N` 决定（游戏按 `read_note('lv')` 判）。
+
+        ⚠ **加成真正生效还要在 `party.hash[:fuzhu]` 名单里** —— 脚本里 8 处
+        生效点全是 `fuzhu.include?(k) ? 加成 : 0`，只改等级不改名单＝一点用没有
+        而且不报错。所以本窗口在等级 >0 时自动把键补进名单（末列就是这件事）。
+        """
+        tk, ttk = self.tk, self.ttk
+        if not self.g or not self.sv:
+            return
+        actors = list(self.sv.actors())
+        if not actors:
+            messagebox.showinfo("辅助技能", "这本存档里没有角色。",
+                                parent=self.root)
+            return
+        cur = actor if actor is not None else self.current_actor()
+        names = [self.sv.actor_name(a) for _i, a in actors]
+        idx0 = 0
+        for i, (_i, a) in enumerate(actors):
+            if a is cur:
+                idx0 = i
+                break
+        if cur is not None and actors[idx0][1] is not cur:
+            cn = self.sv.actor_name(cur)
+            for i, n in enumerate(names):
+                if n == cn:
+                    idx0 = i
+                    break
+
+        win = tk.Toplevel(self.root)
+        win.title("辅助技能")
+        win.transient(self.root)
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+
+        head = ttk.Frame(body)
+        head.grid(row=0, column=0, columnspan=5, sticky="we")
+        ttk.Label(head, text="角色：").pack(side="left")
+        var_who = tk.StringVar(value=names[idx0])
+        cb = ttk.Combobox(head, textvariable=var_who, values=names,
+                          state="readonly", width=14)
+        cb.pack(side="left")
+        cb.current(idx0)
+
+        ttk.Label(body, text="等级直接填，上限是各自的满级（游戏按技能备注里的 "
+                             "lv 判）。\n"
+                             "⚠ 加成要生效必须在 party.hash[:fuzhu] 名单里 —— "
+                             "等级 >0 时保存会自动补进去（见最后一列）。\n"
+                             "加成是游戏**现读**的：存盘、回游戏重开即生效。",
+                  justify="left", foreground="#888").grid(
+            row=1, column=0, columnspan=5, sticky="w", pady=(6, 4))
+
+        items = []       # [key, 名字, 等级 var, 上限 var, 状态 var, 说明 var]
+        r0 = 2
+        for i, (key, nm, _sid, _mx, desc) in enumerate(game.ASSIST_SKILLS):
+            rr = r0 + i
+            ttk.Label(body, text=nm + "：").grid(
+                row=rr, column=0, sticky="e", padx=(0, 6), pady=3)
+            var_lv = tk.StringVar()
+            ttk.Spinbox(body, from_=0, to=99, width=4, increment=1,
+                        justify="center", textvariable=var_lv).grid(
+                row=rr, column=1, sticky="w", pady=3)
+            var_mx = tk.StringVar()
+            ttk.Label(body, textvariable=var_mx, width=6,
+                      foreground="#888").grid(row=rr, column=2, sticky="w")
+            var_on = tk.StringVar()
+            ttk.Label(body, textvariable=var_on, width=16,
+                      foreground="#888").grid(row=rr, column=3, sticky="w")
+            var_desc = tk.StringVar(value=desc)
+            ttk.Label(body, textvariable=var_desc, foreground="#666").grid(
+                row=rr, column=4, sticky="w", padx=(8, 0))
+            items.append([key, nm, var_lv, var_mx, var_on, var_desc])
+
+        # 留给测试（`tests/test_gui_quick.py`）：改 items[i][2] 再点「保存」即可。
+        self._assist_win = win
+        self._assist_items = items
+        self._assist_cb = cb
+        self._assist_var_who = var_who
+        self._assist_actors = actors
+        self._assist_fill = None
+
+        def who():
+            i = cb.current()
+            return actors[i][1] if 0 <= i < len(actors) else None
+
+        def fill():
+            act = who()
+            if act is None:
+                return
+            try:
+                rows = self.g.assist(act)
+            except KeyError as exc:                  # 没开启/没数据的角色
+                for _k, _n, v_lv, v_mx, v_on, _d in items:
+                    v_lv.set("0")
+                    v_mx.set("/ --")
+                    v_on.set("无数据")
+                self.set_status(human(str(exc)))
+                return
+            for it, r in zip(items, rows):
+                it[2].set(str(r["lv"]))
+                it[3].set("/ %d" % r["max"])
+                it[4].set("已开启" if r["on"] else "未开启→保存时自动开")
+
+        self._assist_fill = fill
+        self._assist_who = who
+        cb.bind("<<ComboboxSelected>>", lambda e: fill())
+        fill()
+
+        def set_all(v):
+            """一键满级 / 全部清零（只改这一屏的输入框，还要点「保存」）。"""
+            act = who()
+            if act is None:
+                return
+            try:
+                rows = self.g.assist(act)
+            except KeyError as exc:                  # noqa: BLE001
+                self.set_status(human(str(exc)))
+                return
+            for it, r in zip(items, rows):
+                it[2].set(str(r["max"] if v is None else v))
+
+        def go():
+            act = who()
+            if act is None:
+                return
+            vals = []
+            for key, nm, v_lv, _mx, _on, _d in items:
+                try:
+                    lv = int(str(v_lv.get()).strip() or 0)
+                except ValueError:
+                    messagebox.showerror(
+                        "辅助技能", "「%s」的等级要填整数。" % nm, parent=win)
+                    return
+                vals.append((key, nm, max(0, lv)))
+            try:
+                for key, _nm, lv in vals:
+                    self.g.assist_set(act, key, lv)
+            except KeyError as exc:                  # noqa: BLE001
+                messagebox.showerror("辅助技能", human(str(exc)), parent=win)
+                return
+            win.destroy()
+            self.mark_dirty()
+            caps = dict((r["key"], r["max"]) for r in self.g.assist(act))
+            full = [nm for k, nm, lv in vals if lv >= caps.get(k, 99)]
+            self.set_status("%s：已写 8 项辅助技能%s（加成要生效需保存）" % (
+                self.sv.actor_name(act),
+                "，其中 %d 项满级" % len(full) if full else ""))
+
+        bar = ttk.Frame(body)
+        bar.grid(row=r0 + len(game.ASSIST_SKILLS), column=0, columnspan=5,
+                 sticky="we", pady=(14, 0))
+        fit_btn(bar, text="一键满级",
+                command=lambda: set_all(None)).pack(side="left")
+        fit_btn(bar, text="全部清零",
+                command=lambda: set_all(0)).pack(side="left", padx=(6, 0))
+        btn_all = fit_btn(bar, text="全员拉满",
+                          command=lambda: self.assist_max_all(parent=win))
+        btn_all.pack(side="left", padx=(6, 0))
+        self._bind_tip(btn_all,
+                       "**所有角色**（不只上面下拉这个）的 8 项辅助技能，\n"
+                       "每人按自己的满级拉满，并全部补进 hash[:fuzhu] 名单。\n"
+                       "· 跳过「巨小蛙」（剧情角色）。\n"
+                       "· 它直接写进存档对象（会刷新这一屏），\n"
+                       "  但还要点「保存修改」(Ctrl+S) 才落到文件。")
+        fit_btn(bar, text="保存", command=go).pack(side="right")
+        fit_btn(bar, text="取消", command=win.destroy).pack(
+            side="right", padx=(0, 6))
+        center_win(win, self.root)
+        esc_close(win)
+
+    def assist_max_all(self, parent=None):
+        """「全员拉满」：所有角色（跳过巨小蛙）的 8 项辅助技能拉到满级。
+
+        和修炼那边一样按 `@actor_id` 跳过、按契约改存档对象；落盘还要 Ctrl+S。
+        """
+        if not self.g or not self.sv:
+            return
+        parent = parent or self.root
+        try:
+            caps = self.g.assist_caps()
+        except Exception:                            # noqa: BLE001
+            caps = {}
+        rows = []
+        try:
+            skip_ids = tuple(game.PRACTICE_SKIP_IDS)
+            for _i, a in self.sv.actors():
+                nm = self.sv.actor_name(a)
+                if game.get_int(game.ivar(a, "@actor_id"), -1) in skip_ids:
+                    continue
+                try:
+                    self.g._assist_hash(a)
+                except KeyError:
+                    continue
+                rows.append(nm)
+        except Exception:                            # noqa: BLE001
+            rows = []
+        if not rows:
+            messagebox.showinfo("全员拉满", "这本存档里没有可改的角色。",
+                                parent=parent)
+            return
+        detail = "、".join("%s %d" % (s[1], caps.get(s[0], s[3]))
+                          for s in game.ASSIST_SKILLS)
+        text = ("把下列角色（%d 人）的 8 项辅助技能全部拉到满级，\n"
+                "并把 8 项都补进 party.hash[:fuzhu] 名单（不补游戏里不生效）：\n\n"
+                "· 满级：%s\n"
+                "· 跳过「巨小蛙」（剧情角色）；\n"
+                "· 改完还要点「保存修改」(Ctrl+S) 才写进存档。\n\n"
+                "角色：%s\n\n确定吗？" % (len(rows), detail, "、".join(rows)))
+        self._assist_all_text = text            # 留给测试断言文案
+        if not self.confirm("全员拉满", text, parent=parent):
+            return
+        try:
+            n_a, n_i, skipped = self.g.assist_set_everyone()
+        except Exception as exc:                     # noqa: BLE001
+            messagebox.showerror("全员拉满", human(str(exc)), parent=parent)
+            return
+        self.mark_dirty()
+        try:
+            if self._assist_fill:
+                self._assist_fill()
+        except Exception:                            # noqa: BLE001
+            pass
+        note = ("；跳过 %s" % "、".join(skipped)) if skipped else ""
+        self.set_status("辅助技能全员拉满：%d 个角色 / %d 项%s" % (n_a, n_i, note))
+        messagebox.showinfo(
+            "全员拉满",
+            "已写 %d 个角色 / %d 项辅助技能，8 项都已进 [:fuzhu] 名单%s。\n\n"
+            "记得点「保存修改」(Ctrl+S) 才写进存档。"
+            % (n_a, n_i, note), parent=parent)
 
     def practice_dialog(self, actor=None):
         """修炼管理：人物 A 组 + 召唤兽 B 组，一个窗口全给。

@@ -172,6 +172,32 @@ PRACTICE_LV_BELOW_90 = 20
 #  主力（89 级）不是一路，拉满会把它顶到 25 级。按 id 判才不怕改名/重名。
 PRACTICE_SKIP_IDS = (6,)
 
+# --------------------------------------------------------------------------
+# 辅助技能（`@sect_data[:辅助]`，8 项）
+# --------------------------------------------------------------------------
+# 游戏里在 `Window_Actor_Skill` 的第 2 个页签（按钮顺序：门派 → 辅助 → 修炼 → 经脉）。
+# 数据结构＝`Hash{ :FZ_xxx => 整数等级 }`，键就是脚本里的 `:FZ_xxx`。
+#
+# ⚠⚠ **加成要生效，还必须 `$game_party.hash[:fuzhu].include?(:FZ_xxx)`**：
+#   脚本里 8 处生效点全是 `fuzhu.include?(k) ? 加成 : 0`（Game_Battler#passive_mhp
+#   / passive_mmp、体力/活力上限、捕捉率、逃跑率、变身时长、炼药成功率）——
+#   光把等级改上去、没进「已开启」名单，游戏里**一点变化都没有**，而且不报错。
+#   所以 `assist_set()` 在 `lv > 0` 时会顺手把键补进 `fuzhu`。
+#
+# 每项＝(键, 显示名, 技能 id, 满级, 加成说明)；满级取自
+# `Data_Skills[313..320]` 备注里的 `lv = N`（游戏按 `read_note('lv')` 判满级），
+# 运行时 `assist_caps()` 会优先读表、读不到才用这里的常量。
+ASSIST_SKILLS = (
+    ("FZ_强身术", "强身术", 313, 80, "气血上限 +1%/级（满级 +80%）"),
+    ("FZ_冥想", "冥想", 314, 80, "法力上限 +1%/级（满级 +80%）"),
+    ("FZ_健身", "健身", 315, 60, "体力上限 +15/级（满级 +900）"),
+    ("FZ_养生", "养生", 316, 60, "活力上限 +15/级（满级 +900）"),
+    ("FZ_狩猎", "狩猎", 317, 40, "捕捉成功率 +0.5%/级（满级 +20%）"),
+    ("FZ_逃离", "逃离", 318, 40, "逃跑率 +1%/级（满级 +40%，总上限 75%）"),
+    ("FZ_变化之术", "变化之术", 319, 80, "变身时长 +1.25%/级（满级 +100%）"),
+    ("FZ_中药医理", "中药医理", 320, 60, "炼 3 级药成功率 +0.5%/级（满级 +30%）"),
+)
+
 
 # --------------------------------------------------------------------------
 # 节点小工具
@@ -2529,6 +2555,151 @@ class GameEditor(object):
                 continue
             n_item += len(keys)
             n_actor += 1
+        return n_actor, n_item, skipped
+
+    # ============================================ 辅助技能（@sect_data[:辅助]）
+    # 8 项、值是**裸整数等级**（不像修炼那样带 exp）。机制与生效条件见
+    # `ASSIST_SKILLS` 上面那段注释。改等级本身是标量补丁；补 `fuzhu` 名单
+    # 要往数组里加节点 ⇒ 必须 `mark_structural()`。
+    def _assist_hash(self, actor):
+        """`@sect_data[:辅助]` 那个 HashNode（8 项 `{键 => 等级}`）。
+
+        缺了就抛 KeyError，不现场造结构 —— 造半截 Hash 会让游戏的
+        `sect_data[:辅助].keys[@index]` 取到 nil 直接崩。
+        """
+        sd = _deref(ivar(actor, "@sect_data"))
+        if not isinstance(sd, M.HashNode):
+            raise KeyError("这个角色没有 @sect_data（门派/辅助数据）")
+        for k, v in sd.pairs:
+            if M.value_of(_deref(k)) == "辅助":
+                h = _deref(v)
+                if isinstance(h, M.HashNode):
+                    return h
+                raise KeyError(":辅助 不是 Hash（存档结构异常）")
+        raise KeyError("这个角色还没有 :辅助 数据（游戏里没开启辅助技能？）")
+
+    def assist_caps(self):
+        """`{键: 满级}` —— 优先读 `Data_Skills` 备注的 `lv = N`（游戏就这么判），
+        读不到（Data 解不开 / 改版）就退回 `ASSIST_SKILLS` 里的常量。"""
+        caps = dict((k, mx) for k, _n, _sid, mx, _d in ASSIST_SKILLS)
+        try:
+            import datatables
+            want = dict((sid, k) for k, _n, sid, _mx, _d in ASSIST_SKILLS)
+            for i, node in datatables.load("Skills")[1]:
+                k = want.get(i)
+                if not k:
+                    continue
+                v = datatables.note_val(datatables.s(node, "@note"), "lv")
+                if isinstance(v, int) and v > 0:
+                    caps[k] = v
+        except Exception:
+            pass
+        return caps
+
+    def assist_on(self):
+        """已开启的辅助技能键（`$game_party.hash[:fuzhu]`，数组里存的是符号）。"""
+        node = _deref(hash_get(self._hash(), "fuzhu"))
+        out = set()
+        if isinstance(node, M.ArrayNode):
+            for it in node.items:
+                v = M.value_of(_deref(it))
+                if isinstance(v, str):
+                    out.add(v)
+        return out
+
+    def assist(self, actor):
+        """读一个角色的 8 项辅助技能（顺序＝`ASSIST_SKILLS`）。
+
+        每项：`{key, name, skill_id, lv, max, on, desc}`；`on` = 在不在
+        `hash[:fuzhu]` 里 —— **不在就等于没开启，游戏里加成不生效**。
+        """
+        h = self._assist_hash(actor)
+        caps = self.assist_caps()
+        on = self.assist_on()
+        cur = {}
+        for k, v in h.pairs:
+            cur[M.value_of(_deref(k))] = get_int(v, 0)
+        out = []
+        for key, name, sid, mx, desc in ASSIST_SKILLS:
+            out.append({"key": key, "name": name, "skill_id": sid,
+                        "lv": cur.get(key, 0), "max": caps.get(key, mx),
+                        "on": key in on, "desc": desc})
+        return out
+
+    def assist_set(self, actor, key, lv, enable=True):
+        """写一项辅助技能等级，返回实际写入值。
+
+        * `lv` 夹到 `0..满级`（满级取 `assist_caps()`）；
+        * `enable=True` 且 `lv > 0` ⇒ 顺手把键补进 `hash[:fuzhu]`
+          （不补的话游戏 `include?` 为 false，等级白写，见模块里的警告）；
+        * 只动一个 IntNode；补名单要新增节点 ⇒ `mark_structural()`。
+        """
+        h = self._assist_hash(actor)
+        caps = self.assist_caps()
+        node = None
+        for k, v in h.pairs:
+            if M.value_of(_deref(k)) == key:
+                node = _deref(v)
+                break
+        if not isinstance(node, M.IntNode):
+            raise KeyError("存档里没有辅助技能 %s" % key)
+        out = max(0, min(int(lv), caps.get(key, 999)))
+        self.doc.set_value(node, out)
+        if enable and out > 0:
+            self.assist_enable(key)
+        return out
+
+    def assist_enable(self, key):
+        """把键补进 `hash[:fuzhu]`（已在就不动），返回是否新加。"""
+        arr = _deref(hash_get(self._hash(), "fuzhu"))
+        if not isinstance(arr, M.ArrayNode):
+            raise KeyError("存档里没有 party.hash[:fuzhu]")
+        for it in arr.items:
+            if M.value_of(_deref(it)) == key:
+                return False
+        arr.items.append(self._sym(key))
+        self.doc.mark_structural()
+        return True
+
+    def assist_enable_all(self):
+        """8 项全补进 `hash[:fuzhu]`，返回新加了几项。"""
+        n = 0
+        for key, _n, _sid, _mx, _d in ASSIST_SKILLS:
+            try:
+                if self.assist_enable(key):
+                    n += 1
+            except KeyError:
+                break
+        return n
+
+    def assist_set_everyone(self, level=None, skip_ids=PRACTICE_SKIP_IDS):
+        """**所有角色**的 8 项辅助技能一起拉满（「全员拉满」）。
+
+        `level=None` = 各自满级；`skip_ids` 里的角色整人跳过（默认巨小蛙，
+        按 `@actor_id` 判）。没有 `:辅助` 数据的角色跳过不报错，名字进 `skipped`。
+        拉完统一 `assist_enable_all()` —— 全员都开，游戏里才真的都吃加成。
+
+        返回 `(改了几人, 改了几项, 跳过的人名列表)`。
+        """
+        caps = self.assist_caps()
+        skip_ids = tuple(skip_ids or ())
+        skipped, n_actor, n_item = [], 0, 0
+        for _aid, actor in self.sv.actors():
+            if get_int(ivar(actor, "@actor_id"), -1) in skip_ids:
+                skipped.append(self.sv.actor_name(actor))
+                continue
+            try:
+                for key, _n, _sid, mx, _d in ASSIST_SKILLS:
+                    self.assist_set(
+                        actor, key,
+                        caps.get(key, mx) if level is None else level,
+                        enable=False)
+            except KeyError:
+                skipped.append(self.sv.actor_name(actor))
+                continue
+            n_item += len(ASSIST_SKILLS)
+            n_actor += 1
+        self.assist_enable_all()
         return n_actor, n_item, skipped
 
     # ==================================================== 角色技能（@skills）
